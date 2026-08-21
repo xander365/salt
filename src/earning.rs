@@ -1,11 +1,13 @@
 //! `Earning`: one classified line of money owed for the period.
 
+use serde::{Deserialize, Serialize};
+
 use crate::money::Money;
 
 /// One classified line of money owed to the employee for the period.
 /// Classification, not description, decides tax treatment: there is no
 /// separate `taxable: bool` flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Earning {
     /// The contractual base amount for the period. The base for social
     /// security contributions.

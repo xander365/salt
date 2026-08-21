@@ -2,6 +2,7 @@
 //! generation from it. See ADR-0005.
 
 use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 
 use crate::pay_period::PayPeriod;
 
@@ -9,12 +10,21 @@ use crate::pay_period::PayPeriod;
 /// only way to obtain a value that can go into `PeriodEndDay::Day` — the
 /// field is private, so 29, 30, and 31 are not representable, not merely
 /// rejected at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub struct DayOfMonth(u8);
 
 /// Why a `DayOfMonth` could not be constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidDayOfMonth(pub u8);
+
+impl std::fmt::Display for InvalidDayOfMonth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is not a day of month in 1..=28", self.0)
+    }
+}
+
+impl std::error::Error for InvalidDayOfMonth {}
 
 impl DayOfMonth {
     pub fn new(day: u8) -> Result<Self, InvalidDayOfMonth> {
@@ -30,8 +40,70 @@ impl DayOfMonth {
     }
 }
 
+impl TryFrom<u8> for DayOfMonth {
+    type Error = InvalidDayOfMonth;
+
+    fn try_from(day: u8) -> Result<Self, InvalidDayOfMonth> {
+        DayOfMonth::new(day)
+    }
+}
+
+impl From<DayOfMonth> for u8 {
+    fn from(day: DayOfMonth) -> u8 {
+        day.0
+    }
+}
+
+/// A validated calendar month, 1 (January) to 12 (December). Unlike
+/// `DayOfMonth`, this is not a payroll concept of its own — it exists so
+/// `PaySchedule::generate_periods` cannot be called with an out-of-range
+/// month and reach an internal panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct Month(u8);
+
+/// Why a `Month` could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidMonth(pub u8);
+
+impl std::fmt::Display for InvalidMonth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is not a month in 1..=12", self.0)
+    }
+}
+
+impl std::error::Error for InvalidMonth {}
+
+impl Month {
+    pub fn new(month: u8) -> Result<Self, InvalidMonth> {
+        if (1..=12).contains(&month) {
+            Ok(Month(month))
+        } else {
+            Err(InvalidMonth(month))
+        }
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for Month {
+    type Error = InvalidMonth;
+
+    fn try_from(month: u8) -> Result<Self, InvalidMonth> {
+        Month::new(month)
+    }
+}
+
+impl From<Month> for u8 {
+    fn from(month: Month) -> u8 {
+        month.0
+    }
+}
+
 /// The day of the month a pay period ends on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PeriodEndDay {
     /// A fixed day, 1 to 28. E.g. a 26th-to-25th cycle ends on `Day(25)`.
     Day(DayOfMonth),
@@ -42,7 +114,7 @@ pub enum PeriodEndDay {
 }
 
 /// How an Employer's pay cycle works. v1 is monthly only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaySchedule {
     period_end_day: PeriodEndDay,
 }
@@ -72,9 +144,9 @@ impl PaySchedule {
     /// sequence has no gaps and no overlaps regardless of month length,
     /// and `Day` and `LastDayOfMonth` schedules run through this same code
     /// path.
-    pub fn generate_periods(self, from_year: i32, from_month: u32, count: u32) -> Vec<PayPeriod> {
-        let (mut year, mut month) = (from_year, from_month);
-        let (prev_year, prev_month) = previous_month(from_year, from_month);
+    pub fn generate_periods(self, from_year: i32, from_month: Month, count: u32) -> Vec<PayPeriod> {
+        let (mut year, mut month) = (from_year, from_month.get() as u32);
+        let (prev_year, prev_month) = previous_month(from_year, from_month.get() as u32);
         let mut previous_end = self.end_date(prev_year, prev_month);
 
         let mut periods = Vec::with_capacity(count as usize);
@@ -128,6 +200,10 @@ mod tests {
         DayOfMonth::new(n).unwrap()
     }
 
+    fn month(n: u8) -> Month {
+        Month::new(n).unwrap()
+    }
+
     #[test]
     fn day_of_month_accepts_1_to_28() {
         assert!(DayOfMonth::new(1).is_ok());
@@ -143,9 +219,21 @@ mod tests {
     }
 
     #[test]
+    fn month_accepts_1_to_12() {
+        assert!(Month::new(1).is_ok());
+        assert!(Month::new(12).is_ok());
+    }
+
+    #[test]
+    fn month_rejects_0_and_13() {
+        assert_eq!(Month::new(0), Err(InvalidMonth(0)));
+        assert_eq!(Month::new(13), Err(InvalidMonth(13)));
+    }
+
+    #[test]
     fn a_26th_to_25th_schedule_across_a_full_year_has_no_gaps_or_overlaps() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
-        let periods = schedule.generate_periods(2026, 1, 12);
+        let periods = schedule.generate_periods(2026, month(1), 12);
 
         assert_eq!(periods.len(), 12);
         assert_eq!(periods[0].start(), date(2025, 12, 26));
@@ -178,7 +266,7 @@ mod tests {
     fn a_26th_to_25th_schedule_survives_a_leap_year() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
         // 2028 is a leap year: February has 29 days.
-        let periods = schedule.generate_periods(2028, 1, 12);
+        let periods = schedule.generate_periods(2028, month(1), 12);
 
         let feb_period = periods
             .iter()
@@ -204,7 +292,7 @@ mod tests {
     #[test]
     fn a_calendar_month_schedule_runs_through_the_same_code_path() {
         let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
-        let periods = schedule.generate_periods(2026, 1, 12);
+        let periods = schedule.generate_periods(2026, month(1), 12);
 
         assert_eq!(periods.len(), 12);
         assert_eq!(periods[0].start(), date(2026, 1, 1));
@@ -222,7 +310,7 @@ mod tests {
     #[test]
     fn a_calendar_month_schedule_survives_a_leap_year_february() {
         let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
-        let periods = schedule.generate_periods(2028, 1, 12);
+        let periods = schedule.generate_periods(2028, month(1), 12);
 
         let feb_period = periods
             .iter()
@@ -234,12 +322,22 @@ mod tests {
     #[test]
     fn generation_crosses_a_year_boundary_without_a_gap() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
-        let periods = schedule.generate_periods(2026, 12, 3);
+        let periods = schedule.generate_periods(2026, month(12), 3);
 
         assert_eq!(periods[0].end(), date(2026, 12, 25));
         assert_eq!(periods[1].start(), date(2026, 12, 26));
         assert_eq!(periods[1].end(), date(2027, 1, 25));
         assert_eq!(periods[2].start(), date(2027, 1, 26));
         assert_eq!(periods[2].end(), date(2027, 2, 25));
+    }
+
+    #[test]
+    fn day_of_month_deserialize_rejects_out_of_range() {
+        assert!(serde_json::from_str::<DayOfMonth>("29").is_err());
+    }
+
+    #[test]
+    fn month_deserialize_rejects_out_of_range() {
+        assert!(serde_json::from_str::<Month>("13").is_err());
     }
 }

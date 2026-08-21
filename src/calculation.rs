@@ -7,23 +7,29 @@
 //! verified only through the values `calculate` returns.
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 use crate::deduction::{Deduction, StatutoryDeduction};
 use crate::earning::Earning;
 use crate::employment::EmploymentSnapshot;
 use crate::money::Money;
 use crate::pay_period::PayPeriod;
-use crate::rules::PayrollRules;
+use crate::rules::{BandContribution, PayrollRules, SscClamp};
 use crate::year_to_date::YearToDateContext;
 
 /// The complete, self-contained set of facts one calculation needs. If it
 /// is not in the `PayrollInput`, the calculator cannot see it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayrollInput {
     employment: EmploymentSnapshot,
     period: PayPeriod,
-    /// Earning lines beyond `BasicPay` — allowances. `calculate` adds the
-    /// `BasicPay` line itself from the Employment's `CompensationTerms`.
+    /// Earning lines beyond `BasicPay` — allowances. This ticket supports
+    /// an ordinary full-period employee earning `BasicPay` alone, so
+    /// `calculate` refuses any non-empty list rather than calculating a
+    /// plausible but wrong result; allowance handling arrives with a later
+    /// ticket. `calculate` adds the `BasicPay` line itself from the
+    /// Employment's `CompensationTerms` — a caller cannot supply a second
+    /// one here.
     earnings: Vec<Earning>,
     year_to_date: YearToDateContext,
 }
@@ -54,49 +60,108 @@ pub enum PayrollError {
     CompensationTermsDoNotCoverPeriod,
     /// The Employment's end date is before its start date.
     ContradictoryEmploymentDates,
+    /// The Employment starts or ends inside the `PayPeriod` (a joiner or
+    /// leaver). Proration is a later ticket; until it exists such a period
+    /// is refused rather than paid in full or guessed at.
+    EmploymentDoesNotCoverFullPeriod,
+    /// `PayrollInput.earnings` was non-empty. This ticket supports
+    /// `BasicPay` alone: allowances are a later ticket, and a caller
+    /// cannot supply a second `BasicPay` line here either.
+    UnsupportedEarning,
+    /// Recalculating cumulative PAYE against the corrected year-to-date
+    /// figures produced a liability lower than what the context says was
+    /// already withheld. Refund handling is not modeled anywhere in this
+    /// domain yet, so this is refused rather than silently clamped to zero
+    /// or turned into a negative deduction (INV-012).
+    PriorPayeExceedsRecalculatedLiability,
+    /// PAYE plus employee social security exceeded gross remuneration.
+    DeductionsExceedGrossRemuneration,
+    /// A monetary amount overflowed `i64` cents during calculation.
+    AmountOverflow,
 }
+
+impl std::fmt::Display for PayrollError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PayrollError::CompensationTermsDoNotCoverPeriod => {
+                write!(f, "compensation terms do not cover the pay period")
+            }
+            PayrollError::ContradictoryEmploymentDates => {
+                write!(f, "employment end date is before its start date")
+            }
+            PayrollError::EmploymentDoesNotCoverFullPeriod => {
+                write!(f, "employment does not cover the full pay period")
+            }
+            PayrollError::UnsupportedEarning => {
+                write!(
+                    f,
+                    "unsupported earning: only BasicPay is calculated by this ticket"
+                )
+            }
+            PayrollError::PriorPayeExceedsRecalculatedLiability => {
+                write!(f, "prior PAYE exceeds recalculated year-to-date liability")
+            }
+            PayrollError::DeductionsExceedGrossRemuneration => {
+                write!(f, "deductions exceed gross remuneration")
+            }
+            PayrollError::AmountOverflow => write!(f, "a monetary amount overflowed"),
+        }
+    }
+}
+
+impl std::error::Error for PayrollError {}
+
+/// A condition Salt flags without blocking calculation. This ticket
+/// produces none; `warnings` is always empty until a later ticket
+/// introduces the first variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Warning {}
 
 /// The year-to-date figures PAYE was derived from, for explainability. No
 /// free-text formula strings — structured data only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayeTrace {
     pub prior_taxable_remuneration: Money,
     pub prior_paye: Money,
     pub this_period_taxable_remuneration: Money,
     pub year_to_date_taxable_remuneration: Money,
     /// The exact, unrounded tax owed on `year_to_date_taxable_remuneration`
-    /// under the annual bands. Intermediate arithmetic is never rounded, so
-    /// unlike every `Money` figure here this one is not cents-exact.
+    /// under the period-scaled annual bands. Intermediate arithmetic is
+    /// never rounded, so unlike every `Money` figure here this one is not
+    /// cents-exact.
     pub year_to_date_tax_owed: Decimal,
+    /// Which PAYE bands were crossed and how much each contributed.
+    pub bands_applied: Vec<BandContribution>,
     pub periods_elapsed: u32,
 }
 
 /// The base, rate, and any floor or ceiling applied to one social security
 /// figure, for explainability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SscTrace {
     pub basic_pay: Money,
     /// `basic_pay` clamped to `floor`/`ceiling` — the actual base charged.
     pub base: Money,
+    pub clamp: SscClamp,
     pub rate: Decimal,
     pub floor: Money,
     pub ceiling: Money,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayeResult {
     pub amount: Money,
     pub trace: PayeTrace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SscResult {
     pub amount: Money,
     pub trace: SscTrace,
 }
 
 /// The result of calculating one Employment for one PayPeriod.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayrollCalculation {
     pub earning_lines: Vec<Earning>,
     pub gross_remuneration: Money,
@@ -110,6 +175,7 @@ pub struct PayrollCalculation {
     /// `gross_remuneration - deductions == net_pay`.
     pub deductions: Vec<Deduction>,
     pub net_pay: Money,
+    pub warnings: Vec<Warning>,
 }
 
 pub fn calculate(
@@ -119,43 +185,61 @@ pub fn calculate(
     if !input.employment.has_coherent_dates() {
         return Err(PayrollError::ContradictoryEmploymentDates);
     }
+    if !input.employment.covers_full_period(input.period) {
+        return Err(PayrollError::EmploymentDoesNotCoverFullPeriod);
+    }
 
     let terms = input.employment.compensation_terms();
     if !terms.covers(input.period) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
+    if !input.earnings.is_empty() {
+        return Err(PayrollError::UnsupportedEarning);
+    }
 
-    let mut earning_lines = vec![Earning::BasicPay(terms.basic_pay())];
-    earning_lines.extend(input.earnings.iter().copied());
+    let earning_lines = vec![Earning::BasicPay(terms.basic_pay())];
 
-    let gross_remuneration: Money = earning_lines.iter().map(|line| line.amount()).sum();
-    let taxable_remuneration: Money = earning_lines
-        .iter()
-        .filter(|line| line.is_taxable())
-        .map(|line| line.amount())
-        .sum();
+    let gross_remuneration = Money::checked_sum(earning_lines.iter().map(|line| line.amount()))
+        .map_err(|_| PayrollError::AmountOverflow)?;
+    let taxable_remuneration = Money::checked_sum(
+        earning_lines
+            .iter()
+            .filter(|line| line.is_taxable())
+            .map(|line| line.amount()),
+    )
+    .map_err(|_| PayrollError::AmountOverflow)?;
 
     let ytd = input.year_to_date;
-    let year_to_date_taxable_remuneration = ytd.prior_taxable_remuneration() + taxable_remuneration;
-    let year_to_date_tax_owed = rules.tax_owed_on(year_to_date_taxable_remuneration.as_decimal());
+    let year_to_date_taxable_remuneration = ytd
+        .prior_taxable_remuneration()
+        .checked_add(taxable_remuneration)
+        .map_err(|_| PayrollError::AmountOverflow)?;
+    let periods_elapsed_inclusive = ytd.periods_elapsed() + 1;
+    let (year_to_date_tax_owed, bands_applied) = rules.tax_owed_on(
+        year_to_date_taxable_remuneration.as_decimal(),
+        periods_elapsed_inclusive,
+    );
     let paye_unrounded = year_to_date_tax_owed - ytd.prior_paye().as_decimal();
+    if paye_unrounded.is_sign_negative() {
+        return Err(PayrollError::PriorPayeExceedsRecalculatedLiability);
+    }
     let paye_amount = rules
         .rounding_rule()
         .apply(paye_unrounded)
-        .expect("cumulative PAYE never owes less than what was already withheld");
+        .map_err(|_| PayrollError::AmountOverflow)?;
 
     let social_security = rules.social_security();
     let basic_pay = terms.basic_pay();
-    let ssc_base = social_security.base(basic_pay);
+    let (ssc_base, ssc_clamp) = social_security.base(basic_pay);
 
     let employee_ssc_amount = rules
         .rounding_rule()
         .apply(ssc_base.as_decimal() * social_security.employee_rate())
-        .expect("a non-negative base and rate never produce a negative contribution");
+        .map_err(|_| PayrollError::AmountOverflow)?;
     let employer_ssc_amount = rules
         .rounding_rule()
         .apply(ssc_base.as_decimal() * social_security.employer_rate())
-        .expect("a non-negative base and rate never produce a negative contribution");
+        .map_err(|_| PayrollError::AmountOverflow)?;
 
     let deductions = vec![
         Deduction::Statutory(StatutoryDeduction::PAYE(paye_amount)),
@@ -165,7 +249,7 @@ pub fn calculate(
     let net_pay = gross_remuneration
         .checked_sub(paye_amount)
         .and_then(|remainder| remainder.checked_sub(employee_ssc_amount))
-        .expect("statutory deductions at these rates never exceed gross remuneration");
+        .map_err(|_| PayrollError::DeductionsExceedGrossRemuneration)?;
 
     Ok(PayrollCalculation {
         earning_lines,
@@ -179,6 +263,7 @@ pub fn calculate(
                 this_period_taxable_remuneration: taxable_remuneration,
                 year_to_date_taxable_remuneration,
                 year_to_date_tax_owed,
+                bands_applied,
                 periods_elapsed: ytd.periods_elapsed(),
             },
         },
@@ -187,6 +272,7 @@ pub fn calculate(
             trace: SscTrace {
                 basic_pay,
                 base: ssc_base,
+                clamp: ssc_clamp,
                 rate: social_security.employee_rate(),
                 floor: social_security.floor(),
                 ceiling: social_security.ceiling(),
@@ -197,6 +283,7 @@ pub fn calculate(
             trace: SscTrace {
                 basic_pay,
                 base: ssc_base,
+                clamp: ssc_clamp,
                 rate: social_security.employer_rate(),
                 floor: social_security.floor(),
                 ceiling: social_security.ceiling(),
@@ -204,15 +291,16 @@ pub fn calculate(
         },
         deductions,
         net_pay,
+        warnings: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::employment::CompensationTerms;
-    use crate::pay_period::PayPeriod;
+    use crate::employment::{CompensationTerms, EmploymentId};
     use crate::rules::{PayeBand, RoundingRule, SocialSecurityRules};
+    use crate::tax_year::TaxYear;
     use chrono::NaiveDate;
     use rust_decimal_macros::dec;
 
@@ -224,33 +312,40 @@ mod tests {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
     }
 
-    /// 0-100,000: 0%, 100,000-200,000: 20%, 200,000-400,000: 30%, 400,000+: 40%.
-    /// SSC 0.9% each way, floor N$500, ceiling N$11,000 — synthetic test
-    /// figures, not a statutory table (that arrives with `ruleset_for` in
-    /// a later ticket).
+    /// Thresholds are multiples of 12 so that scaling by
+    /// periods_elapsed_inclusive/12 stays exact decimal arithmetic:
+    /// 0-120,000: 0%, 120,000-240,000: 20%, 240,000-480,000: 30%,
+    /// 480,000+: 40%. SSC 0.9% each way, floor N$500, ceiling N$11,000 —
+    /// synthetic test figures, not a statutory table (that arrives with
+    /// `ruleset_for` in a later ticket).
     fn test_rules() -> PayrollRules {
         let bands = vec![
-            PayeBand::new(money(dec!(0)), dec!(0.00)),
-            PayeBand::new(money(dec!(100000)), dec!(0.20)),
-            PayeBand::new(money(dec!(200000)), dec!(0.30)),
-            PayeBand::new(money(dec!(400000)), dec!(0.40)),
+            PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap(),
+            PayeBand::new(money(dec!(120000)), dec!(0.20)).unwrap(),
+            PayeBand::new(money(dec!(240000)), dec!(0.30)).unwrap(),
+            PayeBand::new(money(dec!(480000)), dec!(0.40)).unwrap(),
         ];
         let social_security = SocialSecurityRules::new(
             dec!(0.009),
             dec!(0.009),
             money(dec!(500)),
             money(dec!(11000)),
-        );
-        PayrollRules::new(bands, social_security, RoundingRule::HalfUpToCents)
+        )
+        .unwrap();
+        PayrollRules::new(bands, social_security, RoundingRule::HalfUpToCents).unwrap()
     }
 
     fn test_period() -> PayPeriod {
         PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
     }
 
+    fn test_tax_year() -> TaxYear {
+        TaxYear::starting(2025)
+    }
+
     fn employment_paying(basic_pay: Decimal) -> EmploymentSnapshot {
         let terms = CompensationTerms::new(date(2025, 1, 1), None, money(basic_pay));
-        EmploymentSnapshot::new(date(2025, 1, 1), None, terms)
+        EmploymentSnapshot::new(EmploymentId::new("emp-1"), date(2025, 1, 1), None, terms)
     }
 
     fn input_for(basic_pay: Decimal, ytd: YearToDateContext) -> PayrollInput {
@@ -258,14 +353,20 @@ mod tests {
     }
 
     fn ytd(prior_taxable: Decimal, prior_paye: Decimal, periods_elapsed: u32) -> YearToDateContext {
-        YearToDateContext::new(money(prior_taxable), money(prior_paye), periods_elapsed)
+        YearToDateContext::new(
+            test_tax_year(),
+            money(prior_taxable),
+            money(prior_paye),
+            periods_elapsed,
+        )
     }
 
     /// Asserted across every scenario: gross less all deductions equals net
     /// pay, and employer SSC never appears in the deduction total
     /// (INV-007).
     fn assert_invariants(calc: &PayrollCalculation) {
-        let deduction_total: Money = calc.deductions.iter().map(|d| d.amount()).sum();
+        let deduction_total =
+            Money::checked_sum(calc.deductions.iter().map(|d| d.amount())).unwrap();
         assert_eq!(
             calc.gross_remuneration
                 .checked_sub(deduction_total)
@@ -275,30 +376,37 @@ mod tests {
         );
         assert_eq!(
             deduction_total,
-            calc.paye.amount + calc.employee_social_security.amount,
+            calc.paye
+                .amount
+                .checked_add(calc.employee_social_security.amount)
+                .unwrap(),
             "employer SSC must never appear in the deduction total"
         );
     }
 
-    // PC-001: ordinary monthly salaried employee (baseline).
+    // PC-001: ordinary monthly salaried employee (baseline). Period 12 of
+    // the tax year, so the PAYE bands are unscaled.
     #[test]
     fn pc_001_ordinary_monthly_salaried_employee() {
-        let input = input_for(dec!(9000.00), ytd(dec!(99000.00), dec!(0.00), 11));
+        let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
         let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(calc.gross_remuneration, money(dec!(9000.00)));
-        assert_eq!(calc.taxable_remuneration, money(dec!(9000.00)));
-        assert_eq!(calc.paye.amount, money(dec!(1600.00)));
-        assert_eq!(calc.employee_social_security.amount, money(dec!(81.00)));
-        assert_eq!(calc.employer_social_security.amount, money(dec!(81.00)));
-        assert_eq!(calc.net_pay, money(dec!(7319.00)));
+        assert_eq!(calc.gross_remuneration, money(dec!(15000.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
+        assert_eq!(calc.paye.amount, money(dec!(1000.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.employer_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.net_pay, money(dec!(13901.00)));
         assert_invariants(&calc);
     }
 
     // PC-002: employee below the PAYE threshold — zero-PAYE path.
     #[test]
     fn pc_002_below_the_paye_threshold() {
-        let input = input_for(dec!(5000.00), YearToDateContext::first_period());
+        let input = input_for(
+            dec!(5000.00),
+            YearToDateContext::first_period(test_tax_year()),
+        );
         let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, Money::ZERO);
@@ -310,46 +418,67 @@ mod tests {
     // PC-003: employee crossing a tax bracket — progressive band logic.
     #[test]
     fn pc_003_crossing_a_tax_bracket() {
-        let input = input_for(dec!(10000.00), ytd(dec!(95000.00), dec!(0.00), 3));
+        let input = input_for(dec!(15000.00), ytd(dec!(19000.00), dec!(0.00), 2));
         let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(calc.paye.amount, money(dec!(1000.00)));
-        assert_eq!(calc.employee_social_security.amount, money(dec!(90.00)));
-        assert_eq!(calc.net_pay, money(dec!(8910.00)));
+        assert_eq!(calc.paye.amount, money(dec!(800.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.net_pay, money(dec!(14101.00)));
+
+        // Period 3's bands are scaled to 3/12 of their annual thresholds:
+        // the (zero-tax) first band up to 30,000, then the second band's
+        // 20% picks up the remaining 4,000 of the 34,000 year-to-date
+        // taxable amount.
+        let bands = &calc.paye.trace.bands_applied;
+        assert_eq!(bands.len(), 2);
+        assert_eq!(bands[0].threshold, dec!(0));
+        assert_eq!(bands[0].tax, dec!(0));
+        assert_eq!(bands[1].threshold, dec!(30000));
+        assert_eq!(bands[1].rate, dec!(0.20));
+        assert_eq!(bands[1].tax, dec!(800.00));
+
         assert_invariants(&calc);
     }
 
     // PC-004: employee crossing multiple brackets — higher-range logic.
     #[test]
     fn pc_004_crossing_multiple_brackets() {
-        let input = input_for(dec!(250000.00), ytd(dec!(180000.00), dec!(16000.00), 8));
+        let input = input_for(dec!(180000.00), ytd(dec!(150000.00), dec!(25000.00), 5));
         let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(calc.paye.amount, money(dec!(76000.00)));
+        assert_eq!(calc.paye.amount, money(dec!(59000.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
-        assert_eq!(calc.net_pay, money(dec!(173901.00)));
+        assert_eq!(calc.net_pay, money(dec!(120901.00)));
         assert_invariants(&calc);
     }
 
     // PC-009: BasicPay above the SSC ceiling — ceiling clamp.
     #[test]
     fn pc_009_above_the_ssc_ceiling() {
-        let input = input_for(dec!(20000.00), YearToDateContext::first_period());
+        let input = input_for(
+            dec!(20000.00),
+            YearToDateContext::first_period(test_tax_year()),
+        );
         let calc = calculate(&input, &test_rules()).unwrap();
 
+        assert_eq!(calc.paye.amount, money(dec!(2000.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
         assert_eq!(
             calc.employee_social_security.trace.base,
             money(dec!(11000.00))
         );
-        assert_eq!(calc.net_pay, money(dec!(19901.00)));
+        assert_eq!(calc.employee_social_security.trace.clamp, SscClamp::Ceiling);
+        assert_eq!(calc.net_pay, money(dec!(17901.00)));
         assert_invariants(&calc);
     }
 
     // PC-010: BasicPay below the SSC floor — floor clamp.
     #[test]
     fn pc_010_below_the_ssc_floor() {
-        let input = input_for(dec!(300.00), YearToDateContext::first_period());
+        let input = input_for(
+            dec!(300.00),
+            YearToDateContext::first_period(test_tax_year()),
+        );
         let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.employee_social_security.amount, money(dec!(4.50)));
@@ -357,6 +486,7 @@ mod tests {
             calc.employee_social_security.trace.base,
             money(dec!(500.00))
         );
+        assert_eq!(calc.employee_social_security.trace.clamp, SscClamp::Floor);
         assert_eq!(calc.net_pay, money(dec!(295.50)));
         assert_invariants(&calc);
     }
@@ -365,22 +495,22 @@ mod tests {
     // from prior totals entered at adoption, not accumulated by Salt.
     #[test]
     fn pc_011_mid_year_adoption_with_opening_balance() {
-        let input = input_for(dec!(50000.00), ytd(dec!(250000.00), dec!(35000.00), 5));
+        let input = input_for(dec!(100000.00), ytd(dec!(200000.00), dec!(32000.00), 7));
         let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(calc.paye.amount, money(dec!(15000.00)));
-        assert_eq!(calc.net_pay, money(dec!(34901.00)));
+        assert_eq!(calc.paye.amount, money(dec!(26000.00)));
+        assert_eq!(calc.net_pay, money(dec!(73901.00)));
         assert_invariants(&calc);
     }
 
     // PC-012: second period of a tax year — PAYE net of prior withholding.
     #[test]
     fn pc_012_second_period_of_a_tax_year() {
-        let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(2000.00), 1));
+        let input = input_for(dec!(20000.00), ytd(dec!(15000.00), dec!(1000.00), 1));
         let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(calc.paye.amount, money(dec!(3000.00)));
-        assert_eq!(calc.net_pay, money(dec!(11901.00)));
+        assert_eq!(calc.paye.amount, money(dec!(2000.00)));
+        assert_eq!(calc.net_pay, money(dec!(17901.00)));
         assert_invariants(&calc);
     }
 
@@ -390,23 +520,28 @@ mod tests {
     // as normal (ADR-0002).
     #[test]
     fn pc_015_corrected_earlier_period_absorbed_forward() {
-        let input = input_for(dec!(12000.00), ytd(dec!(108000.00), dec!(1600.00), 3));
+        let input = input_for(dec!(25000.00), ytd(dec!(45000.00), dec!(3000.00), 3));
         let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(calc.paye.amount, money(dec!(2400.00)));
-        assert_eq!(calc.net_pay, money(dec!(9501.00)));
+        assert_eq!(calc.paye.amount, money(dec!(3000.00)));
+        assert_eq!(calc.net_pay, money(dec!(21901.00)));
         assert_invariants(&calc);
     }
 
     #[test]
     fn refuses_contradictory_employment_dates() {
         let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00)));
-        let employment = EmploymentSnapshot::new(date(2026, 3, 1), Some(date(2026, 1, 1)), terms);
+        let employment = EmploymentSnapshot::new(
+            EmploymentId::new("emp-1"),
+            date(2026, 3, 1),
+            Some(date(2026, 1, 1)),
+            terms,
+        );
         let input = PayrollInput::new(
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(),
+            YearToDateContext::first_period(test_tax_year()),
         );
 
         assert_eq!(
@@ -419,17 +554,165 @@ mod tests {
     fn refuses_compensation_terms_that_do_not_cover_the_period() {
         // Effective only from after the period starts.
         let terms = CompensationTerms::new(date(2026, 2, 1), None, money(dec!(5000.00)));
-        let employment = EmploymentSnapshot::new(date(2025, 1, 1), None, terms);
+        let employment =
+            EmploymentSnapshot::new(EmploymentId::new("emp-1"), date(2025, 1, 1), None, terms);
         let input = PayrollInput::new(
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(),
+            YearToDateContext::first_period(test_tax_year()),
         );
 
         assert_eq!(
             calculate(&input, &test_rules()),
             Err(PayrollError::CompensationTermsDoNotCoverPeriod)
+        );
+    }
+
+    #[test]
+    fn refuses_a_joiner_starting_mid_period() {
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00)));
+        // The period runs 2026-01-26 to 2026-02-25; this Employment starts
+        // in the middle of it.
+        let employment =
+            EmploymentSnapshot::new(EmploymentId::new("emp-1"), date(2026, 2, 10), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::EmploymentDoesNotCoverFullPeriod)
+        );
+    }
+
+    #[test]
+    fn refuses_a_leaver_ending_mid_period() {
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00)));
+        let employment = EmploymentSnapshot::new(
+            EmploymentId::new("emp-1"),
+            date(2025, 1, 1),
+            Some(date(2026, 2, 10)),
+            terms,
+        );
+        let input = PayrollInput::new(
+            employment,
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::EmploymentDoesNotCoverFullPeriod)
+        );
+    }
+
+    #[test]
+    fn refuses_a_taxable_allowance() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(5000.00)),
+            test_period(),
+            vec![Earning::TaxableAllowance(money(dec!(500.00)))],
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedEarning)
+        );
+    }
+
+    #[test]
+    fn refuses_a_non_taxable_allowance() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(5000.00)),
+            test_period(),
+            vec![Earning::NonTaxableAllowance(money(dec!(500.00)))],
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedEarning)
+        );
+    }
+
+    #[test]
+    fn refuses_a_duplicate_basic_pay_line() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(5000.00)),
+            test_period(),
+            vec![Earning::BasicPay(money(dec!(5000.00)))],
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedEarning)
+        );
+    }
+
+    #[test]
+    fn refuses_when_prior_paye_exceeds_recalculated_liability() {
+        // A prior_paye figure inconsistent with any valid history: more tax
+        // was supposedly already withheld than the recalculated
+        // year-to-date liability can justify.
+        let input = input_for(dec!(1000.00), ytd(dec!(1000.00), dec!(999999.00), 0));
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PriorPayeExceedsRecalculatedLiability)
+        );
+    }
+
+    #[test]
+    fn refuses_when_deductions_would_exceed_gross_remuneration() {
+        let bands = vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()];
+        // A deliberately pathological 200% employee rate to exercise the
+        // refusal path; real rates are validated elsewhere to stay sane.
+        let social_security =
+            SocialSecurityRules::new(dec!(2.00), dec!(0.009), money(dec!(0)), money(dec!(11000)))
+                .unwrap();
+        let rules = PayrollRules::new(bands, social_security, RoundingRule::HalfUpToCents).unwrap();
+        let input = input_for(
+            dec!(5000.00),
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &rules),
+            Err(PayrollError::DeductionsExceedGrossRemuneration)
+        );
+    }
+
+    #[test]
+    fn deserialize_round_trips() {
+        let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        let input_json = serde_json::to_string(&input).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PayrollInput>(&input_json)
+                .unwrap()
+                .earnings
+                .len(),
+            input.earnings.len()
+        );
+
+        let calc_json = serde_json::to_string(&calc).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PayrollCalculation>(&calc_json).unwrap(),
+            calc
+        );
+
+        let rules_json = serde_json::to_string(&test_rules()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PayrollRules>(&rules_json).unwrap(),
+            test_rules()
         );
     }
 }
