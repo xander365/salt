@@ -194,8 +194,108 @@ mod tests {
     }
 
     #[test]
-    fn no_two_known_rulesets_overlap() {
-        assert!(ruleset_for(date(2025, 3, 1)).is_ok());
-        assert!(ruleset_for(date(2026, 9, 1)).is_ok());
+    fn refuses_the_day_before_the_earliest_known_ruleset_starts() {
+        assert_eq!(
+            ruleset_for(date(2025, 2, 28)),
+            Err(PayrollError::NoRulesetCoversDate {
+                date: date(2025, 2, 28)
+            })
+        );
+    }
+
+    // `resolve` compares every pair, not only neighbours, so an overlap
+    // between rulesets that are not adjacent in declaration order is still
+    // detected rather than hidden by a nearer non-overlapping pair.
+    #[test]
+    fn refuses_an_overlap_between_rulesets_that_are_not_adjacent() {
+        let first = fixture("a", date(2025, 1, 1), Some(date(2027, 12, 31)));
+        let second = fixture("b", date(2020, 1, 1), Some(date(2020, 12, 31)));
+        let third = fixture("c", date(2026, 1, 1), Some(date(2026, 12, 31)));
+
+        assert_eq!(
+            resolve(&[first, second, third], date(2026, 6, 1)),
+            Err(PayrollError::OverlappingRulesets {
+                first: RulesetId::new("a"),
+                second: RulesetId::new("c"),
+            })
+        );
+    }
+
+    // The shipped catalogue is the one set of rulesets `ruleset_for` can
+    // never be given a fixture for, so its coherence is asserted directly
+    // here. Without this, adding a ruleset that overlaps or leaves a gap
+    // would compile and ship, and fail for the first employer to run a
+    // payslip rather than for the release that introduced it.
+    #[test]
+    fn the_shipped_catalogue_is_ordered_contiguous_and_free_of_overlaps() {
+        let catalogue = &*KNOWN_RULESETS;
+
+        for (index, earlier) in catalogue.iter().enumerate() {
+            for later in &catalogue[index + 1..] {
+                assert!(
+                    !earlier
+                        .effective_period()
+                        .overlaps(later.effective_period()),
+                    "{} overlaps {}",
+                    earlier.ruleset_id(),
+                    later.ruleset_id()
+                );
+            }
+        }
+
+        for pair in catalogue.windows(2) {
+            let (earlier, later) = (pair[0].effective_period(), pair[1].effective_period());
+            let ends = earlier
+                .until()
+                .expect("only the newest shipped ruleset may be open-ended");
+            assert!(
+                ends < later.from(),
+                "shipped rulesets are declared oldest first"
+            );
+            assert_eq!(
+                ends.succ_opt(),
+                Some(later.from()),
+                "a gap between shipped rulesets would leave a date uncovered"
+            );
+        }
+
+        let newest = catalogue
+            .last()
+            .expect("the shipped catalogue is never empty");
+        assert_eq!(
+            newest.effective_period().until(),
+            None,
+            "the newest shipped ruleset stays in force until a release replaces it"
+        );
+    }
+
+    // Only the SSC ceiling has moved between the shipped rulesets. The
+    // floor and both rates are asserted on every one of them so a future
+    // ruleset cannot change them by accident.
+    #[test]
+    fn every_shipped_ruleset_carries_the_statutory_floor_and_rates() {
+        for rules in &*KNOWN_RULESETS {
+            let ssc = rules.social_security();
+            assert_eq!(ssc.floor(), money(50_000), "{}", rules.ruleset_id());
+            assert_eq!(
+                ssc.employee_rate(),
+                Decimal::new(9, 3),
+                "{}",
+                rules.ruleset_id()
+            );
+            assert_eq!(
+                ssc.employer_rate(),
+                Decimal::new(9, 3),
+                "{}",
+                rules.ruleset_id()
+            );
+        }
+    }
+
+    #[test]
+    fn a_shipped_ruleset_round_trips_through_serde() {
+        let rules = ruleset_for(date(2026, 9, 1)).unwrap();
+        let json = serde_json::to_string(rules).unwrap();
+        assert_eq!(&serde_json::from_str::<PayrollRules>(&json).unwrap(), rules);
     }
 }

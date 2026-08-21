@@ -869,6 +869,35 @@ mod tests {
         assert_invariants(&calc);
     }
 
+    // The other half of PC-013: the same BasicPay in the period one month
+    // earlier, which ends 25 August and so resolves the old ruleset, does
+    // clamp at the N$11,000 ceiling. Without this the September figures
+    // above would pass even if the ceiling change had never been shipped.
+    #[test]
+    fn pc_013_the_period_before_the_change_still_clamps_at_the_old_ceiling() {
+        let period = PayPeriod::new(date(2026, 7, 26), date(2026, 8, 25)).unwrap();
+        let rules = ruleset_for(period.end()).unwrap();
+        assert_eq!(rules.ruleset_id().as_str(), "namibia-2025-03");
+
+        let input = input_for_period(
+            dec!(12000.00),
+            period,
+            YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
+        );
+        let calc = calculate(&input, rules).unwrap();
+
+        assert_eq!(
+            calc.employee_social_security.trace.base,
+            money(dec!(11000.00))
+        );
+        assert_eq!(calc.employee_social_security.trace.clamp, SscClamp::Ceiling);
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.employer_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.paye.amount, money(dec!(400.00)));
+        assert_eq!(calc.net_pay, money(dec!(11501.00)));
+        assert_invariants(&calc);
+    }
+
     // PC-014: period 26 Feb – 25 Mar 2026, straddling the tax year end —
     // the period end date selects the TaxYear (ADR-0005). The period
     // starts in the tax year starting 2025, but falls wholly in the tax

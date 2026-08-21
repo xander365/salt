@@ -82,17 +82,55 @@ mod tests {
     // Cumulative PAYE (ADR-0001) depends on every employer getting exactly
     // twelve periods per tax year — asserted directly here rather than
     // trusted as incidental.
+    //
+    // Three tax years of periods are generated and counted, so the twelve
+    // is the answer to "how many landed in this tax year", not a
+    // restatement of how many were asked for. The neighbouring years are
+    // included so a period leaking across either boundary would show up as
+    // a thirteenth or an eleventh.
     #[test]
     fn a_26th_to_25th_schedule_yields_exactly_twelve_periods_in_one_tax_year() {
+        assert_periods_per_tax_year(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()));
+    }
+
+    // The same property must hold for a calendar-month employer, which is
+    // a `PeriodEndDay` setting rather than a separate code path (ADR-0005).
+    #[test]
+    fn a_calendar_month_schedule_also_yields_exactly_twelve_periods_in_one_tax_year() {
+        assert_periods_per_tax_year(PeriodEndDay::LastDayOfMonth);
+    }
+
+    fn assert_periods_per_tax_year(end_day: PeriodEndDay) {
+        let schedule = PaySchedule::new(end_day);
+        let periods = schedule
+            .generate_periods(2025, Month::new(3).unwrap(), 36)
+            .unwrap();
+
+        for starting_year in [2025, 2026, 2027] {
+            let tax_year = TaxYear::starting(starting_year);
+            let count = periods
+                .iter()
+                .filter(|period| TaxYear::for_period_end(period.end()) == tax_year)
+                .count();
+            assert_eq!(count, 12, "tax year starting {starting_year}");
+        }
+
+        // Every generated period is accounted for by those three years, so
+        // none escaped the count above into a fourth.
+        assert_eq!(periods.len(), 36);
+    }
+
+    // Consecutive periods are contiguous and non-overlapping, so the
+    // twelve above tile the tax year rather than merely numbering twelve.
+    #[test]
+    fn consecutive_periods_leave_no_gap_and_no_overlap() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()));
         let periods = schedule
             .generate_periods(2026, Month::new(3).unwrap(), 12)
             .unwrap();
-        let tax_year = TaxYear::starting(2026);
 
-        assert_eq!(periods.len(), 12);
-        for period in &periods {
-            assert_eq!(TaxYear::for_period_end(period.end()), tax_year);
+        for pair in periods.windows(2) {
+            assert_eq!(pair[0].end().succ_opt(), Some(pair[1].start()));
         }
     }
 }
