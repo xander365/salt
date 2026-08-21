@@ -12,14 +12,14 @@ use serde::{Deserialize, Serialize};
 use crate::deduction::{Deduction, StatutoryDeduction};
 use crate::earning::Earning;
 use crate::employment::EmploymentSnapshot;
-use crate::money::Money;
+use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
 use crate::rules::{BandContribution, PayrollRules, SscClamp};
-use crate::year_to_date::YearToDateContext;
+use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 
 /// The complete, self-contained set of facts one calculation needs. If it
 /// is not in the `PayrollInput`, the calculator cannot see it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayrollInput {
     employment: EmploymentSnapshot,
     period: PayPeriod,
@@ -111,6 +111,16 @@ impl std::fmt::Display for PayrollError {
 
 impl std::error::Error for PayrollError {}
 
+/// Every `MoneyError` reachable from inside `calculate` is an overflow:
+/// the amounts being combined are already validated non-negative, and
+/// every value is built through `Money`, never from a raw decimal that
+/// could carry fractional cents.
+impl From<MoneyError> for PayrollError {
+    fn from(_: MoneyError) -> PayrollError {
+        PayrollError::AmountOverflow
+    }
+}
+
 /// A condition Salt flags without blocking calculation. This ticket
 /// produces none; `warnings` is always empty until a later ticket
 /// introduces the first variant.
@@ -132,7 +142,7 @@ pub struct PayeTrace {
     pub year_to_date_tax_owed: Decimal,
     /// Which PAYE bands were crossed and how much each contributed.
     pub bands_applied: Vec<BandContribution>,
-    pub periods_elapsed: u32,
+    pub periods_elapsed: PeriodsElapsed,
 }
 
 /// The base, rate, and any floor or ceiling applied to one social security
@@ -199,53 +209,54 @@ pub fn calculate(
 
     let earning_lines = vec![Earning::BasicPay(terms.basic_pay())];
 
-    let gross_remuneration = Money::checked_sum(earning_lines.iter().map(|line| line.amount()))
-        .map_err(|_| PayrollError::AmountOverflow)?;
+    let gross_remuneration = Money::checked_sum(earning_lines.iter().map(|line| line.amount()))?;
     let taxable_remuneration = Money::checked_sum(
         earning_lines
             .iter()
             .filter(|line| line.is_taxable())
             .map(|line| line.amount()),
-    )
-    .map_err(|_| PayrollError::AmountOverflow)?;
+    )?;
 
     let ytd = input.year_to_date;
     let year_to_date_taxable_remuneration = ytd
         .prior_taxable_remuneration()
-        .checked_add(taxable_remuneration)
-        .map_err(|_| PayrollError::AmountOverflow)?;
-    let periods_elapsed_inclusive = ytd.periods_elapsed() + 1;
+        .checked_add(taxable_remuneration)?;
     let (year_to_date_tax_owed, bands_applied) = rules.tax_owed_on(
         year_to_date_taxable_remuneration.as_decimal(),
-        periods_elapsed_inclusive,
-    );
-    let paye_unrounded = year_to_date_tax_owed - ytd.prior_paye().as_decimal();
-    if paye_unrounded.is_sign_negative() {
+        ytd.periods_elapsed().period_number(),
+    )?;
+    let paye_unrounded = year_to_date_tax_owed
+        .checked_sub(ytd.prior_paye().as_decimal())
+        .ok_or(PayrollError::AmountOverflow)?;
+    // Compared against zero rather than tested for sign, because an exact
+    // decimal can carry a negative sign on a zero value.
+    if paye_unrounded < Decimal::ZERO {
         return Err(PayrollError::PriorPayeExceedsRecalculatedLiability);
     }
-    let paye_amount = rules
-        .rounding_rule()
-        .apply(paye_unrounded)
-        .map_err(|_| PayrollError::AmountOverflow)?;
+    let paye_amount = rules.rounding_rule().apply(paye_unrounded)?;
 
     let social_security = rules.social_security();
     let basic_pay = terms.basic_pay();
     let (ssc_base, ssc_clamp) = social_security.base(basic_pay);
 
-    let employee_ssc_amount = rules
-        .rounding_rule()
-        .apply(ssc_base.as_decimal() * social_security.employee_rate())
-        .map_err(|_| PayrollError::AmountOverflow)?;
-    let employer_ssc_amount = rules
-        .rounding_rule()
-        .apply(ssc_base.as_decimal() * social_security.employer_rate())
-        .map_err(|_| PayrollError::AmountOverflow)?;
+    let contribution = |rate: Decimal| -> Result<Money, PayrollError> {
+        let unrounded = ssc_base
+            .as_decimal()
+            .checked_mul(rate)
+            .ok_or(PayrollError::AmountOverflow)?;
+        Ok(rules.rounding_rule().apply(unrounded)?)
+    };
+    let employee_ssc_amount = contribution(social_security.employee_rate())?;
+    let employer_ssc_amount = contribution(social_security.employer_rate())?;
 
     let deductions = vec![
         Deduction::Statutory(StatutoryDeduction::PAYE(paye_amount)),
         Deduction::Statutory(StatutoryDeduction::SocialSecurity(employee_ssc_amount)),
     ];
 
+    // Both `Money` amounts are already non-negative, so the only way this
+    // subtraction fails is by going below zero — i.e. the deductions
+    // exceeded gross remuneration.
     let net_pay = gross_remuneration
         .checked_sub(paye_amount)
         .and_then(|remainder| remainder.checked_sub(employee_ssc_amount))
@@ -298,9 +309,12 @@ pub fn calculate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::employment::{CompensationTerms, EmploymentId};
+    use crate::employment::{
+        CompensationTerms, EmployerId, EmploymentId, PersonId, PersonReference,
+    };
     use crate::rules::{PayeBand, RoundingRule, SocialSecurityRules};
     use crate::tax_year::TaxYear;
+    use crate::year_to_date::PeriodsElapsed;
     use chrono::NaiveDate;
     use rust_decimal_macros::dec;
 
@@ -343,21 +357,36 @@ mod tests {
         TaxYear::starting(2025)
     }
 
+    fn snapshot(
+        start_date: NaiveDate,
+        end_date: Option<NaiveDate>,
+        terms: CompensationTerms,
+    ) -> EmploymentSnapshot {
+        EmploymentSnapshot::new(
+            EmploymentId::new("emp-1"),
+            EmployerId::new("employer-1"),
+            PersonReference::new(PersonId::new("person-1")),
+            start_date,
+            end_date,
+            terms,
+        )
+    }
+
     fn employment_paying(basic_pay: Decimal) -> EmploymentSnapshot {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(basic_pay));
-        EmploymentSnapshot::new(EmploymentId::new("emp-1"), date(2025, 1, 1), None, terms)
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(basic_pay)).unwrap();
+        snapshot(date(2025, 1, 1), None, terms)
     }
 
     fn input_for(basic_pay: Decimal, ytd: YearToDateContext) -> PayrollInput {
         PayrollInput::new(employment_paying(basic_pay), test_period(), Vec::new(), ytd)
     }
 
-    fn ytd(prior_taxable: Decimal, prior_paye: Decimal, periods_elapsed: u32) -> YearToDateContext {
+    fn ytd(prior_taxable: Decimal, prior_paye: Decimal, periods_elapsed: u8) -> YearToDateContext {
         YearToDateContext::new(
             test_tax_year(),
             money(prior_taxable),
             money(prior_paye),
-            periods_elapsed,
+            PeriodsElapsed::new(periods_elapsed).unwrap(),
         )
     }
 
@@ -511,6 +540,22 @@ mod tests {
 
         assert_eq!(calc.paye.amount, money(dec!(2000.00)));
         assert_eq!(calc.net_pay, money(dec!(17901.00)));
+
+        // The trace carries PAYE already withheld this tax year and the
+        // year-to-date liability it was subtracted from, as typed values —
+        // this period's PAYE is the difference, and is `calc.paye.amount`.
+        assert_eq!(calc.paye.trace.prior_paye, money(dec!(1000.00)));
+        assert_eq!(
+            calc.paye.trace.prior_taxable_remuneration,
+            money(dec!(15000.00))
+        );
+        assert_eq!(
+            calc.paye.trace.year_to_date_taxable_remuneration,
+            money(dec!(35000.00))
+        );
+        assert_eq!(calc.paye.trace.year_to_date_tax_owed, dec!(3000.00));
+        assert_eq!(calc.paye.trace.periods_elapsed.get(), 1);
+
         assert_invariants(&calc);
     }
 
@@ -530,13 +575,8 @@ mod tests {
 
     #[test]
     fn refuses_contradictory_employment_dates() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00)));
-        let employment = EmploymentSnapshot::new(
-            EmploymentId::new("emp-1"),
-            date(2026, 3, 1),
-            Some(date(2026, 1, 1)),
-            terms,
-        );
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2026, 3, 1), Some(date(2026, 1, 1)), terms);
         let input = PayrollInput::new(
             employment,
             test_period(),
@@ -553,9 +593,8 @@ mod tests {
     #[test]
     fn refuses_compensation_terms_that_do_not_cover_the_period() {
         // Effective only from after the period starts.
-        let terms = CompensationTerms::new(date(2026, 2, 1), None, money(dec!(5000.00)));
-        let employment =
-            EmploymentSnapshot::new(EmploymentId::new("emp-1"), date(2025, 1, 1), None, terms);
+        let terms = CompensationTerms::new(date(2026, 2, 1), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), None, terms);
         let input = PayrollInput::new(
             employment,
             test_period(),
@@ -571,11 +610,10 @@ mod tests {
 
     #[test]
     fn refuses_a_joiner_starting_mid_period() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00)));
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
         // The period runs 2026-01-26 to 2026-02-25; this Employment starts
         // in the middle of it.
-        let employment =
-            EmploymentSnapshot::new(EmploymentId::new("emp-1"), date(2026, 2, 10), None, terms);
+        let employment = snapshot(date(2026, 2, 10), None, terms);
         let input = PayrollInput::new(
             employment,
             test_period(),
@@ -591,13 +629,8 @@ mod tests {
 
     #[test]
     fn refuses_a_leaver_ending_mid_period() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00)));
-        let employment = EmploymentSnapshot::new(
-            EmploymentId::new("emp-1"),
-            date(2025, 1, 1),
-            Some(date(2026, 2, 10)),
-            terms,
-        );
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), Some(date(2026, 2, 10)), terms);
         let input = PayrollInput::new(
             employment,
             test_period(),
@@ -696,11 +729,8 @@ mod tests {
 
         let input_json = serde_json::to_string(&input).unwrap();
         assert_eq!(
-            serde_json::from_str::<PayrollInput>(&input_json)
-                .unwrap()
-                .earnings
-                .len(),
-            input.earnings.len()
+            serde_json::from_str::<PayrollInput>(&input_json).unwrap(),
+            input
         );
 
         let calc_json = serde_json::to_string(&calc).unwrap();

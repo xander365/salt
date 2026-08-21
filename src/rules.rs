@@ -4,7 +4,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::money::Money;
+use crate::money::{Money, MoneyError};
 
 /// Why a `PayrollRules` component could not be constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,7 +195,8 @@ impl RoundingRule {
 
 /// One PAYE band's contribution to the tax owed on a year-to-date taxable
 /// amount, for explainability. `threshold` is the band's annual `from`
-/// scaled to the periods elapsed so far (see [`PayrollRules::tax_owed_on`]);
+/// scaled to the period number within the TaxYear (see
+/// [`PayrollRules::tax_owed_on`]);
 /// intermediate arithmetic like this is never rounded to cents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BandContribution {
@@ -262,7 +263,7 @@ impl PayrollRules {
     ///
     /// Cumulative PAYE is never annualised (ADR-0001): rather than scale
     /// `annual_taxable` up to a full-year estimate, this scales the annual
-    /// band *thresholds* down to `periods_elapsed_inclusive`/12 of their
+    /// band *thresholds* down to `period_number`/12 of their
     /// full value before taxing the actual year-to-date amount against
     /// them. At period 12 the thresholds equal the full annual table,
     /// giving every employer exactly 12 periods that reconcile to the
@@ -272,36 +273,42 @@ impl PayrollRules {
     pub(crate) fn tax_owed_on(
         &self,
         annual_taxable: Decimal,
-        periods_elapsed_inclusive: u32,
-    ) -> (Decimal, Vec<BandContribution>) {
-        let elapsed = Decimal::from(periods_elapsed_inclusive);
+        period_number: u32,
+    ) -> Result<(Decimal, Vec<BandContribution>), MoneyError> {
+        let elapsed = Decimal::from(period_number);
         let twelve = Decimal::from(12u32);
-        let scaled_threshold = |from: Money| (from.as_decimal() * elapsed) / twelve;
+        // Every step is checked: `Decimal`'s operators panic on overflow,
+        // and a rules table is data a caller supplies.
+        let scaled_threshold = |from: Money| -> Result<Decimal, MoneyError> {
+            from.as_decimal()
+                .checked_mul(elapsed)
+                .and_then(|scaled| scaled.checked_div(twelve))
+                .ok_or(MoneyError::Overflow)
+        };
 
         let mut total = Decimal::ZERO;
         let mut contributions = Vec::new();
         for (index, band) in self.paye_bands.iter().enumerate() {
-            let threshold = scaled_threshold(band.from);
+            let threshold = scaled_threshold(band.from)?;
             if annual_taxable <= threshold {
                 break;
             }
-            let next_threshold = self
-                .paye_bands
-                .get(index + 1)
-                .map(|next| scaled_threshold(next.from));
-            let upper = match next_threshold {
-                Some(next) => annual_taxable.min(next),
+            let upper = match self.paye_bands.get(index + 1) {
+                Some(next) => annual_taxable.min(scaled_threshold(next.from)?),
                 None => annual_taxable,
             };
-            let tax = (upper - threshold) * band.rate;
-            total += tax;
+            let tax = upper
+                .checked_sub(threshold)
+                .and_then(|span| span.checked_mul(band.rate))
+                .ok_or(MoneyError::Overflow)?;
+            total = total.checked_add(tax).ok_or(MoneyError::Overflow)?;
             contributions.push(BandContribution {
                 threshold,
                 rate: band.rate,
                 tax,
             });
         }
-        (total, contributions)
+        Ok((total, contributions))
     }
 }
 
@@ -361,37 +368,43 @@ mod tests {
 
     #[test]
     fn tax_owed_is_zero_within_the_first_band() {
-        assert_eq!(rules().tax_owed_on(dec!(50000), 12).0, dec!(0));
+        assert_eq!(rules().tax_owed_on(dec!(50000), 12).unwrap().0, dec!(0));
     }
 
     #[test]
     fn tax_owed_is_zero_at_the_top_of_the_first_band() {
-        assert_eq!(rules().tax_owed_on(dec!(120000), 12).0, dec!(0));
+        assert_eq!(rules().tax_owed_on(dec!(120000), 12).unwrap().0, dec!(0));
     }
 
     #[test]
     fn tax_owed_taxes_only_the_portion_within_the_second_band() {
         // At period 12 (full annual thresholds): 5,000 above the 120,000
         // threshold at 20%.
-        assert_eq!(rules().tax_owed_on(dec!(125000), 12).0, dec!(1000.00));
+        assert_eq!(
+            rules().tax_owed_on(dec!(125000), 12).unwrap().0,
+            dec!(1000.00)
+        );
     }
 
     #[test]
     fn tax_owed_sums_across_every_band_crossed() {
         // 120,000 @ 0% + 120,000 @ 20% + 240,000 @ 30% + 30,000 @ 40%.
-        assert_eq!(rules().tax_owed_on(dec!(510000), 12).0, dec!(108000.00));
+        assert_eq!(
+            rules().tax_owed_on(dec!(510000), 12).unwrap().0,
+            dec!(108000.00)
+        );
     }
 
     #[test]
     fn same_ytd_taxable_owes_more_later_in_the_tax_year() {
         // At period 3, the first band's threshold is scaled to 120,000 *
         // 3/12 = 30,000, so 50,000 already reaches the second band.
-        let (early, _) = rules().tax_owed_on(dec!(50000), 3);
+        let (early, _) = rules().tax_owed_on(dec!(50000), 3).unwrap();
         assert_eq!(early, dec!(4000.00));
 
         // At period 6, the threshold is scaled to 120,000 * 6/12 = 60,000,
         // so the same 50,000 has not reached it yet.
-        let (later, _) = rules().tax_owed_on(dec!(50000), 6);
+        let (later, _) = rules().tax_owed_on(dec!(50000), 6).unwrap();
         assert_eq!(later, dec!(0));
 
         assert_ne!(early, later);
@@ -401,7 +414,7 @@ mod tests {
     fn band_contributions_report_the_scaled_threshold_and_rate() {
         // 50,000 at period 3 reaches into the second band, so both the
         // (zero-tax) first band and the second band contribute an entry.
-        let (_, contributions) = rules().tax_owed_on(dec!(50000), 3);
+        let (_, contributions) = rules().tax_owed_on(dec!(50000), 3).unwrap();
         assert_eq!(contributions.len(), 2);
         assert_eq!(contributions[0].threshold, dec!(0));
         assert_eq!(contributions[0].rate, dec!(0.00));

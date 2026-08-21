@@ -1,7 +1,7 @@
 //! `PaySchedule`: how an Employer's pay cycle works, and `PayPeriod`
 //! generation from it. See ADR-0005.
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::pay_period::PayPeriod;
@@ -128,11 +128,13 @@ impl PaySchedule {
         self.period_end_day
     }
 
-    /// The end date of the period ending in the given year and month.
-    fn end_date(self, year: i32, month: u32) -> NaiveDate {
+    /// The end date of the period ending in the given year and month, or
+    /// `None` if that date falls outside the representable calendar.
+    fn end_date(self, year: i32, month: u32) -> Option<NaiveDate> {
         match self.period_end_day {
-            PeriodEndDay::Day(day) => NaiveDate::from_ymd_opt(year, month, day.get() as u32)
-                .expect("day 1-28 is valid in every month"),
+            // Days 1-28 exist in every month, so only an out-of-range year
+            // can fail here.
+            PeriodEndDay::Day(day) => NaiveDate::from_ymd_opt(year, month, day.get() as u32),
             PeriodEndDay::LastDayOfMonth => last_day_of_month(year, month),
         }
     }
@@ -144,25 +146,68 @@ impl PaySchedule {
     /// sequence has no gaps and no overlaps regardless of month length,
     /// and `Day` and `LastDayOfMonth` schedules run through this same code
     /// path.
-    pub fn generate_periods(self, from_year: i32, from_month: Month, count: u32) -> Vec<PayPeriod> {
+    ///
+    /// Fails with `PeriodGenerationError::YearOutOfRange` rather than
+    /// panicking when `from_year`, or a year `count` periods later, falls
+    /// outside the representable calendar.
+    pub fn generate_periods(
+        self,
+        from_year: i32,
+        from_month: Month,
+        count: u32,
+    ) -> Result<Vec<PayPeriod>, PeriodGenerationError> {
         let (mut year, mut month) = (from_year, from_month.get() as u32);
         let (prev_year, prev_month) = previous_month(from_year, from_month.get() as u32);
-        let mut previous_end = self.end_date(prev_year, prev_month);
+        let mut previous_end = self
+            .end_date(prev_year, prev_month)
+            .ok_or(PeriodGenerationError::YearOutOfRange(prev_year))?;
 
-        let mut periods = Vec::with_capacity(count as usize);
+        // Capacity is bounded so an absurd `count` cannot ask for a huge
+        // allocation before the first out-of-range year is reached.
+        let mut periods = Vec::with_capacity(count.min(MAX_PREALLOCATED_PERIODS) as usize);
         for _ in 0..count {
-            let end = self.end_date(year, month);
+            let end = self
+                .end_date(year, month)
+                .ok_or(PeriodGenerationError::YearOutOfRange(year))?;
             let start = previous_end
                 .succ_opt()
-                .expect("payroll dates stay well within chrono's range");
-            periods.push(PayPeriod::new(start, end).expect("previous_end < end by construction"));
+                .ok_or(PeriodGenerationError::YearOutOfRange(previous_end.year()))?;
+            // `start` is `previous_end` plus one day and `previous_end` is
+            // the end of the preceding month's period, so `start <= end`.
+            let period = PayPeriod::new(start, end)
+                .map_err(|_| PeriodGenerationError::YearOutOfRange(year))?;
+            periods.push(period);
 
             previous_end = end;
             (year, month) = next_month(year, month);
         }
-        periods
+        Ok(periods)
     }
 }
+
+/// How many periods `generate_periods` reserves space for up front. A
+/// hundred years of monthly periods: far past any real schedule, and small
+/// enough that an absurd `count` cannot turn into a huge allocation.
+const MAX_PREALLOCATED_PERIODS: u32 = 1200;
+
+/// Why `PaySchedule::generate_periods` could not produce a sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodGenerationError {
+    /// A period end date fell outside the representable calendar.
+    YearOutOfRange(i32),
+}
+
+impl std::fmt::Display for PeriodGenerationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeriodGenerationError::YearOutOfRange(year) => {
+                write!(f, "year {year} is outside the representable calendar")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PeriodGenerationError {}
 
 fn next_month(year: i32, month: u32) -> (i32, u32) {
     if month == 12 {
@@ -180,12 +225,9 @@ fn previous_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
-fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+fn last_day_of_month(year: i32, month: u32) -> Option<NaiveDate> {
     let (next_year, next_month) = next_month(year, month);
-    NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .expect("month rolled over to a valid year/month")
-        .pred_opt()
-        .expect("the first of a month always has a preceding day")
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)?.pred_opt()
 }
 
 #[cfg(test)]
@@ -233,7 +275,7 @@ mod tests {
     #[test]
     fn a_26th_to_25th_schedule_across_a_full_year_has_no_gaps_or_overlaps() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
-        let periods = schedule.generate_periods(2026, month(1), 12);
+        let periods = schedule.generate_periods(2026, month(1), 12).unwrap();
 
         assert_eq!(periods.len(), 12);
         assert_eq!(periods[0].start(), date(2025, 12, 26));
@@ -266,7 +308,7 @@ mod tests {
     fn a_26th_to_25th_schedule_survives_a_leap_year() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
         // 2028 is a leap year: February has 29 days.
-        let periods = schedule.generate_periods(2028, month(1), 12);
+        let periods = schedule.generate_periods(2028, month(1), 12).unwrap();
 
         let feb_period = periods
             .iter()
@@ -292,7 +334,7 @@ mod tests {
     #[test]
     fn a_calendar_month_schedule_runs_through_the_same_code_path() {
         let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
-        let periods = schedule.generate_periods(2026, month(1), 12);
+        let periods = schedule.generate_periods(2026, month(1), 12).unwrap();
 
         assert_eq!(periods.len(), 12);
         assert_eq!(periods[0].start(), date(2026, 1, 1));
@@ -310,7 +352,7 @@ mod tests {
     #[test]
     fn a_calendar_month_schedule_survives_a_leap_year_february() {
         let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
-        let periods = schedule.generate_periods(2028, month(1), 12);
+        let periods = schedule.generate_periods(2028, month(1), 12).unwrap();
 
         let feb_period = periods
             .iter()
@@ -322,7 +364,7 @@ mod tests {
     #[test]
     fn generation_crosses_a_year_boundary_without_a_gap() {
         let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
-        let periods = schedule.generate_periods(2026, month(12), 3);
+        let periods = schedule.generate_periods(2026, month(12), 3).unwrap();
 
         assert_eq!(periods[0].end(), date(2026, 12, 25));
         assert_eq!(periods[1].start(), date(2026, 12, 26));
@@ -339,5 +381,38 @@ mod tests {
     #[test]
     fn month_deserialize_rejects_out_of_range() {
         assert!(serde_json::from_str::<Month>("13").is_err());
+    }
+
+    #[test]
+    fn generation_refuses_a_year_outside_the_calendar() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        assert!(matches!(
+            schedule.generate_periods(i32::MAX, month(1), 1),
+            Err(PeriodGenerationError::YearOutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn generation_refuses_when_it_would_run_off_the_end_of_the_calendar() {
+        let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
+        // Starting in the last representable year, a second period would
+        // need a month that does not exist. It fails visibly instead of
+        // panicking or truncating the sequence silently.
+        let last_year = NaiveDate::MAX.year();
+        assert!(matches!(
+            schedule.generate_periods(last_year, month(12), 2),
+            Err(PeriodGenerationError::YearOutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn generating_no_periods_yields_an_empty_sequence() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        assert!(
+            schedule
+                .generate_periods(2026, month(1), 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
