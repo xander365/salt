@@ -49,6 +49,31 @@ impl Money {
     pub fn as_decimal(self) -> Decimal {
         Decimal::new(self.0, 2)
     }
+
+    /// Subtracts `other`, or `Err(MoneyError::Negative)` if that would go
+    /// below zero. Money can never represent a negative amount, so
+    /// subtraction is the operation that can fail; addition never can.
+    pub fn checked_sub(self, other: Money) -> Result<Money, MoneyError> {
+        if self.0 < other.0 {
+            Err(MoneyError::Negative)
+        } else {
+            Ok(Money(self.0 - other.0))
+        }
+    }
+}
+
+impl std::ops::Add for Money {
+    type Output = Money;
+
+    fn add(self, rhs: Money) -> Money {
+        Money(self.0 + rhs.0)
+    }
+}
+
+impl std::iter::Sum for Money {
+    fn sum<I: Iterator<Item = Money>>(iter: I) -> Money {
+        iter.fold(Money::ZERO, |acc, m| acc + m)
+    }
 }
 
 /// Rounds an exact decimal amount half-up to two decimal places and
@@ -142,5 +167,43 @@ mod tests {
     #[test]
     fn round_half_up_rejects_negative_results() {
         assert_eq!(round_half_up(dec!(-0.01)), Err(MoneyError::Negative));
+    }
+
+    #[test]
+    fn add_is_exact() {
+        let a = Money::from_cents(150).unwrap();
+        let b = Money::from_cents(250).unwrap();
+        assert_eq!((a + b).cents(), 400);
+    }
+
+    #[test]
+    fn checked_sub_is_exact_when_it_does_not_go_below_zero() {
+        let a = Money::from_cents(400).unwrap();
+        let b = Money::from_cents(150).unwrap();
+        assert_eq!(a.checked_sub(b).unwrap().cents(), 250);
+    }
+
+    #[test]
+    fn checked_sub_rejects_going_below_zero() {
+        let a = Money::from_cents(100).unwrap();
+        let b = Money::from_cents(101).unwrap();
+        assert_eq!(a.checked_sub(b), Err(MoneyError::Negative));
+    }
+
+    #[test]
+    fn sum_folds_from_zero() {
+        let amounts = vec![
+            Money::from_cents(100).unwrap(),
+            Money::from_cents(200).unwrap(),
+            Money::from_cents(300).unwrap(),
+        ];
+        let total: Money = amounts.into_iter().sum();
+        assert_eq!(total.cents(), 600);
+    }
+
+    #[test]
+    fn sum_of_empty_is_zero() {
+        let total: Money = Vec::<Money>::new().into_iter().sum();
+        assert_eq!(total, Money::ZERO);
     }
 }
