@@ -17,6 +17,7 @@ use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
 use crate::pay_schedule::PaySchedule;
 use crate::rules::{BandContribution, PayrollRules, RulesetId, SscClamp};
+use crate::tax_year::TaxYear;
 use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 
 /// The complete, self-contained set of facts one calculation needs. If it
@@ -117,6 +118,19 @@ pub enum PayrollError {
     /// order or by taking the first match, because a silent resolution
     /// would hide a data bug in the shipped rulesets.
     OverlappingRulesets { first: RulesetId, second: RulesetId },
+    /// The supplied `PayrollRules`' `EffectivePeriod` does not cover
+    /// `PayrollInput.period`'s end date (ADR-0005). A caller that bypasses
+    /// `ruleset_for` cannot use rules that were not in force for the
+    /// period being calculated.
+    RulesetDoesNotCoverPeriod,
+    /// `PayrollInput.year_to_date.tax_year()` is not the `TaxYear`
+    /// `TaxYear::for_period_end` resolves for the period's end date
+    /// (ADR-0005). A period straddling the tax year end must use the
+    /// TaxYear its end date falls in, never the one its start date does.
+    WrongTaxYearForPeriod {
+        expected: TaxYear,
+        supplied: TaxYear,
+    },
 }
 
 impl std::fmt::Display for PayrollError {
@@ -173,6 +187,20 @@ impl std::fmt::Display for PayrollError {
                 write!(
                     f,
                     "rulesets {first} and {second} have overlapping effective periods"
+                )
+            }
+            PayrollError::RulesetDoesNotCoverPeriod => {
+                write!(
+                    f,
+                    "the supplied rules' effective period does not cover the pay period's end date"
+                )
+            }
+            PayrollError::WrongTaxYearForPeriod { expected, supplied } => {
+                write!(
+                    f,
+                    "the year-to-date context's tax year starting {} does not match the tax year starting {} that the period end date falls in",
+                    supplied.starting_year(),
+                    expected.starting_year()
                 )
             }
         }
@@ -262,6 +290,23 @@ pub fn calculate(
     input: &PayrollInput,
     rules: &PayrollRules,
 ) -> Result<PayrollCalculation, PayrollError> {
+    // The period end date selects both the ruleset and the TaxYear
+    // (ADR-0005); `ruleset_for` and `TaxYear::for_period_end` are the
+    // seams that resolve them, but nothing stops a caller from supplying
+    // rules or a YearToDateContext that disagrees with the period being
+    // calculated. Checked before anything else so a mismatch can never be
+    // masked by a later refusal.
+    if !rules.effective_period().covers(input.period.end()) {
+        return Err(PayrollError::RulesetDoesNotCoverPeriod);
+    }
+    let expected_tax_year = TaxYear::for_period_end(input.period.end());
+    if input.year_to_date.tax_year() != expected_tax_year {
+        return Err(PayrollError::WrongTaxYearForPeriod {
+            expected: expected_tax_year,
+            supplied: input.year_to_date.tax_year(),
+        });
+    }
+
     if !input.employment.has_coherent_dates() {
         return Err(PayrollError::ContradictoryEmploymentDates);
     }
@@ -448,7 +493,6 @@ mod tests {
     use crate::pay_schedule::{DayOfMonth, Month, PeriodEndDay};
     use crate::rules::{EffectivePeriod, PayeBand, RoundingRule, RulesetId, SocialSecurityRules};
     use crate::ruleset::ruleset_for;
-    use crate::tax_year::TaxYear;
     use crate::year_to_date::PeriodsElapsed;
     use chrono::NaiveDate;
     use rust_decimal_macros::dec;
@@ -856,9 +900,22 @@ mod tests {
     }
 
     // Rules are passed beside `PayrollInput`, never inside it, precisely so
-    // this is possible: the same input, calculated under each of the two
-    // shipped rulesets, gives a different result because the SSC ceiling
-    // moved.
+    // this is possible: the same input, calculated under two rulesets that
+    // differ only in their SSC ceiling, gives a different result. Both
+    // share `test_effective_period()` so this stays a test of that one
+    // difference, not of `calculate`'s own effective-period check.
+    fn rules_with_ceiling(ceiling: Decimal) -> PayrollRules {
+        PayrollRules::new(
+            test_ruleset_id(),
+            test_effective_period(),
+            vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()],
+            SocialSecurityRules::new(dec!(0.009), dec!(0.009), money(dec!(500)), money(ceiling))
+                .unwrap(),
+            RoundingRule::HalfUpToCents,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn varying_only_the_ruleset_against_a_fixed_input_changes_the_result() {
         let input = input_for(
@@ -866,8 +923,8 @@ mod tests {
             YearToDateContext::first_period(test_tax_year()),
         );
 
-        let before = calculate(&input, ruleset_for(date(2026, 8, 31)).unwrap()).unwrap();
-        let after = calculate(&input, ruleset_for(date(2026, 9, 1)).unwrap()).unwrap();
+        let before = calculate(&input, &rules_with_ceiling(dec!(11000.00))).unwrap();
+        let after = calculate(&input, &rules_with_ceiling(dec!(12500.00))).unwrap();
 
         assert_eq!(
             before.employee_social_security.trace.clamp,
@@ -879,6 +936,52 @@ mod tests {
         assert_ne!(
             before.employee_social_security.amount,
             after.employee_social_security.amount
+        );
+    }
+
+    #[test]
+    fn refuses_rules_whose_effective_period_does_not_cover_the_period_end() {
+        let out_of_period_rules = PayrollRules::new(
+            test_ruleset_id(),
+            EffectivePeriod::new(date(2030, 1, 1), None).unwrap(),
+            vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()],
+            SocialSecurityRules::new(
+                dec!(0.009),
+                dec!(0.009),
+                money(dec!(500)),
+                money(dec!(11000)),
+            )
+            .unwrap(),
+            RoundingRule::HalfUpToCents,
+        )
+        .unwrap();
+        let input = input_for(
+            dec!(5000.00),
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &out_of_period_rules),
+            Err(PayrollError::RulesetDoesNotCoverPeriod)
+        );
+    }
+
+    // The 26 Feb - 25 Mar boundary period falls wholly in the tax year
+    // starting 2026 (ADR-0005), so a caller supplying the preceding
+    // TaxYear — the one its start date falls in — is refused.
+    #[test]
+    fn refuses_a_tax_year_that_does_not_match_the_periods_end_date() {
+        let period = PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap();
+        let rules = ruleset_for(period.end()).unwrap();
+        let wrong_ytd = YearToDateContext::first_period(TaxYear::starting(2025));
+        let input = input_for_period(dec!(8000.00), period, wrong_ytd);
+
+        assert_eq!(
+            calculate(&input, rules),
+            Err(PayrollError::WrongTaxYearForPeriod {
+                expected: TaxYear::starting(2026),
+                supplied: TaxYear::starting(2025),
+            })
         );
     }
 
@@ -1010,7 +1113,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period(TaxYear::for_period_end(date(2028, 2, 29))),
             calendar_month_schedule(),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
@@ -1036,7 +1139,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period(TaxYear::for_period_end(date(2026, 4, 30))),
             calendar_month_schedule(),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
@@ -1233,7 +1336,7 @@ mod tests {
                 employment,
                 *period,
                 Vec::new(),
-                YearToDateContext::first_period(test_tax_year()),
+                YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
                 schedule,
             );
             let calc = calculate(&input, &test_rules()).unwrap();
@@ -1324,7 +1427,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period(TaxYear::for_period_end(date(2026, 3, 28))),
             schedule,
         );
 
@@ -1348,7 +1451,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period(TaxYear::for_period_end(date(2028, 3, 28))),
             schedule,
         );
 
