@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::deduction::{Deduction, StatutoryDeduction};
-use crate::earning::Earning;
+use crate::earning::{Earning, RemunerationBases};
 use crate::employment::EmploymentSnapshot;
 use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
@@ -61,9 +61,11 @@ pub enum PayrollError {
     /// is refused rather than paid in full or guessed at.
     EmploymentDoesNotCoverFullPeriod,
     /// `PayrollInput.earnings` contained a `BasicPay` line. `calculate`
-    /// adds `BasicPay` itself from the Employment's `CompensationTerms` — a
-    /// caller cannot supply a second one here.
-    UnsupportedEarning,
+    /// derives that line itself from the Employment's `CompensationTerms`,
+    /// which is also the social security base — a second one supplied here
+    /// would silently change both gross and that base, so it is refused
+    /// rather than added (INV-012).
+    DuplicateBasicPayLine,
     /// Recalculating cumulative PAYE against the corrected year-to-date
     /// figures produced a liability lower than what the context says was
     /// already withheld. Refund handling is not modeled anywhere in this
@@ -88,10 +90,10 @@ impl std::fmt::Display for PayrollError {
             PayrollError::EmploymentDoesNotCoverFullPeriod => {
                 write!(f, "employment does not cover the full pay period")
             }
-            PayrollError::UnsupportedEarning => {
+            PayrollError::DuplicateBasicPayLine => {
                 write!(
                     f,
-                    "unsupported earning: BasicPay is added by calculate() and cannot be supplied in PayrollInput.earnings"
+                    "BasicPay is derived by calculate() from the compensation terms and cannot also be supplied in PayrollInput.earnings"
                 )
             }
             PayrollError::PriorPayeExceedsRecalculatedLiability => {
@@ -204,19 +206,22 @@ pub fn calculate(
         .iter()
         .any(|earning| matches!(earning, Earning::BasicPay(_)))
     {
-        return Err(PayrollError::UnsupportedEarning);
+        return Err(PayrollError::DuplicateBasicPayLine);
     }
 
-    let mut earning_lines = vec![Earning::BasicPay(terms.basic_pay())];
+    // Every allowance the caller supplied is kept as its own line, in the
+    // order given, after the derived `BasicPay` line. Lines of the same
+    // kind are never merged: a payslip has to be able to show each one.
+    let mut earning_lines = Vec::with_capacity(input.earnings.len() + 1);
+    earning_lines.push(Earning::BasicPay(terms.basic_pay()));
     earning_lines.extend(input.earnings.iter().copied());
 
-    let gross_remuneration = Money::checked_sum(earning_lines.iter().map(|line| line.amount()))?;
-    let taxable_remuneration = Money::checked_sum(
-        earning_lines
-            .iter()
-            .filter(|line| line.is_taxable())
-            .map(|line| line.amount()),
-    )?;
+    // Gross, taxable, and the social security base are accumulated
+    // separately from the same lines — never one summation filtered three
+    // ways. See `RemunerationBases`.
+    let bases = RemunerationBases::accumulate(earning_lines.iter())?;
+    let gross_remuneration = bases.gross();
+    let taxable_remuneration = bases.taxable();
 
     let ytd = input.year_to_date;
     let year_to_date_taxable_remuneration = ytd
@@ -237,7 +242,10 @@ pub fn calculate(
     let paye_amount = rules.rounding_rule().apply(paye_unrounded)?;
 
     let social_security = rules.social_security();
-    let basic_pay = terms.basic_pay();
+    // Taken from the accumulated bases, not re-read from the compensation
+    // terms: the base an allowance must not reach is the same number the
+    // `BasicPay` line put into gross, and one source keeps it that way.
+    let basic_pay = bases.social_security();
     let (ssc_base, ssc_clamp) = social_security.base(basic_pay);
 
     let contribution = |rate: Decimal| -> Result<Money, PayrollError> {
@@ -392,9 +400,63 @@ mod tests {
     }
 
     /// Asserted across every scenario: gross less all deductions equals net
-    /// pay, and employer SSC never appears in the deduction total
-    /// (INV-007).
+    /// pay, employer SSC never appears in the deduction total (INV-007),
+    /// and the returned earning lines independently reproduce all three
+    /// bases (INV-006).
+    ///
+    /// The three totals are recomputed here by a separate exhaustive match
+    /// rather than by calling the production accumulator, so a wrong
+    /// classification cannot agree with itself.
     fn assert_invariants(calc: &PayrollCalculation) {
+        let (mut ssc_base, mut taxable, mut gross) = (Money::ZERO, Money::ZERO, Money::ZERO);
+        let mut basic_pay_lines = 0;
+        for line in &calc.earning_lines {
+            match *line {
+                Earning::BasicPay(amount) => {
+                    basic_pay_lines += 1;
+                    ssc_base = ssc_base.checked_add(amount).unwrap();
+                    taxable = taxable.checked_add(amount).unwrap();
+                    gross = gross.checked_add(amount).unwrap();
+                }
+                Earning::TaxableAllowance(amount) => {
+                    taxable = taxable.checked_add(amount).unwrap();
+                    gross = gross.checked_add(amount).unwrap();
+                }
+                Earning::NonTaxableAllowance(amount) => {
+                    gross = gross.checked_add(amount).unwrap();
+                }
+            }
+        }
+        assert_eq!(
+            basic_pay_lines, 1,
+            "exactly one BasicPay line must be returned"
+        );
+        assert!(
+            matches!(calc.earning_lines.first(), Some(Earning::BasicPay(_))),
+            "the BasicPay line must come first"
+        );
+        assert_eq!(
+            gross, calc.gross_remuneration,
+            "gross must be the total of every earning line"
+        );
+        assert_eq!(
+            taxable, calc.taxable_remuneration,
+            "taxable must be BasicPay plus TaxableAllowance only"
+        );
+        assert_eq!(
+            ssc_base, calc.employee_social_security.trace.basic_pay,
+            "the social security base must come from BasicPay alone"
+        );
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            calc.employer_social_security.trace.basic_pay,
+            "both social security figures must share one base"
+        );
+        assert_eq!(
+            calc.taxable_remuneration, calc.paye.trace.this_period_taxable_remuneration,
+            "the PAYE trace must state the taxable figure PAYE was derived from"
+        );
+
         let deduction_total =
             Money::checked_sum(calc.deductions.iter().map(|d| d.amount())).unwrap();
         assert_eq!(
@@ -666,6 +728,20 @@ mod tests {
         assert_eq!(calc.paye.amount, money(dec!(1400.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
         assert_eq!(calc.net_pay, money(dec!(15501.00)));
+        assert_eq!(
+            calc.earning_lines,
+            vec![
+                Earning::BasicPay(money(dec!(15000.00))),
+                Earning::TaxableAllowance(money(dec!(2000.00))),
+            ]
+        );
+        // The allowance raised PAYE by 400.00 over PC-001 and left both
+        // social security figures untouched.
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            money(dec!(15000.00))
+        );
+        assert_eq!(calc.employer_social_security.amount, money(dec!(99.00)));
         assert_invariants(&calc);
     }
 
@@ -691,7 +767,132 @@ mod tests {
         assert_ne!(calc.gross_remuneration, calc.taxable_remuneration);
         assert_ne!(calc.taxable_remuneration, calc.net_pay);
         assert_ne!(calc.gross_remuneration, calc.net_pay);
+        assert_eq!(
+            calc.earning_lines,
+            vec![
+                Earning::BasicPay(money(dec!(15000.00))),
+                Earning::NonTaxableAllowance(money(dec!(1200.00))),
+            ]
+        );
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            money(dec!(15000.00))
+        );
         assert_invariants(&calc);
+    }
+
+    // Both allowance kinds at once: the full three-way table in one
+    // scenario. BasicPay 15,000.00 + TaxableAllowance 2,000.00 +
+    // NonTaxableAllowance 1,200.00, period 12 (bands unscaled). Gross is
+    // 18,200.00, taxable 17,000.00, and the social security base is the
+    // 15,000.00 of BasicPay alone. Year-to-date taxable is 110,000 +
+    // 17,000 = 127,000: 7,000 above the 120,000 threshold at 20% is
+    // 1,400.00 of PAYE. Net is 18,200.00 - 1,400.00 - 99.00 = 16,701.00.
+    #[test]
+    fn both_allowance_kinds_give_three_different_totals() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(15000.00)),
+            test_period(),
+            vec![
+                Earning::TaxableAllowance(money(dec!(2000.00))),
+                Earning::NonTaxableAllowance(money(dec!(1200.00))),
+            ],
+            ytd(dec!(110000.00), dec!(0.00), 11),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(calc.gross_remuneration, money(dec!(18200.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            money(dec!(15000.00))
+        );
+        assert_eq!(calc.paye.amount, money(dec!(1400.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.net_pay, money(dec!(16701.00)));
+
+        // Gross, taxable, and net are three genuinely different numbers.
+        assert_ne!(calc.gross_remuneration, calc.taxable_remuneration);
+        assert_ne!(calc.taxable_remuneration, calc.net_pay);
+        assert_ne!(calc.gross_remuneration, calc.net_pay);
+
+        assert_invariants(&calc);
+    }
+
+    // A payslip renders the lines it is given, so each one is returned
+    // separately and in the order supplied — two allowances of one kind
+    // are never collapsed into a single line, even when their amounts are
+    // equal.
+    #[test]
+    fn allowance_lines_are_returned_individually_in_order() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(15000.00)),
+            test_period(),
+            vec![
+                Earning::NonTaxableAllowance(money(dec!(600.00))),
+                Earning::TaxableAllowance(money(dec!(600.00))),
+                Earning::NonTaxableAllowance(money(dec!(600.00))),
+            ],
+            ytd(dec!(110000.00), dec!(0.00), 11),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![
+                Earning::BasicPay(money(dec!(15000.00))),
+                Earning::NonTaxableAllowance(money(dec!(600.00))),
+                Earning::TaxableAllowance(money(dec!(600.00))),
+                Earning::NonTaxableAllowance(money(dec!(600.00))),
+            ]
+        );
+        assert_eq!(calc.gross_remuneration, money(dec!(16800.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(15600.00)));
+        assert_invariants(&calc);
+    }
+
+    // A zero-amount allowance is a real line an employer may deliberately
+    // record. It is kept and it changes nothing.
+    #[test]
+    fn a_zero_amount_allowance_is_kept_and_changes_nothing() {
+        let with_zero = PayrollInput::new(
+            employment_paying(dec!(15000.00)),
+            test_period(),
+            vec![Earning::TaxableAllowance(Money::ZERO)],
+            ytd(dec!(110000.00), dec!(0.00), 11),
+        );
+        let calc = calculate(&with_zero, &test_rules()).unwrap();
+        let baseline = calculate(
+            &input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11)),
+            &test_rules(),
+        )
+        .unwrap();
+
+        assert_eq!(calc.earning_lines.len(), 2);
+        assert_eq!(calc.gross_remuneration, baseline.gross_remuneration);
+        assert_eq!(calc.taxable_remuneration, baseline.taxable_remuneration);
+        assert_eq!(calc.paye.amount, baseline.paye.amount);
+        assert_eq!(calc.net_pay, baseline.net_pay);
+        assert_invariants(&calc);
+    }
+
+    // An allowance large enough to overflow the cents total is refused,
+    // not wrapped into a negative or nonsensical gross.
+    #[test]
+    fn refuses_an_allowance_that_overflows_the_total() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(15000.00)),
+            test_period(),
+            vec![Earning::NonTaxableAllowance(
+                Money::from_cents(i64::MAX).unwrap(),
+            )],
+            ytd(dec!(110000.00), dec!(0.00), 11),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::AmountOverflow)
+        );
     }
 
     #[test]
@@ -705,7 +906,7 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &test_rules()),
-            Err(PayrollError::UnsupportedEarning)
+            Err(PayrollError::DuplicateBasicPayLine)
         );
     }
 
