@@ -207,19 +207,21 @@ PayrollInput
 - PayPeriod
 - Earnings
 - YearToDateContext
+- PaySchedule
 ```
 
-`PayrollRules` and the Employer's `PaySchedule` are passed **beside** the input, not inside it:
+`PaySchedule` is carried inside `PayrollInput`, not passed beside it: it exists only to validate `CompensationTerms.EffectiveFrom` against INV-014 (it never selects or generates `PayPeriod` — the caller supplies that directly), but the same `PayrollInput` must produce the same result every time (INV-002). Passing it beside the input, the way `PayrollRules` is, would let one caller-supplied schedule accept a `CompensationTerms` that another schedule rejects for the identical `PayrollInput` — a hidden second axis of determinism that finalization (§10) does not freeze.
+
+`PayrollRules` is passed **beside** the input:
 
 ```rust
 fn calculate(
     input: &PayrollInput,
     rules: &PayrollRules,
-    schedule: PaySchedule,
 ) -> Result<PayrollCalculation, PayrollError>
 ```
 
-This makes the caller choose a ruleset deliberately, and it reads clearly in tests: same input, different ruleset, different answer. `schedule` exists only to validate `CompensationTerms.EffectiveFrom` against INV-014 — it never selects or generates the `PayPeriod` itself, which the caller still supplies directly in `PayrollInput`.
+This makes the caller choose a ruleset deliberately, and it reads clearly in tests: same input, different ruleset, different answer.
 
 ### 5.1 EmploymentSnapshot
 

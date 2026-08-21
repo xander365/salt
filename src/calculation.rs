@@ -1,5 +1,5 @@
-//! The payroll calculator: `calculate(&PayrollInput, &PayrollRules,
-//! PaySchedule) -> Result<PayrollCalculation, PayrollError>`.
+//! The payroll calculator: `calculate(&PayrollInput, &PayrollRules) ->
+//! Result<PayrollCalculation, PayrollError>`.
 //!
 //! A plain function, no trait: it stays a concrete function until a second
 //! implementation genuinely exists. Proration, band application, the SSC
@@ -20,7 +20,12 @@ use crate::rules::{BandContribution, PayrollRules, SscClamp};
 use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 
 /// The complete, self-contained set of facts one calculation needs. If it
-/// is not in the `PayrollInput`, the calculator cannot see it.
+/// is not in the `PayrollInput`, the calculator cannot see it. `schedule`
+/// is carried here, not passed beside the input like `PayrollRules`,
+/// because the same input must produce the same result every time
+/// (INV-002) — a `CompensationTerms.EffectiveFrom` that is valid under one
+/// caller-supplied schedule and invalid under another would otherwise make
+/// `calculate` non-deterministic in the schedule alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayrollInput {
     employment: EmploymentSnapshot,
@@ -30,6 +35,10 @@ pub struct PayrollInput {
     /// caller cannot supply a second one here.
     earnings: Vec<Earning>,
     year_to_date: YearToDateContext,
+    /// The Employer's `PaySchedule`, used only to validate
+    /// `CompensationTerms.EffectiveFrom` against INV-014. It never selects
+    /// or generates `period` — the caller supplies that directly.
+    schedule: PaySchedule,
 }
 
 impl PayrollInput {
@@ -38,12 +47,14 @@ impl PayrollInput {
         period: PayPeriod,
         earnings: Vec<Earning>,
         year_to_date: YearToDateContext,
+        schedule: PaySchedule,
     ) -> Self {
         PayrollInput {
             employment,
             period,
             earnings,
             year_to_date,
+            schedule,
         }
     }
 }
@@ -207,7 +218,6 @@ pub struct PayrollCalculation {
 pub fn calculate(
     input: &PayrollInput,
     rules: &PayrollRules,
-    schedule: PaySchedule,
 ) -> Result<PayrollCalculation, PayrollError> {
     if !input.employment.has_coherent_dates() {
         return Err(PayrollError::ContradictoryEmploymentDates);
@@ -219,11 +229,12 @@ pub fn calculate(
     let period_days = (input.period.end() - input.period.start()).num_days() + 1;
 
     let terms = input.employment.compensation_terms();
-    if !schedule.is_period_start(terms.effective_from()) {
+    if !input.schedule.is_period_start(terms.effective_from()) {
         // Unreachable in practice: the only way to fail here is a calendar
         // edge so extreme `next_period_start_after` cannot name a date
         // within the representable range.
-        let next_valid_effective_from = schedule
+        let next_valid_effective_from = input
+            .schedule
             .next_period_start_after(terms.effective_from())
             .ok_or(PayrollError::AmountOverflow)?;
         return Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
@@ -447,7 +458,13 @@ mod tests {
     }
 
     fn input_for(basic_pay: Decimal, ytd: YearToDateContext) -> PayrollInput {
-        PayrollInput::new(employment_paying(basic_pay), test_period(), Vec::new(), ytd)
+        PayrollInput::new(
+            employment_paying(basic_pay),
+            test_period(),
+            Vec::new(),
+            ytd,
+            test_schedule(),
+        )
     }
 
     fn ytd(prior_taxable: Decimal, prior_paye: Decimal, periods_elapsed: u8) -> YearToDateContext {
@@ -541,7 +558,7 @@ mod tests {
     #[test]
     fn pc_001_ordinary_monthly_salaried_employee() {
         let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(15000.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
@@ -559,7 +576,7 @@ mod tests {
             dec!(5000.00),
             YearToDateContext::first_period(test_tax_year()),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, Money::ZERO);
         assert_eq!(calc.employee_social_security.amount, money(dec!(45.00)));
@@ -571,7 +588,7 @@ mod tests {
     #[test]
     fn pc_003_crossing_a_tax_bracket() {
         let input = input_for(dec!(15000.00), ytd(dec!(19000.00), dec!(0.00), 2));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(800.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
@@ -596,7 +613,7 @@ mod tests {
     #[test]
     fn pc_004_crossing_multiple_brackets() {
         let input = input_for(dec!(180000.00), ytd(dec!(150000.00), dec!(25000.00), 5));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(59000.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
@@ -611,7 +628,7 @@ mod tests {
             dec!(20000.00),
             YearToDateContext::first_period(test_tax_year()),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(2000.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
@@ -631,7 +648,7 @@ mod tests {
             dec!(300.00),
             YearToDateContext::first_period(test_tax_year()),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.employee_social_security.amount, money(dec!(4.50)));
         assert_eq!(
@@ -648,7 +665,7 @@ mod tests {
     #[test]
     fn pc_011_mid_year_adoption_with_opening_balance() {
         let input = input_for(dec!(100000.00), ytd(dec!(200000.00), dec!(32000.00), 7));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(26000.00)));
         assert_eq!(calc.net_pay, money(dec!(73901.00)));
@@ -659,7 +676,7 @@ mod tests {
     #[test]
     fn pc_012_second_period_of_a_tax_year() {
         let input = input_for(dec!(20000.00), ytd(dec!(15000.00), dec!(1000.00), 1));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(2000.00)));
         assert_eq!(calc.net_pay, money(dec!(17901.00)));
@@ -689,7 +706,7 @@ mod tests {
     #[test]
     fn pc_015_corrected_earlier_period_absorbed_forward() {
         let input = input_for(dec!(25000.00), ytd(dec!(45000.00), dec!(3000.00), 3));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(3000.00)));
         assert_eq!(calc.net_pay, money(dec!(21901.00)));
@@ -705,10 +722,11 @@ mod tests {
             test_period(),
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
 
         assert_eq!(
-            calculate(&input, &test_rules(), test_schedule()),
+            calculate(&input, &test_rules()),
             Err(PayrollError::ContradictoryEmploymentDates)
         );
     }
@@ -723,10 +741,11 @@ mod tests {
             test_period(),
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
 
         assert_eq!(
-            calculate(&input, &test_rules(), test_schedule()),
+            calculate(&input, &test_rules()),
             Err(PayrollError::CompensationTermsDoNotCoverPeriod)
         );
     }
@@ -746,8 +765,9 @@ mod tests {
             period,
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(
             calc.earning_lines,
@@ -776,8 +796,9 @@ mod tests {
             period,
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(
             calc.earning_lines,
@@ -803,8 +824,9 @@ mod tests {
             period,
             vec![Earning::NonTaxableAllowance(money(dec!(500.00)))],
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(
             calc.earning_lines,
@@ -839,8 +861,9 @@ mod tests {
                 *period,
                 Vec::new(),
                 YearToDateContext::first_period(test_tax_year()),
+                schedule,
             );
-            let calc = calculate(&input, &test_rules(), schedule).unwrap();
+            let calc = calculate(&input, &test_rules()).unwrap();
             assert_eq!(
                 calc.earning_lines,
                 vec![Earning::BasicPay(money(basic_pay))]
@@ -848,7 +871,8 @@ mod tests {
             total = total.checked_add(calc.earning_lines[0].amount()).unwrap();
         }
 
-        assert_eq!(total, money(basic_pay * dec!(12)));
+        // 12,345.67 x 12 = 148,148.04, independently calculated.
+        assert_eq!(total, money(dec!(148148.04)));
     }
 
     #[test]
@@ -862,11 +886,110 @@ mod tests {
             test_period(),
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
 
         assert_eq!(
-            calculate(&input, &test_rules(), test_schedule()),
+            calculate(&input, &test_rules()),
             Err(PayrollError::EmploymentDoesNotOverlapPeriod)
+        );
+    }
+
+    #[test]
+    fn refuses_an_employment_that_starts_after_the_period() {
+        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
+        // The employment starts well after test_period() (2026-01-26 to
+        // 2026-02-25) ends — a genuine mismatch, not a joiner.
+        let employment = snapshot(date(2026, 3, 1), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::EmploymentDoesNotOverlapPeriod)
+        );
+    }
+
+    // Accepts a `CompensationTerms.EffectiveFrom` that is itself a
+    // `PayPeriod` start date under the Employer's own 26th-to-25th
+    // schedule — the ordinary case INV-014 must not block.
+    #[test]
+    fn accepts_compensation_terms_effective_on_the_schedules_own_period_start() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(
+            crate::pay_schedule::DayOfMonth::new(25).unwrap(),
+        ));
+        // test_period() (2026-01-26 to 2026-02-25) itself starts on this
+        // schedule's own period-start day.
+        let terms = CompensationTerms::new(date(2026, 1, 26), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            schedule,
+        );
+
+        assert!(calculate(&input, &test_rules()).is_ok());
+    }
+
+    // INV-014 across the Feb 28 -> Mar 1 rollover in a non-leap year: a
+    // schedule ending periods on the 28th has no Feb 29th to roll onto, so
+    // the period after Feb 28 starts Mar 1st, and that — not Feb 29th — is
+    // the named next valid date.
+    #[test]
+    fn refuses_a_pay_rise_across_the_february_28_rollover_in_a_non_leap_year() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(
+            crate::pay_schedule::DayOfMonth::new(28).unwrap(),
+        ));
+        let period = PayPeriod::new(date(2026, 3, 1), date(2026, 3, 28)).unwrap();
+        // 2026-02-28 is the end of the *previous* period, not a start.
+        let terms = CompensationTerms::new(date(2026, 2, 28), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            schedule,
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+                next_valid_effective_from: date(2026, 3, 1),
+            })
+        );
+    }
+
+    // The same rollover in a leap year: Feb 29th exists, so the period
+    // after Feb 28th starts Feb 29th, not Mar 1st.
+    #[test]
+    fn refuses_a_pay_rise_across_the_february_28_rollover_in_a_leap_year() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(
+            crate::pay_schedule::DayOfMonth::new(28).unwrap(),
+        ));
+        let period = PayPeriod::new(date(2028, 2, 29), date(2028, 3, 28)).unwrap();
+        let terms = CompensationTerms::new(date(2028, 2, 28), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            schedule,
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+                next_valid_effective_from: date(2028, 2, 29),
+            })
         );
     }
 
@@ -889,10 +1012,11 @@ mod tests {
             test_period(),
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
+            schedule,
         );
 
         assert_eq!(
-            calculate(&input, &test_rules(), schedule),
+            calculate(&input, &test_rules()),
             Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
                 next_valid_effective_from: date(2026, 1, 26),
             })
@@ -912,8 +1036,9 @@ mod tests {
             test_period(),
             vec![Earning::TaxableAllowance(money(dec!(2000.00)))],
             ytd(dec!(110000.00), dec!(0.00), 11),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(17000.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
@@ -948,8 +1073,9 @@ mod tests {
             test_period(),
             vec![Earning::NonTaxableAllowance(money(dec!(1200.00)))],
             ytd(dec!(110000.00), dec!(0.00), 11),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(16200.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
@@ -990,8 +1116,9 @@ mod tests {
                 Earning::NonTaxableAllowance(money(dec!(1200.00))),
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(18200.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
@@ -1026,8 +1153,9 @@ mod tests {
                 Earning::NonTaxableAllowance(money(dec!(600.00))),
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
+            test_schedule(),
         );
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         assert_eq!(
             calc.earning_lines,
@@ -1052,12 +1180,12 @@ mod tests {
             test_period(),
             vec![Earning::TaxableAllowance(Money::ZERO)],
             ytd(dec!(110000.00), dec!(0.00), 11),
+            test_schedule(),
         );
-        let calc = calculate(&with_zero, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&with_zero, &test_rules()).unwrap();
         let baseline = calculate(
             &input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11)),
             &test_rules(),
-            test_schedule(),
         )
         .unwrap();
 
@@ -1080,10 +1208,11 @@ mod tests {
                 Money::from_cents(i64::MAX).unwrap(),
             )],
             ytd(dec!(110000.00), dec!(0.00), 11),
+            test_schedule(),
         );
 
         assert_eq!(
-            calculate(&input, &test_rules(), test_schedule()),
+            calculate(&input, &test_rules()),
             Err(PayrollError::AmountOverflow)
         );
     }
@@ -1095,10 +1224,11 @@ mod tests {
             test_period(),
             vec![Earning::BasicPay(money(dec!(5000.00)))],
             YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
         );
 
         assert_eq!(
-            calculate(&input, &test_rules(), test_schedule()),
+            calculate(&input, &test_rules()),
             Err(PayrollError::DuplicateBasicPayLine)
         );
     }
@@ -1111,7 +1241,7 @@ mod tests {
         let input = input_for(dec!(1000.00), ytd(dec!(1000.00), dec!(999999.00), 0));
 
         assert_eq!(
-            calculate(&input, &test_rules(), test_schedule()),
+            calculate(&input, &test_rules()),
             Err(PayrollError::PriorPayeExceedsRecalculatedLiability)
         );
     }
@@ -1131,7 +1261,7 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &rules, test_schedule()),
+            calculate(&input, &rules),
             Err(PayrollError::DeductionsExceedGrossRemuneration)
         );
     }
@@ -1139,7 +1269,7 @@ mod tests {
     #[test]
     fn deserialize_round_trips() {
         let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
-        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+        let calc = calculate(&input, &test_rules()).unwrap();
 
         let input_json = serde_json::to_string(&input).unwrap();
         assert_eq!(

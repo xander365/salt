@@ -304,57 +304,8 @@ mod tests {
         assert_eq!(snapshot.person().person_id().as_str(), "person-1");
     }
 
-    fn period(start: NaiveDate, end: NaiveDate) -> PayPeriod {
-        PayPeriod::new(start, end).unwrap()
-    }
-
-    fn snapshot_dated(start_date: NaiveDate, end_date: Option<NaiveDate>) -> EmploymentSnapshot {
-        EmploymentSnapshot::new(
-            EmploymentId::new("emp-1"),
-            EmployerId::new("employer-1"),
-            PersonReference::new(PersonId::new("person-1")),
-            start_date,
-            end_date,
-            terms(),
-        )
-    }
-
-    #[test]
-    fn overlap_days_is_the_full_period_for_a_continuing_employee() {
-        let full_period = period(date(2026, 1, 1), date(2026, 1, 31));
-        let employment = snapshot_dated(date(2025, 1, 1), None);
-        assert_eq!(employment.overlap_days(full_period), Some(31));
-    }
-
-    #[test]
-    fn overlap_days_counts_from_the_join_date_for_a_joiner() {
-        let full_period = period(date(2026, 1, 1), date(2026, 1, 31));
-        let employment = snapshot_dated(date(2026, 1, 22), None);
-        // Jan 22 through Jan 31 inclusive is 10 days.
-        assert_eq!(employment.overlap_days(full_period), Some(10));
-    }
-
-    #[test]
-    fn overlap_days_counts_to_the_leaving_date_for_a_leaver() {
-        let full_period = period(date(2026, 2, 1), date(2026, 2, 28));
-        let employment = snapshot_dated(date(2025, 1, 1), Some(date(2026, 2, 12)));
-        // Feb 1 through Feb 12 inclusive is 12 days.
-        assert_eq!(employment.overlap_days(full_period), Some(12));
-    }
-
-    #[test]
-    fn overlap_days_is_none_when_the_employment_ended_before_the_period() {
-        let full_period = period(date(2026, 2, 1), date(2026, 2, 28));
-        let employment = snapshot_dated(date(2025, 1, 1), Some(date(2026, 1, 15)));
-        assert_eq!(employment.overlap_days(full_period), None);
-    }
-
-    #[test]
-    fn overlap_days_is_none_when_the_employment_starts_after_the_period() {
-        let full_period = period(date(2026, 2, 1), date(2026, 2, 28));
-        let employment = snapshot_dated(date(2026, 3, 1), None);
-        assert_eq!(employment.overlap_days(full_period), None);
-    }
+    // `overlap_days` is exercised through the `calculate` seam — see
+    // PC-005, PC-006, and the no-overlap refusals in `calculation.rs`.
 
     #[test]
     fn deserialize_round_trips() {
