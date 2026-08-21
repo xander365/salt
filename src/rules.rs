@@ -1,6 +1,7 @@
 //! `PayrollRules`: the statutory and agreed calculation rules in force for
 //! an effective period, as typed Rust (ADR-0003).
 
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,8 @@ pub enum PayrollRulesError {
     BandsNotAscending,
     /// The social security floor was above its ceiling.
     FloorAboveCeiling,
+    /// An `EffectivePeriod`'s `until` date was before its `from` date.
+    EffectivePeriodEndsBeforeItStarts,
 }
 
 impl std::fmt::Display for PayrollRulesError {
@@ -34,6 +37,12 @@ impl std::fmt::Display for PayrollRulesError {
             }
             PayrollRulesError::FloorAboveCeiling => {
                 write!(f, "the social security floor was above its ceiling")
+            }
+            PayrollRulesError::EffectivePeriodEndsBeforeItStarts => {
+                write!(
+                    f,
+                    "the effective period's until date is before its from date"
+                )
             }
         }
     }
@@ -205,12 +214,104 @@ pub struct BandContribution {
     pub tax: Decimal,
 }
 
+/// Identifies which `PayrollRules` produced a historical result. Rules are
+/// typed Rust, not database rows (ADR-0003), so this alone is not a
+/// durable historical reference: a later bug fix would change what an old
+/// `RulesetId` means. `FinalizedPayroll` stores the resolved rule values
+/// alongside it for that reason (ADR-0004).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RulesetId(String);
+
+impl RulesetId {
+    pub fn new(id: impl Into<String>) -> Self {
+        RulesetId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RulesetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The date range a `PayrollRules` is in force for, inclusive at both
+/// ends. `ruleset_for` selects on this range keyed by `PayPeriod` end date
+/// (ADR-0005): a period straddling a change uses whichever ruleset covers
+/// its end date, in full — statutory ceilings are monthly amounts, never
+/// split pro-rata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawEffectivePeriod", into = "RawEffectivePeriod")]
+pub struct EffectivePeriod {
+    from: NaiveDate,
+    /// The last date this ruleset covers, or `None` while it is the
+    /// newest ruleset in force.
+    until: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawEffectivePeriod {
+    pub from: NaiveDate,
+    pub until: Option<NaiveDate>,
+}
+
+impl EffectivePeriod {
+    pub fn new(from: NaiveDate, until: Option<NaiveDate>) -> Result<Self, PayrollRulesError> {
+        if until.is_some_and(|until| until < from) {
+            return Err(PayrollRulesError::EffectivePeriodEndsBeforeItStarts);
+        }
+        Ok(EffectivePeriod { from, until })
+    }
+
+    pub fn from(self) -> NaiveDate {
+        self.from
+    }
+
+    pub fn until(self) -> Option<NaiveDate> {
+        self.until
+    }
+
+    /// Whether `date` falls within this range.
+    pub fn covers(self, date: NaiveDate) -> bool {
+        date >= self.from && self.until.is_none_or(|until| date <= until)
+    }
+
+    /// Whether this range shares any date with `other`. Two open-ended
+    /// (`until: None`) ranges always overlap.
+    pub fn overlaps(self, other: EffectivePeriod) -> bool {
+        self.from <= other.until.unwrap_or(NaiveDate::MAX)
+            && other.from <= self.until.unwrap_or(NaiveDate::MAX)
+    }
+}
+
+impl TryFrom<RawEffectivePeriod> for EffectivePeriod {
+    type Error = PayrollRulesError;
+
+    fn try_from(raw: RawEffectivePeriod) -> Result<Self, PayrollRulesError> {
+        EffectivePeriod::new(raw.from, raw.until)
+    }
+}
+
+impl From<EffectivePeriod> for RawEffectivePeriod {
+    fn from(period: EffectivePeriod) -> RawEffectivePeriod {
+        RawEffectivePeriod {
+            from: period.from,
+            until: period.until,
+        }
+    }
+}
+
 /// The statutory and agreed calculation rules in force for an effective
 /// period. Passed beside `PayrollInput`, never inside it, so a test can
 /// vary rules against a fixed input (see `calculate`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawPayrollRules", into = "RawPayrollRules")]
 pub struct PayrollRules {
+    ruleset_id: RulesetId,
+    effective_period: EffectivePeriod,
     paye_bands: Vec<PayeBand>,
     social_security: SocialSecurityRules,
     rounding_rule: RoundingRule,
@@ -218,6 +319,8 @@ pub struct PayrollRules {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawPayrollRules {
+    pub ruleset_id: RulesetId,
+    pub effective_period: EffectivePeriod,
     pub paye_bands: Vec<PayeBand>,
     pub social_security: SocialSecurityRules,
     pub rounding_rule: RoundingRule,
@@ -227,6 +330,8 @@ impl PayrollRules {
     /// `paye_bands` must be non-empty, strictly ascending by `from`, with
     /// the first band's `from` at `Money::ZERO`.
     pub fn new(
+        ruleset_id: RulesetId,
+        effective_period: EffectivePeriod,
         paye_bands: Vec<PayeBand>,
         social_security: SocialSecurityRules,
         rounding_rule: RoundingRule,
@@ -244,10 +349,20 @@ impl PayrollRules {
             return Err(PayrollRulesError::BandsNotAscending);
         }
         Ok(PayrollRules {
+            ruleset_id,
+            effective_period,
             paye_bands,
             social_security,
             rounding_rule,
         })
+    }
+
+    pub fn ruleset_id(&self) -> &RulesetId {
+        &self.ruleset_id
+    }
+
+    pub fn effective_period(&self) -> EffectivePeriod {
+        self.effective_period
     }
 
     pub fn social_security(&self) -> SocialSecurityRules {
@@ -316,13 +431,21 @@ impl TryFrom<RawPayrollRules> for PayrollRules {
     type Error = PayrollRulesError;
 
     fn try_from(raw: RawPayrollRules) -> Result<Self, PayrollRulesError> {
-        PayrollRules::new(raw.paye_bands, raw.social_security, raw.rounding_rule)
+        PayrollRules::new(
+            raw.ruleset_id,
+            raw.effective_period,
+            raw.paye_bands,
+            raw.social_security,
+            raw.rounding_rule,
+        )
     }
 }
 
 impl From<PayrollRules> for RawPayrollRules {
     fn from(rules: PayrollRules) -> RawPayrollRules {
         RawPayrollRules {
+            ruleset_id: rules.ruleset_id,
+            effective_period: rules.effective_period,
             paye_bands: rules.paye_bands,
             social_security: rules.social_security,
             rounding_rule: rules.rounding_rule,
@@ -362,8 +485,27 @@ mod tests {
         .unwrap()
     }
 
+    fn test_ruleset_id() -> RulesetId {
+        RulesetId::new("test-ruleset")
+    }
+
+    fn test_effective_period() -> EffectivePeriod {
+        EffectivePeriod::new(date(2000, 1, 1), None).unwrap()
+    }
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
     fn rules() -> PayrollRules {
-        PayrollRules::new(bands(), social_security(), RoundingRule::HalfUpToCents).unwrap()
+        PayrollRules::new(
+            test_ruleset_id(),
+            test_effective_period(),
+            bands(),
+            social_security(),
+            RoundingRule::HalfUpToCents,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -485,7 +627,13 @@ mod tests {
     #[test]
     fn rejects_an_empty_band_table() {
         assert_eq!(
-            PayrollRules::new(Vec::new(), social_security(), RoundingRule::HalfUpToCents),
+            PayrollRules::new(
+                test_ruleset_id(),
+                test_effective_period(),
+                Vec::new(),
+                social_security(),
+                RoundingRule::HalfUpToCents
+            ),
             Err(PayrollRulesError::EmptyBandTable)
         );
     }
@@ -494,7 +642,13 @@ mod tests {
     fn rejects_a_first_band_that_does_not_start_at_zero() {
         let bands = vec![PayeBand::new(money(dec!(100)), dec!(0.20)).unwrap()];
         assert_eq!(
-            PayrollRules::new(bands, social_security(), RoundingRule::HalfUpToCents),
+            PayrollRules::new(
+                test_ruleset_id(),
+                test_effective_period(),
+                bands,
+                social_security(),
+                RoundingRule::HalfUpToCents
+            ),
             Err(PayrollRulesError::FirstBandNotZero)
         );
     }
@@ -507,7 +661,13 @@ mod tests {
             PayeBand::new(money(dec!(100)), dec!(0.30)).unwrap(),
         ];
         assert_eq!(
-            PayrollRules::new(bands, social_security(), RoundingRule::HalfUpToCents),
+            PayrollRules::new(
+                test_ruleset_id(),
+                test_effective_period(),
+                bands,
+                social_security(),
+                RoundingRule::HalfUpToCents
+            ),
             Err(PayrollRulesError::BandsNotAscending)
         );
     }
@@ -522,6 +682,8 @@ mod tests {
     #[test]
     fn deserialize_rejects_an_unsorted_band_table() {
         let json = serde_json::to_string(&RawPayrollRules {
+            ruleset_id: test_ruleset_id(),
+            effective_period: test_effective_period(),
             paye_bands: vec![
                 PayeBand::new(money(dec!(0)), dec!(0.0)).unwrap(),
                 PayeBand::new(money(dec!(200)), dec!(0.1)).unwrap(),
@@ -532,5 +694,55 @@ mod tests {
         })
         .unwrap();
         assert!(serde_json::from_str::<PayrollRules>(&json).is_err());
+    }
+
+    #[test]
+    fn effective_period_covers_from_onward_when_open_ended() {
+        let period = EffectivePeriod::new(date(2026, 9, 1), None).unwrap();
+        assert!(!period.covers(date(2026, 8, 31)));
+        assert!(period.covers(date(2026, 9, 1)));
+        assert!(period.covers(date(2030, 1, 1)));
+    }
+
+    #[test]
+    fn effective_period_covers_only_up_to_until_inclusive() {
+        let period = EffectivePeriod::new(date(2025, 3, 1), Some(date(2026, 8, 31))).unwrap();
+        assert!(period.covers(date(2025, 3, 1)));
+        assert!(period.covers(date(2026, 8, 31)));
+        assert!(!period.covers(date(2026, 9, 1)));
+    }
+
+    #[test]
+    fn rejects_an_effective_period_that_ends_before_it_starts() {
+        assert_eq!(
+            EffectivePeriod::new(date(2026, 9, 1), Some(date(2026, 8, 31))),
+            Err(PayrollRulesError::EffectivePeriodEndsBeforeItStarts)
+        );
+    }
+
+    #[test]
+    fn adjacent_effective_periods_do_not_overlap() {
+        let earlier = EffectivePeriod::new(date(2025, 3, 1), Some(date(2026, 8, 31))).unwrap();
+        let later = EffectivePeriod::new(date(2026, 9, 1), None).unwrap();
+        assert!(!earlier.overlaps(later));
+        assert!(!later.overlaps(earlier));
+    }
+
+    #[test]
+    fn effective_periods_sharing_a_date_overlap() {
+        let earlier = EffectivePeriod::new(date(2025, 3, 1), Some(date(2026, 9, 1))).unwrap();
+        let later = EffectivePeriod::new(date(2026, 9, 1), None).unwrap();
+        assert!(earlier.overlaps(later));
+        assert!(later.overlaps(earlier));
+    }
+
+    #[test]
+    fn effective_period_deserialize_round_trips() {
+        let period = EffectivePeriod::new(date(2025, 3, 1), Some(date(2026, 8, 31))).unwrap();
+        let json = serde_json::to_string(&period).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EffectivePeriod>(&json).unwrap(),
+            period
+        );
     }
 }

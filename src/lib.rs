@@ -19,6 +19,7 @@ mod money;
 mod pay_period;
 mod pay_schedule;
 mod rules;
+mod ruleset;
 mod tax_year;
 mod year_to_date;
 
@@ -39,8 +40,10 @@ pub use pay_schedule::{
     PeriodGenerationError,
 };
 pub use rules::{
-    BandContribution, PayeBand, PayrollRules, PayrollRulesError, RawPayeBand, RawPayrollRules,
-    RawSocialSecurityRules, RoundingRule, SocialSecurityRules, SscClamp,
+    BandContribution, EffectivePeriod, PayeBand, PayrollRules, PayrollRulesError,
+    RawEffectivePeriod, RawPayeBand, RawPayrollRules, RawSocialSecurityRules, RoundingRule,
+    RulesetId, SocialSecurityRules, SscClamp,
 };
+pub use ruleset::ruleset_for;
 pub use tax_year::TaxYear;
 pub use year_to_date::{InvalidPeriodsElapsed, PeriodsElapsed, YearToDateContext};

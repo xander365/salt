@@ -1,5 +1,6 @@
 //! `TaxYear`: the Namibian tax year, 1 March to end of February.
 
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 /// The Namibian tax year running from 1 March of `starting_year` to the
@@ -16,11 +17,25 @@ impl TaxYear {
     pub fn starting_year(self) -> i32 {
         self.0
     }
+
+    /// The `TaxYear` a `PayPeriod` end date falls in (ADR-0005). January
+    /// and February belong to the tax year that started the previous
+    /// March, so a period of 26 February to 25 March falls wholly in the
+    /// tax year that starts that March, even though it starts in the one
+    /// before.
+    pub fn for_period_end(date: NaiveDate) -> Self {
+        if date.month() >= 3 {
+            TaxYear::starting(date.year())
+        } else {
+            TaxYear::starting(date.year() - 1)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pay_schedule::{DayOfMonth, Month, PaySchedule, PeriodEndDay};
 
     #[test]
     fn starting_year_round_trips() {
@@ -32,5 +47,52 @@ mod tests {
         let tax_year = TaxYear::starting(2026);
         let json = serde_json::to_string(&tax_year).unwrap();
         assert_eq!(serde_json::from_str::<TaxYear>(&json).unwrap(), tax_year);
+    }
+
+    #[test]
+    fn a_date_from_march_onward_belongs_to_the_tax_year_starting_that_year() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        assert_eq!(TaxYear::for_period_end(date), TaxYear::starting(2026));
+
+        let date = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+        assert_eq!(TaxYear::for_period_end(date), TaxYear::starting(2026));
+    }
+
+    #[test]
+    fn a_date_in_january_or_february_belongs_to_the_previous_starting_year() {
+        let date = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+        assert_eq!(TaxYear::for_period_end(date), TaxYear::starting(2026));
+
+        let date = NaiveDate::from_ymd_opt(2027, 2, 28).unwrap();
+        assert_eq!(TaxYear::for_period_end(date), TaxYear::starting(2026));
+    }
+
+    // A 26 Feb - 25 Mar period straddles the tax year boundary by
+    // calendar date, but ADR-0005 keys the TaxYear on the period end
+    // alone, so the whole period falls in the new tax year.
+    #[test]
+    fn a_26_feb_to_25_mar_period_falls_wholly_in_the_new_tax_year() {
+        let start = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 3, 25).unwrap();
+
+        assert_eq!(TaxYear::for_period_end(start), TaxYear::starting(2025));
+        assert_eq!(TaxYear::for_period_end(end), TaxYear::starting(2026));
+    }
+
+    // Cumulative PAYE (ADR-0001) depends on every employer getting exactly
+    // twelve periods per tax year — asserted directly here rather than
+    // trusted as incidental.
+    #[test]
+    fn a_26th_to_25th_schedule_yields_exactly_twelve_periods_in_one_tax_year() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()));
+        let periods = schedule
+            .generate_periods(2026, Month::new(3).unwrap(), 12)
+            .unwrap();
+        let tax_year = TaxYear::starting(2026);
+
+        assert_eq!(periods.len(), 12);
+        for period in &periods {
+            assert_eq!(TaxYear::for_period_end(period.end()), tax_year);
+        }
     }
 }
