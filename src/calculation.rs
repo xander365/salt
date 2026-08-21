@@ -23,13 +23,9 @@ use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 pub struct PayrollInput {
     employment: EmploymentSnapshot,
     period: PayPeriod,
-    /// Earning lines beyond `BasicPay` — allowances. This ticket supports
-    /// an ordinary full-period employee earning `BasicPay` alone, so
-    /// `calculate` refuses any non-empty list rather than calculating a
-    /// plausible but wrong result; allowance handling arrives with a later
-    /// ticket. `calculate` adds the `BasicPay` line itself from the
-    /// Employment's `CompensationTerms` — a caller cannot supply a second
-    /// one here.
+    /// Earning lines beyond `BasicPay` — allowances. `calculate` adds the
+    /// `BasicPay` line itself from the Employment's `CompensationTerms` — a
+    /// caller cannot supply a second one here.
     earnings: Vec<Earning>,
     year_to_date: YearToDateContext,
 }
@@ -64,9 +60,9 @@ pub enum PayrollError {
     /// leaver). Proration is a later ticket; until it exists such a period
     /// is refused rather than paid in full or guessed at.
     EmploymentDoesNotCoverFullPeriod,
-    /// `PayrollInput.earnings` was non-empty. This ticket supports
-    /// `BasicPay` alone: allowances are a later ticket, and a caller
-    /// cannot supply a second `BasicPay` line here either.
+    /// `PayrollInput.earnings` contained a `BasicPay` line. `calculate`
+    /// adds `BasicPay` itself from the Employment's `CompensationTerms` — a
+    /// caller cannot supply a second one here.
     UnsupportedEarning,
     /// Recalculating cumulative PAYE against the corrected year-to-date
     /// figures produced a liability lower than what the context says was
@@ -95,7 +91,7 @@ impl std::fmt::Display for PayrollError {
             PayrollError::UnsupportedEarning => {
                 write!(
                     f,
-                    "unsupported earning: only BasicPay is calculated by this ticket"
+                    "unsupported earning: BasicPay is added by calculate() and cannot be supplied in PayrollInput.earnings"
                 )
             }
             PayrollError::PriorPayeExceedsRecalculatedLiability => {
@@ -203,11 +199,16 @@ pub fn calculate(
     if !terms.covers(input.period) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
-    if !input.earnings.is_empty() {
+    if input
+        .earnings
+        .iter()
+        .any(|earning| matches!(earning, Earning::BasicPay(_)))
+    {
         return Err(PayrollError::UnsupportedEarning);
     }
 
-    let earning_lines = vec![Earning::BasicPay(terms.basic_pay())];
+    let mut earning_lines = vec![Earning::BasicPay(terms.basic_pay())];
+    earning_lines.extend(input.earnings.iter().copied());
 
     let gross_remuneration = Money::checked_sum(earning_lines.iter().map(|line| line.amount()))?;
     let taxable_remuneration = Money::checked_sum(
@@ -644,34 +645,53 @@ mod tests {
         );
     }
 
+    // PC-007: taxable allowance — classification affects PAYE, not SSC.
+    // BasicPay 15,000.00 + TaxableAllowance 2,000.00, period 12 (bands
+    // unscaled). Year-to-date taxable becomes 110,000 + 17,000 = 127,000:
+    // the first 120,000 is untaxed, the remaining 7,000 at 20% is 1,400.00.
+    // SSC is charged on BasicPay alone, so it is unchanged from PC-001
+    // despite the extra 2,000 of remuneration.
     #[test]
-    fn refuses_a_taxable_allowance() {
+    fn pc_007_taxable_allowance_affects_paye_not_ssc() {
         let input = PayrollInput::new(
-            employment_paying(dec!(5000.00)),
+            employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::TaxableAllowance(money(dec!(500.00)))],
-            YearToDateContext::first_period(test_tax_year()),
+            vec![Earning::TaxableAllowance(money(dec!(2000.00)))],
+            ytd(dec!(110000.00), dec!(0.00), 11),
         );
+        let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(
-            calculate(&input, &test_rules()),
-            Err(PayrollError::UnsupportedEarning)
-        );
+        assert_eq!(calc.gross_remuneration, money(dec!(17000.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
+        assert_eq!(calc.paye.amount, money(dec!(1400.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.net_pay, money(dec!(15501.00)));
+        assert_invariants(&calc);
     }
 
+    // PC-008: non-taxable travel allowance — gross differs from taxable.
+    // BasicPay 15,000.00 + NonTaxableAllowance 1,200.00: the allowance
+    // swells gross to 16,200.00 but taxable stays 15,000.00, so PAYE and
+    // SSC are identical to PC-001. Gross, taxable, and net all differ.
     #[test]
-    fn refuses_a_non_taxable_allowance() {
+    fn pc_008_non_taxable_allowance_differs_gross_from_taxable() {
         let input = PayrollInput::new(
-            employment_paying(dec!(5000.00)),
+            employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::NonTaxableAllowance(money(dec!(500.00)))],
-            YearToDateContext::first_period(test_tax_year()),
+            vec![Earning::NonTaxableAllowance(money(dec!(1200.00)))],
+            ytd(dec!(110000.00), dec!(0.00), 11),
         );
+        let calc = calculate(&input, &test_rules()).unwrap();
 
-        assert_eq!(
-            calculate(&input, &test_rules()),
-            Err(PayrollError::UnsupportedEarning)
-        );
+        assert_eq!(calc.gross_remuneration, money(dec!(16200.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
+        assert_eq!(calc.paye.amount, money(dec!(1000.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.net_pay, money(dec!(15101.00)));
+        assert_ne!(calc.gross_remuneration, calc.taxable_remuneration);
+        assert_ne!(calc.taxable_remuneration, calc.net_pay);
+        assert_ne!(calc.gross_remuneration, calc.net_pay);
+        assert_invariants(&calc);
     }
 
     #[test]
