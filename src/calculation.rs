@@ -1,11 +1,12 @@
-//! The payroll calculator: `calculate(&PayrollInput, &PayrollRules) ->
-//! Result<PayrollCalculation, PayrollError>`.
+//! The payroll calculator: `calculate(&PayrollInput, &PayrollRules,
+//! PaySchedule) -> Result<PayrollCalculation, PayrollError>`.
 //!
 //! A plain function, no trait: it stays a concrete function until a second
 //! implementation genuinely exists. Proration, band application, the SSC
 //! clamp, and rounding have no exported surface of their own — they are
 //! verified only through the values `calculate` returns.
 
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,7 @@ use crate::earning::{Earning, RemunerationBases};
 use crate::employment::EmploymentSnapshot;
 use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
+use crate::pay_schedule::PaySchedule;
 use crate::rules::{BandContribution, PayrollRules, SscClamp};
 use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 
@@ -54,12 +56,20 @@ pub enum PayrollError {
     /// The Employment's `CompensationTerms` do not cover the whole
     /// `PayPeriod` being calculated.
     CompensationTermsDoNotCoverPeriod,
+    /// `CompensationTerms.EffectiveFrom` is not itself a `PayPeriod` start
+    /// date for the Employer's `PaySchedule` (INV-014). A pay rise dated
+    /// mid-period is refused rather than silently rounded onto the next
+    /// period — an Employer must never believe a rise took effect on the
+    /// 15th while Salt quietly disagrees.
+    CompensationTermsNotEffectiveOnAPeriodStart {
+        next_valid_effective_from: NaiveDate,
+    },
     /// The Employment's end date is before its start date.
     ContradictoryEmploymentDates,
-    /// The Employment starts or ends inside the `PayPeriod` (a joiner or
-    /// leaver). Proration is a later ticket; until it exists such a period
-    /// is refused rather than paid in full or guessed at.
-    EmploymentDoesNotCoverFullPeriod,
+    /// The Employment does not overlap the `PayPeriod` at all. A joiner or
+    /// leaver — the Employment starting or ending inside the period — is
+    /// not this error; it is prorated instead (§8.2).
+    EmploymentDoesNotOverlapPeriod,
     /// `PayrollInput.earnings` contained a `BasicPay` line. `calculate`
     /// derives that line itself from the Employment's `CompensationTerms`,
     /// which is also the social security base — a second one supplied here
@@ -84,11 +94,19 @@ impl std::fmt::Display for PayrollError {
             PayrollError::CompensationTermsDoNotCoverPeriod => {
                 write!(f, "compensation terms do not cover the pay period")
             }
+            PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+                next_valid_effective_from,
+            } => {
+                write!(
+                    f,
+                    "compensation terms effective_from must be a pay period start date; the next valid effective date is {next_valid_effective_from}"
+                )
+            }
             PayrollError::ContradictoryEmploymentDates => {
                 write!(f, "employment end date is before its start date")
             }
-            PayrollError::EmploymentDoesNotCoverFullPeriod => {
-                write!(f, "employment does not cover the full pay period")
+            PayrollError::EmploymentDoesNotOverlapPeriod => {
+                write!(f, "employment does not overlap the pay period")
             }
             PayrollError::DuplicateBasicPayLine => {
                 write!(
@@ -189,15 +207,29 @@ pub struct PayrollCalculation {
 pub fn calculate(
     input: &PayrollInput,
     rules: &PayrollRules,
+    schedule: PaySchedule,
 ) -> Result<PayrollCalculation, PayrollError> {
     if !input.employment.has_coherent_dates() {
         return Err(PayrollError::ContradictoryEmploymentDates);
     }
-    if !input.employment.covers_full_period(input.period) {
-        return Err(PayrollError::EmploymentDoesNotCoverFullPeriod);
-    }
+    let employed_days = input
+        .employment
+        .overlap_days(input.period)
+        .ok_or(PayrollError::EmploymentDoesNotOverlapPeriod)?;
+    let period_days = (input.period.end() - input.period.start()).num_days() + 1;
 
     let terms = input.employment.compensation_terms();
+    if !schedule.is_period_start(terms.effective_from()) {
+        // Unreachable in practice: the only way to fail here is a calendar
+        // edge so extreme `next_period_start_after` cannot name a date
+        // within the representable range.
+        let next_valid_effective_from = schedule
+            .next_period_start_after(terms.effective_from())
+            .ok_or(PayrollError::AmountOverflow)?;
+        return Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            next_valid_effective_from,
+        });
+    }
     if !terms.covers(input.period) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
@@ -209,11 +241,29 @@ pub fn calculate(
         return Err(PayrollError::DuplicateBasicPayLine);
     }
 
+    // Proration (§8.2) applies to BasicPay only, and only for a joiner or
+    // leaver — `employed_days < period_days`. A continuing employee's
+    // BasicPay is carried through untouched, never round-tripped through
+    // decimal division, so twelve full periods sum to exactly twelve
+    // months' pay with no rounding drift.
+    let basic_pay = if employed_days < period_days {
+        let unrounded = terms
+            .basic_pay()
+            .as_decimal()
+            .checked_mul(Decimal::from(employed_days))
+            .ok_or(PayrollError::AmountOverflow)?
+            .checked_div(Decimal::from(period_days))
+            .ok_or(PayrollError::AmountOverflow)?;
+        rules.rounding_rule().apply(unrounded)?
+    } else {
+        terms.basic_pay()
+    };
+
     // Every allowance the caller supplied is kept as its own line, in the
     // order given, after the derived `BasicPay` line. Lines of the same
     // kind are never merged: a payslip has to be able to show each one.
     let mut earning_lines = Vec::with_capacity(input.earnings.len() + 1);
-    earning_lines.push(Earning::BasicPay(terms.basic_pay()));
+    earning_lines.push(Earning::BasicPay(basic_pay));
     earning_lines.extend(input.earnings.iter().copied());
 
     // Gross, taxable, and the social security base are accumulated
@@ -321,6 +371,7 @@ mod tests {
     use crate::employment::{
         CompensationTerms, EmployerId, EmploymentId, PersonId, PersonReference,
     };
+    use crate::pay_schedule::PeriodEndDay;
     use crate::rules::{PayeBand, RoundingRule, SocialSecurityRules};
     use crate::tax_year::TaxYear;
     use crate::year_to_date::PeriodsElapsed;
@@ -360,6 +411,15 @@ mod tests {
 
     fn test_period() -> PayPeriod {
         PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
+    }
+
+    /// A calendar-month schedule, chosen only so `terms()`'s `2025-01-01`
+    /// `effective_from` is a valid period start (INV-014) — it is not
+    /// meant to describe `test_period()`'s own 26th-to-25th cycle. Tests
+    /// that exercise INV-014 itself build their own period-matched
+    /// schedule.
+    fn test_schedule() -> PaySchedule {
+        PaySchedule::new(PeriodEndDay::LastDayOfMonth)
     }
 
     fn test_tax_year() -> TaxYear {
@@ -481,7 +541,7 @@ mod tests {
     #[test]
     fn pc_001_ordinary_monthly_salaried_employee() {
         let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(15000.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
@@ -499,7 +559,7 @@ mod tests {
             dec!(5000.00),
             YearToDateContext::first_period(test_tax_year()),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, Money::ZERO);
         assert_eq!(calc.employee_social_security.amount, money(dec!(45.00)));
@@ -511,7 +571,7 @@ mod tests {
     #[test]
     fn pc_003_crossing_a_tax_bracket() {
         let input = input_for(dec!(15000.00), ytd(dec!(19000.00), dec!(0.00), 2));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(800.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
@@ -536,7 +596,7 @@ mod tests {
     #[test]
     fn pc_004_crossing_multiple_brackets() {
         let input = input_for(dec!(180000.00), ytd(dec!(150000.00), dec!(25000.00), 5));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(59000.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
@@ -551,7 +611,7 @@ mod tests {
             dec!(20000.00),
             YearToDateContext::first_period(test_tax_year()),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(2000.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
@@ -571,7 +631,7 @@ mod tests {
             dec!(300.00),
             YearToDateContext::first_period(test_tax_year()),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.employee_social_security.amount, money(dec!(4.50)));
         assert_eq!(
@@ -588,7 +648,7 @@ mod tests {
     #[test]
     fn pc_011_mid_year_adoption_with_opening_balance() {
         let input = input_for(dec!(100000.00), ytd(dec!(200000.00), dec!(32000.00), 7));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(26000.00)));
         assert_eq!(calc.net_pay, money(dec!(73901.00)));
@@ -599,7 +659,7 @@ mod tests {
     #[test]
     fn pc_012_second_period_of_a_tax_year() {
         let input = input_for(dec!(20000.00), ytd(dec!(15000.00), dec!(1000.00), 1));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(2000.00)));
         assert_eq!(calc.net_pay, money(dec!(17901.00)));
@@ -629,7 +689,7 @@ mod tests {
     #[test]
     fn pc_015_corrected_earlier_period_absorbed_forward() {
         let input = input_for(dec!(25000.00), ytd(dec!(45000.00), dec!(3000.00), 3));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.paye.amount, money(dec!(3000.00)));
         assert_eq!(calc.net_pay, money(dec!(21901.00)));
@@ -648,7 +708,7 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &test_rules()),
+            calculate(&input, &test_rules(), test_schedule()),
             Err(PayrollError::ContradictoryEmploymentDates)
         );
     }
@@ -666,34 +726,137 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &test_rules()),
+            calculate(&input, &test_rules(), test_schedule()),
             Err(PayrollError::CompensationTermsDoNotCoverPeriod)
         );
     }
 
+    // PC-005: employment starts mid-period — joiner proration. A 31-day
+    // calendar-month period (Jan 2026); BasicPay 9,300.00/month is
+    // 300.00/day. The employee joins Jan 22, so only Jan 22-31 (10 days)
+    // is worked: 300.00 x 10 = 3,000.00, well under the first period's
+    // scaled zero-tax band (120,000/12 = 10,000), so PAYE is zero.
     #[test]
-    fn refuses_a_joiner_starting_mid_period() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
-        // The period runs 2026-01-26 to 2026-02-25; this Employment starts
-        // in the middle of it.
-        let employment = snapshot(date(2026, 2, 10), None, terms);
+    fn pc_005_employment_starts_mid_period_prorates_basic_pay() {
+        let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
+        let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(9300.00))).unwrap();
+        let employment = snapshot(date(2026, 1, 22), None, terms);
         let input = PayrollInput::new(
             employment,
-            test_period(),
+            period,
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
         );
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(
-            calculate(&input, &test_rules()),
-            Err(PayrollError::EmploymentDoesNotCoverFullPeriod)
+            calc.earning_lines,
+            vec![Earning::BasicPay(money(dec!(3000.00)))]
         );
+        assert_eq!(calc.gross_remuneration, money(dec!(3000.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(3000.00)));
+        assert_eq!(calc.paye.amount, Money::ZERO);
+        assert_eq!(calc.employee_social_security.amount, money(dec!(27.00)));
+        assert_eq!(calc.net_pay, money(dec!(2973.00)));
+        assert_invariants(&calc);
+    }
+
+    // PC-006: employment ends mid-period — leaver proration. A 28-day
+    // calendar-month period (Feb 2026, not a leap year); BasicPay
+    // 8,400.00/month is 300.00/day. The employee leaves Feb 12, so only
+    // Feb 1-12 (12 days) is worked: 300.00 x 12 = 3,600.00, again under
+    // the zero-tax band, so PAYE is zero.
+    #[test]
+    fn pc_006_employment_ends_mid_period_prorates_basic_pay() {
+        let period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
+        let terms = CompensationTerms::new(date(2026, 2, 1), None, money(dec!(8400.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), Some(date(2026, 2, 12)), terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+        );
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![Earning::BasicPay(money(dec!(3600.00)))]
+        );
+        assert_eq!(calc.gross_remuneration, money(dec!(3600.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(3600.00)));
+        assert_eq!(calc.paye.amount, Money::ZERO);
+        assert_eq!(calc.employee_social_security.amount, money(dec!(32.40)));
+        assert_eq!(calc.net_pay, money(dec!(3567.60)));
+        assert_invariants(&calc);
+    }
+
+    // Proration applies to BasicPay only: a joiner's allowance is paid in
+    // full even though BasicPay is cut down to the days worked.
+    #[test]
+    fn proration_never_touches_an_allowance() {
+        let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
+        let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(9300.00))).unwrap();
+        let employment = snapshot(date(2026, 1, 22), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            vec![Earning::NonTaxableAllowance(money(dec!(500.00)))],
+            YearToDateContext::first_period(test_tax_year()),
+        );
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![
+                Earning::BasicPay(money(dec!(3000.00))),
+                Earning::NonTaxableAllowance(money(dec!(500.00))),
+            ]
+        );
+        assert_invariants(&calc);
+    }
+
+    // Twelve consecutive unprorated periods must sum to exactly twelve
+    // months' pay. BasicPay deliberately does not divide evenly by any
+    // period's day count, so a calculator that always divided by
+    // `period_days` — even for a continuing employee — would accumulate
+    // rounding drift here; skipping division when the period is fully
+    // covered is what keeps the total exact.
+    #[test]
+    fn twelve_consecutive_full_periods_sum_to_exactly_twelve_months_pay() {
+        let schedule = test_schedule();
+        let periods = schedule
+            .generate_periods(2026, crate::pay_schedule::Month::new(1).unwrap(), 12)
+            .unwrap();
+        let basic_pay = dec!(12345.67);
+        let terms = CompensationTerms::new(periods[0].start(), None, money(basic_pay)).unwrap();
+
+        let mut total = Money::ZERO;
+        for period in &periods {
+            let employment = snapshot(date(2020, 1, 1), None, terms);
+            let input = PayrollInput::new(
+                employment,
+                *period,
+                Vec::new(),
+                YearToDateContext::first_period(test_tax_year()),
+            );
+            let calc = calculate(&input, &test_rules(), schedule).unwrap();
+            assert_eq!(
+                calc.earning_lines,
+                vec![Earning::BasicPay(money(basic_pay))]
+            );
+            total = total.checked_add(calc.earning_lines[0].amount()).unwrap();
+        }
+
+        assert_eq!(total, money(basic_pay * dec!(12)));
     }
 
     #[test]
-    fn refuses_a_leaver_ending_mid_period() {
+    fn refuses_an_employment_that_does_not_overlap_the_period_at_all() {
         let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
-        let employment = snapshot(date(2025, 1, 1), Some(date(2026, 2, 10)), terms);
+        // The employment ended well before test_period() (2026-01-26 to
+        // 2026-02-25) begins — a genuine mismatch, not a leaver.
+        let employment = snapshot(date(2025, 1, 1), Some(date(2025, 12, 1)), terms);
         let input = PayrollInput::new(
             employment,
             test_period(),
@@ -702,8 +865,37 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &test_rules()),
-            Err(PayrollError::EmploymentDoesNotCoverFullPeriod)
+            calculate(&input, &test_rules(), test_schedule()),
+            Err(PayrollError::EmploymentDoesNotOverlapPeriod)
+        );
+    }
+
+    // INV-014: a `CompensationTerms.EffectiveFrom` that is not itself a
+    // `PayPeriod` start date is refused — this is the "pay rise dated
+    // mid-period" case, distinct from a joiner or leaver. The schedule
+    // here matches test_period()'s own 26th-to-25th cycle, so the next
+    // valid date is 2026-01-26 — test_period()'s own start.
+    #[test]
+    fn refuses_compensation_terms_not_effective_on_a_period_start() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(
+            crate::pay_schedule::DayOfMonth::new(25).unwrap(),
+        ));
+        // 2026-01-10 is before test_period()'s start (so the terms still
+        // cover the period) but is not itself a period start.
+        let terms = CompensationTerms::new(date(2026, 1, 10), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules(), schedule),
+            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+                next_valid_effective_from: date(2026, 1, 26),
+            })
         );
     }
 
@@ -721,7 +913,7 @@ mod tests {
             vec![Earning::TaxableAllowance(money(dec!(2000.00)))],
             ytd(dec!(110000.00), dec!(0.00), 11),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(17000.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
@@ -757,7 +949,7 @@ mod tests {
             vec![Earning::NonTaxableAllowance(money(dec!(1200.00)))],
             ytd(dec!(110000.00), dec!(0.00), 11),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(16200.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
@@ -799,7 +991,7 @@ mod tests {
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(calc.gross_remuneration, money(dec!(18200.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
@@ -835,7 +1027,7 @@ mod tests {
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
         );
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         assert_eq!(
             calc.earning_lines,
@@ -861,10 +1053,11 @@ mod tests {
             vec![Earning::TaxableAllowance(Money::ZERO)],
             ytd(dec!(110000.00), dec!(0.00), 11),
         );
-        let calc = calculate(&with_zero, &test_rules()).unwrap();
+        let calc = calculate(&with_zero, &test_rules(), test_schedule()).unwrap();
         let baseline = calculate(
             &input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11)),
             &test_rules(),
+            test_schedule(),
         )
         .unwrap();
 
@@ -890,7 +1083,7 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &test_rules()),
+            calculate(&input, &test_rules(), test_schedule()),
             Err(PayrollError::AmountOverflow)
         );
     }
@@ -905,7 +1098,7 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &test_rules()),
+            calculate(&input, &test_rules(), test_schedule()),
             Err(PayrollError::DuplicateBasicPayLine)
         );
     }
@@ -918,7 +1111,7 @@ mod tests {
         let input = input_for(dec!(1000.00), ytd(dec!(1000.00), dec!(999999.00), 0));
 
         assert_eq!(
-            calculate(&input, &test_rules()),
+            calculate(&input, &test_rules(), test_schedule()),
             Err(PayrollError::PriorPayeExceedsRecalculatedLiability)
         );
     }
@@ -938,7 +1131,7 @@ mod tests {
         );
 
         assert_eq!(
-            calculate(&input, &rules),
+            calculate(&input, &rules, test_schedule()),
             Err(PayrollError::DeductionsExceedGrossRemuneration)
         );
     }
@@ -946,7 +1139,7 @@ mod tests {
     #[test]
     fn deserialize_round_trips() {
         let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
-        let calc = calculate(&input, &test_rules()).unwrap();
+        let calc = calculate(&input, &test_rules(), test_schedule()).unwrap();
 
         let input_json = serde_json::to_string(&input).unwrap();
         assert_eq!(

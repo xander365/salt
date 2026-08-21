@@ -185,6 +185,44 @@ impl PaySchedule {
     }
 }
 
+impl PaySchedule {
+    /// The smallest `PayPeriod` start date under this schedule that is `>=`
+    /// `date`. Every period start is `end_date` of some month plus one day
+    /// (see `generate_periods`), and successive starts are monotonically
+    /// increasing with the month, so scanning a small window of months
+    /// around `date` finds it without re-deriving the whole schedule.
+    /// `None` only at the extreme edge of the representable calendar.
+    fn period_start_on_or_after(self, date: NaiveDate) -> Option<NaiveDate> {
+        let (mut year, mut month) = previous_month(date.year(), date.month());
+        // One month back covers a start that falls just before `date`'s
+        // month (e.g. a short prior February); three steps forward covers
+        // every period length from 28 to 31 days.
+        for _ in 0..4 {
+            if let Some(start) = self.end_date(year, month).and_then(|end| end.succ_opt())
+                && start >= date
+            {
+                return Some(start);
+            }
+            (year, month) = next_month(year, month);
+        }
+        None
+    }
+
+    /// Whether `date` is itself a `PayPeriod` start date under this
+    /// schedule (INV-014).
+    pub(crate) fn is_period_start(self, date: NaiveDate) -> bool {
+        self.period_start_on_or_after(date) == Some(date)
+    }
+
+    /// The next `PayPeriod` start date strictly after `date` — named in the
+    /// refusal when a `CompensationTerms.EffectiveFrom` is not itself a
+    /// period start.
+    pub(crate) fn next_period_start_after(self, date: NaiveDate) -> Option<NaiveDate> {
+        date.succ_opt()
+            .and_then(|next| self.period_start_on_or_after(next))
+    }
+}
+
 /// How many periods `generate_periods` reserves space for up front. A
 /// hundred years of monthly periods: far past any real schedule, and small
 /// enough that an absurd `count` cannot turn into a huge allocation.
@@ -403,6 +441,63 @@ mod tests {
             schedule.generate_periods(last_year, month(12), 2),
             Err(PeriodGenerationError::YearOutOfRange(_))
         ));
+    }
+
+    #[test]
+    fn is_period_start_accepts_a_26th_to_25th_schedules_own_starts() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        assert!(schedule.is_period_start(date(2026, 1, 26)));
+        assert!(schedule.is_period_start(date(2026, 3, 26)));
+    }
+
+    #[test]
+    fn is_period_start_rejects_a_mid_period_date() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        assert!(!schedule.is_period_start(date(2026, 2, 10)));
+    }
+
+    #[test]
+    fn is_period_start_handles_the_february_28_rollover_in_a_non_leap_year() {
+        // Day(28) ends periods on the 28th of every month, including
+        // February. In a non-leap year that period's successor starts
+        // March 1st, since Feb 29th does not exist.
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(28)));
+        assert!(schedule.is_period_start(date(2026, 3, 1)));
+        assert!(!schedule.is_period_start(date(2026, 2, 28)));
+    }
+
+    #[test]
+    fn is_period_start_handles_the_february_28_rollover_in_a_leap_year() {
+        // 2028 is a leap year, so the period ending Feb 28 is followed by
+        // one starting Feb 29th, not March 1st.
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(28)));
+        assert!(schedule.is_period_start(date(2028, 2, 29)));
+        assert!(!schedule.is_period_start(date(2028, 3, 1)));
+    }
+
+    #[test]
+    fn is_period_start_accepts_the_first_of_the_month_for_a_calendar_schedule() {
+        let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
+        assert!(schedule.is_period_start(date(2026, 3, 1)));
+        assert!(!schedule.is_period_start(date(2026, 3, 15)));
+    }
+
+    #[test]
+    fn next_period_start_after_names_the_start_of_the_following_period() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        assert_eq!(
+            schedule.next_period_start_after(date(2026, 2, 10)),
+            Some(date(2026, 2, 26))
+        );
+    }
+
+    #[test]
+    fn next_period_start_after_a_valid_start_names_the_one_after_it() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        assert_eq!(
+            schedule.next_period_start_after(date(2026, 1, 26)),
+            Some(date(2026, 2, 26))
+        );
     }
 
     #[test]

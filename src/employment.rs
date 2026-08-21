@@ -224,12 +224,22 @@ impl EmploymentSnapshot {
         self.end_date.is_none_or(|end| end >= self.start_date)
     }
 
-    /// Whether this Employment covers every day of `period` — i.e. it is
-    /// not a joiner starting mid-period or a leaver ending mid-period.
-    /// Proration for partial periods is a later ticket; until then such a
-    /// period is refused rather than paid in full or guessed at.
-    pub(crate) fn covers_full_period(&self, period: PayPeriod) -> bool {
-        self.start_date <= period.start() && self.end_date.is_none_or(|end| end >= period.end())
+    /// The number of days this Employment was active within `period` — the
+    /// numerator `calculate` uses to prorate `BasicPay` for a joiner or a
+    /// leaver. `None` if the Employment does not overlap `period` at all,
+    /// which is a genuine mismatch rather than an ordinary joiner or
+    /// leaver: those are not errors (§8.2), but an Employment wholly
+    /// before or after the period being calculated is.
+    pub(crate) fn overlap_days(&self, period: PayPeriod) -> Option<i64> {
+        let overlap_start = self.start_date.max(period.start());
+        let overlap_end = self
+            .end_date
+            .map_or(period.end(), |end| end.min(period.end()));
+        if overlap_start > overlap_end {
+            None
+        } else {
+            Some((overlap_end - overlap_start).num_days() + 1)
+        }
     }
 }
 
@@ -292,6 +302,58 @@ mod tests {
         let snapshot = snapshot();
         assert_eq!(snapshot.employer_id().as_str(), "employer-1");
         assert_eq!(snapshot.person().person_id().as_str(), "person-1");
+    }
+
+    fn period(start: NaiveDate, end: NaiveDate) -> PayPeriod {
+        PayPeriod::new(start, end).unwrap()
+    }
+
+    fn snapshot_dated(start_date: NaiveDate, end_date: Option<NaiveDate>) -> EmploymentSnapshot {
+        EmploymentSnapshot::new(
+            EmploymentId::new("emp-1"),
+            EmployerId::new("employer-1"),
+            PersonReference::new(PersonId::new("person-1")),
+            start_date,
+            end_date,
+            terms(),
+        )
+    }
+
+    #[test]
+    fn overlap_days_is_the_full_period_for_a_continuing_employee() {
+        let full_period = period(date(2026, 1, 1), date(2026, 1, 31));
+        let employment = snapshot_dated(date(2025, 1, 1), None);
+        assert_eq!(employment.overlap_days(full_period), Some(31));
+    }
+
+    #[test]
+    fn overlap_days_counts_from_the_join_date_for_a_joiner() {
+        let full_period = period(date(2026, 1, 1), date(2026, 1, 31));
+        let employment = snapshot_dated(date(2026, 1, 22), None);
+        // Jan 22 through Jan 31 inclusive is 10 days.
+        assert_eq!(employment.overlap_days(full_period), Some(10));
+    }
+
+    #[test]
+    fn overlap_days_counts_to_the_leaving_date_for_a_leaver() {
+        let full_period = period(date(2026, 2, 1), date(2026, 2, 28));
+        let employment = snapshot_dated(date(2025, 1, 1), Some(date(2026, 2, 12)));
+        // Feb 1 through Feb 12 inclusive is 12 days.
+        assert_eq!(employment.overlap_days(full_period), Some(12));
+    }
+
+    #[test]
+    fn overlap_days_is_none_when_the_employment_ended_before_the_period() {
+        let full_period = period(date(2026, 2, 1), date(2026, 2, 28));
+        let employment = snapshot_dated(date(2025, 1, 1), Some(date(2026, 1, 15)));
+        assert_eq!(employment.overlap_days(full_period), None);
+    }
+
+    #[test]
+    fn overlap_days_is_none_when_the_employment_starts_after_the_period() {
+        let full_period = period(date(2026, 2, 1), date(2026, 2, 28));
+        let employment = snapshot_dated(date(2026, 3, 1), None);
+        assert_eq!(employment.overlap_days(full_period), None);
     }
 
     #[test]
