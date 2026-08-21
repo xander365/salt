@@ -134,12 +134,14 @@ impl CompensationTerms {
         self.basic_pay
     }
 
-    /// Whether these terms are in force for every day of `period`.
-    pub(crate) fn covers(&self, period: PayPeriod) -> bool {
-        self.effective_from <= period.start()
-            && self
-                .effective_until
-                .is_none_or(|until| until >= period.end())
+    /// Whether these terms are in force for every day from `from` to `to`
+    /// inclusive — the days actually being paid for, not the whole
+    /// `PayPeriod`. For a continuing employee the two are the same span.
+    /// For a leaver they are not: terms that end on the employee's last
+    /// day cover every day that is paid, and refusing that ordinary case
+    /// would make a correctly recorded leaver uncalculable.
+    pub(crate) fn cover_days(&self, from: NaiveDate, to: NaiveDate) -> bool {
+        self.effective_from <= from && self.effective_until.is_none_or(|until| until >= to)
     }
 }
 
@@ -158,6 +160,32 @@ impl From<CompensationTerms> for RawCompensationTerms {
             effective_until: terms.effective_until,
             basic_pay: terms.basic_pay,
         }
+    }
+}
+
+/// The days of one `PayPeriod` an Employment was actually active for.
+/// Always non-empty: `first <= last`, because the only way to obtain one
+/// is `EmploymentSnapshot::employed_days_within`, which returns `None`
+/// rather than an empty span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EmployedSpan {
+    first: NaiveDate,
+    last: NaiveDate,
+}
+
+impl EmployedSpan {
+    pub(crate) fn first(self) -> NaiveDate {
+        self.first
+    }
+
+    pub(crate) fn last(self) -> NaiveDate {
+        self.last
+    }
+
+    /// The inclusive day count. At least 1, and bounded by the length of
+    /// the `PayPeriod` it was taken from.
+    pub(crate) fn days(self) -> i64 {
+        (self.last - self.first).num_days() + 1
     }
 }
 
@@ -224,21 +252,26 @@ impl EmploymentSnapshot {
         self.end_date.is_none_or(|end| end >= self.start_date)
     }
 
-    /// The number of days this Employment was active within `period` — the
+    /// The first and last day, inclusive, on which this Employment was
+    /// active within `period` — the days actually being paid for, and the
     /// numerator `calculate` uses to prorate `BasicPay` for a joiner or a
     /// leaver. `None` if the Employment does not overlap `period` at all,
     /// which is a genuine mismatch rather than an ordinary joiner or
     /// leaver: those are not errors (§8.2), but an Employment wholly
     /// before or after the period being calculated is.
-    pub(crate) fn overlap_days(&self, period: PayPeriod) -> Option<i64> {
-        let overlap_start = self.start_date.max(period.start());
-        let overlap_end = self
+    ///
+    /// Callers get the dates, not just a count, because the same span
+    /// answers a second question — which days the `CompensationTerms`
+    /// must be in force for (see `CompensationTerms::cover_days`).
+    pub(crate) fn employed_days_within(&self, period: PayPeriod) -> Option<EmployedSpan> {
+        let first = self.start_date.max(period.start());
+        let last = self
             .end_date
             .map_or(period.end(), |end| end.min(period.end()));
-        if overlap_start > overlap_end {
+        if first > last {
             None
         } else {
-            Some((overlap_end - overlap_start).num_days() + 1)
+            Some(EmployedSpan { first, last })
         }
     }
 }
@@ -304,8 +337,9 @@ mod tests {
         assert_eq!(snapshot.person().person_id().as_str(), "person-1");
     }
 
-    // `overlap_days` is exercised through the `calculate` seam — see
-    // PC-005, PC-006, and the no-overlap refusals in `calculation.rs`.
+    // `employed_days_within` and `cover_days` are exercised through the
+    // `calculate` seam — see PC-005, PC-006, the leaver whose terms end on
+    // their last day, and the no-overlap refusals in `calculation.rs`.
 
     #[test]
     fn deserialize_round_trips() {

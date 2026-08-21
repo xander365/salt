@@ -64,9 +64,21 @@ impl PayrollInput {
 /// has no rule for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayrollError {
-    /// The Employment's `CompensationTerms` do not cover the whole
-    /// `PayPeriod` being calculated.
+    /// The Employment's `CompensationTerms` are not in force for every day
+    /// of the `PayPeriod` that is actually being paid for. For a
+    /// continuing employee that is the whole period; for a joiner or a
+    /// leaver it is the days they were employed.
     CompensationTermsDoNotCoverPeriod,
+    /// `PayrollInput.period` is not one of the periods the Employer's
+    /// `PaySchedule` generates. Without this, INV-014 would be checked
+    /// against a schedule the period itself does not follow, and
+    /// proration would divide by the length of a period the Employer
+    /// never runs (INV-012).
+    PayPeriodNotOnTheEmployersSchedule { expected: PayPeriod },
+    /// The `PaySchedule` could not name the period around a date, because
+    /// that date sits at the extreme edge of the representable calendar.
+    /// Unreachable with real dates.
+    PayScheduleOutsideRepresentableCalendar { date: NaiveDate },
     /// `CompensationTerms.EffectiveFrom` is not itself a `PayPeriod` start
     /// date for the Employer's `PaySchedule` (INV-014). A pay rise dated
     /// mid-period is refused rather than silently rounded onto the next
@@ -103,7 +115,21 @@ impl std::fmt::Display for PayrollError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PayrollError::CompensationTermsDoNotCoverPeriod => {
-                write!(f, "compensation terms do not cover the pay period")
+                write!(f, "compensation terms do not cover every day being paid")
+            }
+            PayrollError::PayPeriodNotOnTheEmployersSchedule { expected } => {
+                write!(
+                    f,
+                    "the pay period is not one the employer's pay schedule generates; the period around its start date is {} to {}",
+                    expected.start(),
+                    expected.end()
+                )
+            }
+            PayrollError::PayScheduleOutsideRepresentableCalendar { date } => {
+                write!(
+                    f,
+                    "the pay schedule cannot name the period around {date}: it is outside the representable calendar"
+                )
             }
             PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
                 next_valid_effective_from,
@@ -222,26 +248,37 @@ pub fn calculate(
     if !input.employment.has_coherent_dates() {
         return Err(PayrollError::ContradictoryEmploymentDates);
     }
-    let employed_days = input
+    // The period is checked against the schedule before anything is
+    // derived from either. Everything below leans on the two agreeing:
+    // INV-014 compares `effective_from` against this schedule's period
+    // starts, and proration divides by this period's length.
+    let scheduled_period = period_containing(input.schedule, input.period.start())?;
+    if scheduled_period != input.period {
+        return Err(PayrollError::PayPeriodNotOnTheEmployersSchedule {
+            expected: scheduled_period,
+        });
+    }
+
+    let employed = input
         .employment
-        .overlap_days(input.period)
+        .employed_days_within(input.period)
         .ok_or(PayrollError::EmploymentDoesNotOverlapPeriod)?;
+    let employed_days = employed.days();
     let period_days = (input.period.end() - input.period.start()).num_days() + 1;
 
     let terms = input.employment.compensation_terms();
-    if !input.schedule.is_period_start(terms.effective_from()) {
-        // Unreachable in practice: the only way to fail here is a calendar
-        // edge so extreme `next_period_start_after` cannot name a date
-        // within the representable range.
-        let next_valid_effective_from = input
-            .schedule
-            .next_period_start_after(terms.effective_from())
-            .ok_or(PayrollError::AmountOverflow)?;
+    let effective_period = period_containing(input.schedule, terms.effective_from())?;
+    if effective_period.start() != terms.effective_from() {
+        let next_valid_effective_from = effective_period.end().succ_opt().ok_or(
+            PayrollError::PayScheduleOutsideRepresentableCalendar {
+                date: terms.effective_from(),
+            },
+        )?;
         return Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
             next_valid_effective_from,
         });
     }
-    if !terms.covers(input.period) {
+    if !terms.cover_days(employed.first(), employed.last()) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
     if input
@@ -376,13 +413,22 @@ pub fn calculate(
     })
 }
 
+/// `PaySchedule::period_containing`, with its one calendar-edge failure
+/// turned into the refusal `calculate` reports. Named rather than
+/// inlined twice so both callers fail the same way.
+fn period_containing(schedule: PaySchedule, date: NaiveDate) -> Result<PayPeriod, PayrollError> {
+    schedule
+        .period_containing(date)
+        .ok_or(PayrollError::PayScheduleOutsideRepresentableCalendar { date })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::employment::{
         CompensationTerms, EmployerId, EmploymentId, PersonId, PersonReference,
     };
-    use crate::pay_schedule::PeriodEndDay;
+    use crate::pay_schedule::{DayOfMonth, Month, PeriodEndDay};
     use crate::rules::{PayeBand, RoundingRule, SocialSecurityRules};
     use crate::tax_year::TaxYear;
     use crate::year_to_date::PeriodsElapsed;
@@ -424,12 +470,19 @@ mod tests {
         PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
     }
 
-    /// A calendar-month schedule, chosen only so `terms()`'s `2025-01-01`
-    /// `effective_from` is a valid period start (INV-014) — it is not
-    /// meant to describe `test_period()`'s own 26th-to-25th cycle. Tests
-    /// that exercise INV-014 itself build their own period-matched
-    /// schedule.
+    /// The schedule `test_period()` (2026-01-26 to 2026-02-25) belongs
+    /// to. `calculate` refuses a period its schedule does not generate, so
+    /// these two are never mismatched: a test that wants calendar-month
+    /// periods uses `calendar_month_schedule()` and a calendar-month
+    /// period together.
     fn test_schedule() -> PaySchedule {
+        PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()))
+    }
+
+    /// A schedule whose periods are whole calendar months, used by the
+    /// proration scenarios so the 28-, 29-, 30-, and 31-day denominators
+    /// are easy to read.
+    fn calendar_month_schedule() -> PaySchedule {
         PaySchedule::new(PeriodEndDay::LastDayOfMonth)
     }
 
@@ -453,7 +506,8 @@ mod tests {
     }
 
     fn employment_paying(basic_pay: Decimal) -> EmploymentSnapshot {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(basic_pay)).unwrap();
+        // 2025-01-26 is a period start under `test_schedule()` (INV-014).
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(basic_pay)).unwrap();
         snapshot(date(2025, 1, 1), None, terms)
     }
 
@@ -715,7 +769,7 @@ mod tests {
 
     #[test]
     fn refuses_contradictory_employment_dates() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(dec!(5000.00))).unwrap();
         let employment = snapshot(date(2026, 3, 1), Some(date(2026, 1, 1)), terms);
         let input = PayrollInput::new(
             employment,
@@ -733,8 +787,9 @@ mod tests {
 
     #[test]
     fn refuses_compensation_terms_that_do_not_cover_the_period() {
-        // Effective only from after the period starts.
-        let terms = CompensationTerms::new(date(2026, 2, 1), None, money(dec!(5000.00))).unwrap();
+        // A period start under `test_schedule()`, but the period *after*
+        // test_period(): the terms are not in force for any day of it.
+        let terms = CompensationTerms::new(date(2026, 2, 26), None, money(dec!(5000.00))).unwrap();
         let employment = snapshot(date(2025, 1, 1), None, terms);
         let input = PayrollInput::new(
             employment,
@@ -765,7 +820,7 @@ mod tests {
             period,
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
-            test_schedule(),
+            calendar_month_schedule(),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -796,7 +851,7 @@ mod tests {
             period,
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
-            test_schedule(),
+            calendar_month_schedule(),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -812,6 +867,185 @@ mod tests {
         assert_invariants(&calc);
     }
 
+    // A 29-day denominator: February in a leap year. BasicPay 8,700.00
+    // over 29 days is 300.00/day; the employee joins Feb 20, so Feb 20-29
+    // (10 days) is worked: 300.00 x 10 = 3,000.00. A hardcoded 30-day
+    // denominator would give 2,900.00 and a hardcoded 28 would give
+    // 3,107.14.
+    #[test]
+    fn proration_divides_by_a_leap_year_februarys_own_29_days() {
+        let period = PayPeriod::new(date(2028, 2, 1), date(2028, 2, 29)).unwrap();
+        let terms = CompensationTerms::new(date(2028, 2, 1), None, money(dec!(8700.00))).unwrap();
+        let employment = snapshot(date(2028, 2, 20), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            calendar_month_schedule(),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![Earning::BasicPay(money(dec!(3000.00)))]
+        );
+        assert_eq!(calc.employee_social_security.amount, money(dec!(27.00)));
+        assert_eq!(calc.net_pay, money(dec!(2973.00)));
+        assert_invariants(&calc);
+    }
+
+    // A 30-day denominator: April. BasicPay 9,000.00 over 30 days is
+    // 300.00/day; the employee leaves Apr 20, so Apr 1-20 (20 days) is
+    // worked: 300.00 x 20 = 6,000.00.
+    #[test]
+    fn proration_divides_by_a_30_day_periods_own_length() {
+        let period = PayPeriod::new(date(2026, 4, 1), date(2026, 4, 30)).unwrap();
+        let terms = CompensationTerms::new(date(2026, 4, 1), None, money(dec!(9000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), Some(date(2026, 4, 20)), terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            calendar_month_schedule(),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![Earning::BasicPay(money(dec!(6000.00)))]
+        );
+        assert_eq!(calc.employee_social_security.amount, money(dec!(54.00)));
+        assert_eq!(calc.net_pay, money(dec!(5946.00)));
+        assert_invariants(&calc);
+    }
+
+    // Proration that does not divide evenly is rounded half-up to cents
+    // once, on the line (§8.3). 10,000.00 x 10 / 31 = 3,225.80645...,
+    // which becomes 3,225.81. SSC is then charged on the rounded line:
+    // 3,225.81 x 0.009 = 29.03229 -> 29.03.
+    #[test]
+    fn a_proration_that_does_not_divide_evenly_is_rounded_half_up_to_cents() {
+        let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
+        let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(10000.00))).unwrap();
+        let employment = snapshot(date(2026, 1, 22), None, terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            calendar_month_schedule(),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![Earning::BasicPay(money(dec!(3225.81)))]
+        );
+        assert_eq!(calc.gross_remuneration, money(dec!(3225.81)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(29.03)));
+        assert_eq!(calc.net_pay, money(dec!(3196.78)));
+        assert_invariants(&calc);
+    }
+
+    // A leaver's `CompensationTerms` ordinarily end on their last day.
+    // Those terms are in force for every day being paid for, so the
+    // calculation prorates exactly as PC-006 does rather than refusing.
+    #[test]
+    fn a_leaver_whose_terms_end_on_their_last_day_is_prorated_not_refused() {
+        let period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
+        let terms = CompensationTerms::new(
+            date(2026, 2, 1),
+            Some(date(2026, 2, 12)),
+            money(dec!(8400.00)),
+        )
+        .unwrap();
+        let employment = snapshot(date(2025, 1, 1), Some(date(2026, 2, 12)), terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            calendar_month_schedule(),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(
+            calc.earning_lines,
+            vec![Earning::BasicPay(money(dec!(3600.00)))]
+        );
+        assert_invariants(&calc);
+    }
+
+    // Terms that stop before the employee did leave days unpriced, and
+    // Salt has no rule for what those days are worth (INV-012).
+    #[test]
+    fn refuses_terms_that_end_before_the_last_day_actually_employed() {
+        let period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
+        let terms = CompensationTerms::new(
+            date(2026, 2, 1),
+            Some(date(2026, 2, 10)),
+            money(dec!(8400.00)),
+        )
+        .unwrap();
+        let employment = snapshot(date(2025, 1, 1), Some(date(2026, 2, 12)), terms);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            calendar_month_schedule(),
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::CompensationTermsDoNotCoverPeriod)
+        );
+    }
+
+    // The schedule validates `effective_from` and the period supplies the
+    // proration denominator, so a period the schedule does not generate
+    // would make both meaningless. Both a start that is not a period start
+    // and an end that does not match are refused, and the refusal names
+    // the period the schedule actually runs.
+    #[test]
+    fn refuses_a_pay_period_that_is_not_one_of_the_schedules_own() {
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(dec!(5000.00))).unwrap();
+        let employment = snapshot(date(2025, 1, 1), None, terms);
+
+        // A 26th-to-25th period offered against a calendar-month schedule.
+        let input = PayrollInput::new(
+            employment.clone(),
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            calendar_month_schedule(),
+        );
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PayPeriodNotOnTheEmployersSchedule {
+                expected: PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap(),
+            })
+        );
+
+        // The right start, the wrong end.
+        let truncated = PayPeriod::new(date(2026, 1, 26), date(2026, 2, 24)).unwrap();
+        let input = PayrollInput::new(
+            employment,
+            truncated,
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
+        );
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PayPeriodNotOnTheEmployersSchedule {
+                expected: test_period(),
+            })
+        );
+    }
+
     // Proration applies to BasicPay only: a joiner's allowance is paid in
     // full even though BasicPay is cut down to the days worked.
     #[test]
@@ -822,9 +1056,12 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
-            vec![Earning::NonTaxableAllowance(money(dec!(500.00)))],
+            vec![
+                Earning::TaxableAllowance(money(dec!(800.00))),
+                Earning::NonTaxableAllowance(money(dec!(500.00))),
+            ],
             YearToDateContext::first_period(test_tax_year()),
-            test_schedule(),
+            calendar_month_schedule(),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -832,9 +1069,16 @@ mod tests {
             calc.earning_lines,
             vec![
                 Earning::BasicPay(money(dec!(3000.00))),
+                Earning::TaxableAllowance(money(dec!(800.00))),
                 Earning::NonTaxableAllowance(money(dec!(500.00))),
             ]
         );
+        // Both allowance kinds are paid in full: 3,000.00 + 800.00 +
+        // 500.00 gross, 3,000.00 + 800.00 taxable, and SSC still on the
+        // prorated 3,000.00 alone.
+        assert_eq!(calc.gross_remuneration, money(dec!(4300.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(3800.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(27.00)));
         assert_invariants(&calc);
     }
 
@@ -848,7 +1092,7 @@ mod tests {
     fn twelve_consecutive_full_periods_sum_to_exactly_twelve_months_pay() {
         let schedule = test_schedule();
         let periods = schedule
-            .generate_periods(2026, crate::pay_schedule::Month::new(1).unwrap(), 12)
+            .generate_periods(2026, Month::new(1).unwrap(), 12)
             .unwrap();
         let basic_pay = dec!(12345.67);
         let terms = CompensationTerms::new(periods[0].start(), None, money(basic_pay)).unwrap();
@@ -877,7 +1121,7 @@ mod tests {
 
     #[test]
     fn refuses_an_employment_that_does_not_overlap_the_period_at_all() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(dec!(5000.00))).unwrap();
         // The employment ended well before test_period() (2026-01-26 to
         // 2026-02-25) begins — a genuine mismatch, not a leaver.
         let employment = snapshot(date(2025, 1, 1), Some(date(2025, 12, 1)), terms);
@@ -897,7 +1141,7 @@ mod tests {
 
     #[test]
     fn refuses_an_employment_that_starts_after_the_period() {
-        let terms = CompensationTerms::new(date(2025, 1, 1), None, money(dec!(5000.00))).unwrap();
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(dec!(5000.00))).unwrap();
         // The employment starts well after test_period() (2026-01-26 to
         // 2026-02-25) ends — a genuine mismatch, not a joiner.
         let employment = snapshot(date(2026, 3, 1), None, terms);
@@ -920,9 +1164,7 @@ mod tests {
     // schedule — the ordinary case INV-014 must not block.
     #[test]
     fn accepts_compensation_terms_effective_on_the_schedules_own_period_start() {
-        let schedule = PaySchedule::new(PeriodEndDay::Day(
-            crate::pay_schedule::DayOfMonth::new(25).unwrap(),
-        ));
+        let schedule = PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()));
         // test_period() (2026-01-26 to 2026-02-25) itself starts on this
         // schedule's own period-start day.
         let terms = CompensationTerms::new(date(2026, 1, 26), None, money(dec!(5000.00))).unwrap();
@@ -944,9 +1186,7 @@ mod tests {
     // the named next valid date.
     #[test]
     fn refuses_a_pay_rise_across_the_february_28_rollover_in_a_non_leap_year() {
-        let schedule = PaySchedule::new(PeriodEndDay::Day(
-            crate::pay_schedule::DayOfMonth::new(28).unwrap(),
-        ));
+        let schedule = PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(28).unwrap()));
         let period = PayPeriod::new(date(2026, 3, 1), date(2026, 3, 28)).unwrap();
         // 2026-02-28 is the end of the *previous* period, not a start.
         let terms = CompensationTerms::new(date(2026, 2, 28), None, money(dec!(5000.00))).unwrap();
@@ -971,9 +1211,7 @@ mod tests {
     // after Feb 28th starts Feb 29th, not Mar 1st.
     #[test]
     fn refuses_a_pay_rise_across_the_february_28_rollover_in_a_leap_year() {
-        let schedule = PaySchedule::new(PeriodEndDay::Day(
-            crate::pay_schedule::DayOfMonth::new(28).unwrap(),
-        ));
+        let schedule = PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(28).unwrap()));
         let period = PayPeriod::new(date(2028, 2, 29), date(2028, 3, 28)).unwrap();
         let terms = CompensationTerms::new(date(2028, 2, 28), None, money(dec!(5000.00))).unwrap();
         let employment = snapshot(date(2025, 1, 1), None, terms);
@@ -1000,9 +1238,7 @@ mod tests {
     // valid date is 2026-01-26 — test_period()'s own start.
     #[test]
     fn refuses_compensation_terms_not_effective_on_a_period_start() {
-        let schedule = PaySchedule::new(PeriodEndDay::Day(
-            crate::pay_schedule::DayOfMonth::new(25).unwrap(),
-        ));
+        let schedule = PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()));
         // 2026-01-10 is before test_period()'s start (so the terms still
         // cover the period) but is not itself a period start.
         let terms = CompensationTerms::new(date(2026, 1, 10), None, money(dec!(5000.00))).unwrap();

@@ -210,7 +210,7 @@ PayrollInput
 - PaySchedule
 ```
 
-`PaySchedule` is carried inside `PayrollInput`, not passed beside it: it exists only to validate `CompensationTerms.EffectiveFrom` against INV-014 (it never selects or generates `PayPeriod` — the caller supplies that directly), but the same `PayrollInput` must produce the same result every time (INV-002). Passing it beside the input, the way `PayrollRules` is, would let one caller-supplied schedule accept a `CompensationTerms` that another schedule rejects for the identical `PayrollInput` — a hidden second axis of determinism that finalization (§10) does not freeze.
+`PaySchedule` is carried inside `PayrollInput`, not passed beside it: it exists only to validate dates — that `PayrollInput.PayPeriod` is one of the periods the schedule generates, and that `CompensationTerms.EffectiveFrom` is one of their start dates (INV-014). It never selects or generates the `PayPeriod` — the caller supplies that directly, and the calculator checks it rather than replacing it. But the same `PayrollInput` must produce the same result every time (INV-002). Passing it beside the input, the way `PayrollRules` is, would let one caller-supplied schedule accept a `CompensationTerms` that another schedule rejects for the identical `PayrollInput` — a hidden second axis of determinism that finalization (§10) does not freeze.
 
 `PayrollRules` is passed **beside** the input:
 
@@ -379,7 +379,7 @@ Small types guard local invariants; `calculate` guards everything relational.
 ## 8. Calculation pipeline
 
 ```text
- 1. Validate context (rules cover period, terms cover period, YTD present)
+ 1. Validate context (period is on the Employer's PaySchedule, rules cover period, terms cover every day employed, YTD present)
  2. Determine applicable CompensationTerms for the period
  3. Build earning lines, prorating BasicPay for joiners and leavers
  4. GrossRemuneration   = all earning lines
@@ -408,6 +408,12 @@ factor = days employed within the PayPeriod / total calendar days in the PayPeri
 ```
 
 The denominator is the actual length of that period (28–31 days), not a fixed number. It applies to `BasicPay` only, and only for joiners and leavers.
+
+A fully employed period is **not** divided and re-multiplied. `BasicPay` is carried through untouched, so twelve consecutive unprorated periods sum to exactly twelve months' pay with no rounding drift.
+
+The `CompensationTerms` must be in force for every day **being paid for**, not for every day of the period. For a continuing employee those are the same span; for a leaver they are not, and terms that end on the employee's last day are the ordinary, correct record — refusing them would make a correctly recorded leaver uncalculable. Terms that stop *before* the last day employed are still refused: those days are unpriced, and Salt does not guess (INV-012).
+
+Proration divides by the length of the supplied `PayPeriod`, so that period must be one the Employer's `PaySchedule` actually generates. A period the schedule does not produce is refused, naming the period the schedule runs around that start date. Without this, INV-014 would be checked against a schedule the period itself does not follow.
 
 ### 8.3 Rounding
 

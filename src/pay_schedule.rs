@@ -186,40 +186,36 @@ impl PaySchedule {
 }
 
 impl PaySchedule {
-    /// The smallest `PayPeriod` start date under this schedule that is `>=`
-    /// `date`. Every period start is `end_date` of some month plus one day
-    /// (see `generate_periods`), and successive starts are monotonically
-    /// increasing with the month, so scanning a small window of months
-    /// around `date` finds it without re-deriving the whole schedule.
-    /// `None` only at the extreme edge of the representable calendar.
-    fn period_start_on_or_after(self, date: NaiveDate) -> Option<NaiveDate> {
-        let (mut year, mut month) = previous_month(date.year(), date.month());
-        // One month back covers a start that falls just before `date`'s
-        // month (e.g. a short prior February); three steps forward covers
-        // every period length from 28 to 31 days.
-        for _ in 0..4 {
-            if let Some(start) = self.end_date(year, month).and_then(|end| end.succ_opt())
-                && start >= date
+    /// The `PayPeriod` this schedule puts `date` inside — the one period
+    /// whose start and end straddle it.
+    ///
+    /// Period ends rise monotonically with the month, so the containing
+    /// period is the one whose end is the first end on or after `date`,
+    /// and its start is the preceding month's end plus one day — exactly
+    /// how `generate_periods` builds a sequence. Three months of scanning
+    /// covers every period length from 28 to 31 days.
+    ///
+    /// This is the only date primitive the calculator needs: whether a
+    /// date is a period start, what the next start after it is, and
+    /// whether a supplied `PayPeriod` is one of this schedule's own all
+    /// fall out of it. `None` only at the extreme edge of the
+    /// representable calendar, where the surrounding period cannot be
+    /// named.
+    pub(crate) fn period_containing(self, date: NaiveDate) -> Option<PayPeriod> {
+        let (mut year, mut month) = (date.year(), date.month());
+        for _ in 0..3 {
+            if let Some(end) = self.end_date(year, month)
+                && end >= date
             {
-                return Some(start);
+                let (prev_year, prev_month) = previous_month(year, month);
+                // The preceding month's end is strictly inside that month,
+                // so `start <= date <= end` and `PayPeriod::new` holds.
+                let start = self.end_date(prev_year, prev_month)?.succ_opt()?;
+                return PayPeriod::new(start, end).ok();
             }
             (year, month) = next_month(year, month);
         }
         None
-    }
-
-    /// Whether `date` is itself a `PayPeriod` start date under this
-    /// schedule (INV-014).
-    pub(crate) fn is_period_start(self, date: NaiveDate) -> bool {
-        self.period_start_on_or_after(date) == Some(date)
-    }
-
-    /// The next `PayPeriod` start date strictly after `date` — named in the
-    /// refusal when a `CompensationTerms.EffectiveFrom` is not itself a
-    /// period start.
-    pub(crate) fn next_period_start_after(self, date: NaiveDate) -> Option<NaiveDate> {
-        date.succ_opt()
-            .and_then(|next| self.period_start_on_or_after(next))
     }
 }
 
@@ -443,10 +439,12 @@ mod tests {
         ));
     }
 
-    // `is_period_start` and `next_period_start_after` are exercised
-    // through the `calculate` seam (INV-014) — see
-    // `calculation.rs`'s `accepts_compensation_terms_effective_on_the_schedules_own_period_start`,
-    // `refuses_compensation_terms_not_effective_on_a_period_start`, and the
+    // `period_containing` is exercised through the `calculate` seam
+    // (INV-014 and the period-belongs-to-the-schedule refusal) — see
+    // `calculation.rs`'s
+    // `accepts_compensation_terms_effective_on_the_schedules_own_period_start`,
+    // `refuses_compensation_terms_not_effective_on_a_period_start`,
+    // `refuses_a_pay_period_that_is_not_one_of_the_schedules_own`, and the
     // February 28th rollover cases.
 
     #[test]
