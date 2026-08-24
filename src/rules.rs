@@ -366,7 +366,7 @@ fn band_walk(
     // Every step is checked: `Decimal`'s operators panic on overflow, and
     // a rules table is data a caller supplies.
     let mut total = Decimal::ZERO;
-    let mut contributions = Vec::new();
+    let mut contributions = Vec::with_capacity(bands.len());
     for (index, band) in bands.iter().enumerate() {
         let threshold = scaled_threshold(band.from)?;
         if taxable <= threshold {
@@ -743,10 +743,144 @@ mod tests {
     #[test]
     fn algorithm_annual_tax_never_rounds() {
         // One cent above the second band's 120,000 threshold, at 20%, is
-        // exactly N$0.002 — a value `RoundingRule::apply` would reject as
-        // `FractionalCents` if it ever reached `Money`.
+        // exactly N$0.002 — a sub-cent amount that no `Money` can hold.
         let tax = paye_table().annual_tax(money(dec!(120000.01))).unwrap();
         assert_eq!(tax, dec!(0.002));
+        // And Salt's rounding policy would have destroyed it: applying
+        // `RoundingRule` to that exact value yields N$0.00. The seam keeps
+        // statutory arithmetic on the near side of that (SC-OPEN-2).
+        assert_eq!(RoundingRule::HalfUpToCents.apply(tax).unwrap(), Money::ZERO);
+    }
+
+    #[test]
+    fn algorithm_annual_tax_is_zero_at_the_top_of_the_first_band() {
+        // The band boundary is exclusive at the bottom: 120,000 exactly is
+        // still wholly inside the 0% band.
+        assert_eq!(
+            paye_table().annual_tax(money(dec!(120000))).unwrap(),
+            dec!(0)
+        );
+    }
+
+    #[test]
+    fn algorithm_annual_tax_at_a_threshold_taxes_only_the_bands_below_it() {
+        // 240,000 exactly: 120,000 @ 0% + 120,000 @ 20%, and nothing at
+        // the 30% band it merely touches.
+        assert_eq!(
+            paye_table().annual_tax(money(dec!(240000))).unwrap(),
+            dec!(24000.00)
+        );
+    }
+
+    #[test]
+    fn algorithm_annual_tax_sums_across_every_band_crossed() {
+        // 120,000 @ 0% + 120,000 @ 20% + 240,000 @ 30% + 120,000 @ 40%.
+        assert_eq!(
+            paye_table().annual_tax(money(dec!(600000))).unwrap(),
+            dec!(144000.00)
+        );
+    }
+
+    #[test]
+    fn algorithm_annual_tax_of_zero_is_zero() {
+        assert_eq!(paye_table().annual_tax(Money::ZERO).unwrap(), dec!(0));
+    }
+
+    #[test]
+    fn algorithm_annual_tax_refuses_when_band_arithmetic_overflows() {
+        // A band table is data a caller supplies, so an absurd rate is
+        // reachable: `PayeBand` only refuses a negative one. The largest
+        // representable taxable amount at 1e12 exceeds `Decimal`, and the
+        // checked step turns that into a refusal rather than a panic.
+        let table = PayeTable::new(
+            test_paye_table_id(),
+            vec![PayeBand::new(Money::ZERO, dec!(1000000000000)).unwrap()],
+            date(2000, 1, 1),
+            date(2000, 1, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            table.annual_tax(Money::from_cents(i64::MAX).unwrap()),
+            Err(PayrollError::AmountOverflow)
+        );
+    }
+
+    #[test]
+    fn algorithm_annual_tax_and_tax_owed_on_agree_across_the_whole_table() {
+        // The shared walk, checked at every band boundary and either side
+        // of it: one implementation cannot drift from itself.
+        for amount in [
+            dec!(0),
+            dec!(0.01),
+            dec!(119999.99),
+            dec!(120000),
+            dec!(120000.01),
+            dec!(239999.99),
+            dec!(240000),
+            dec!(240000.01),
+            dec!(479999.99),
+            dec!(480000),
+            dec!(480000.01),
+            dec!(1000000),
+        ] {
+            let (per_period, _) = rules().tax_owed_on(amount, 12).unwrap();
+            assert_eq!(
+                paye_table().annual_tax(money(amount)).unwrap(),
+                per_period,
+                "annual_tax disagreed with tax_owed_on at {amount}"
+            );
+        }
+    }
+
+    #[test]
+    fn algorithm_annual_tax_reads_the_same_table_the_rules_carry() {
+        let rules = rules();
+        assert_eq!(
+            rules.paye_table().annual_tax(money(dec!(510000))).unwrap(),
+            paye_table().annual_tax(money(dec!(510000))).unwrap()
+        );
+        assert_eq!(rules.paye_table().id(), &test_paye_table_id());
+    }
+
+    #[test]
+    fn paye_table_keeps_both_of_its_effective_dates() {
+        // The two dates are distinct facts (ADR-0007): what the instrument
+        // says, and what payroll actually applied.
+        let table = PayeTable::new(
+            test_paye_table_id(),
+            bands(),
+            date(2026, 3, 1),
+            date(2026, 9, 1),
+        )
+        .unwrap();
+        assert_eq!(table.legal_effective_from(), date(2026, 3, 1));
+        assert_eq!(table.payroll_effective_from(), date(2026, 9, 1));
+        let json = serde_json::to_string(&table).unwrap();
+        assert_eq!(serde_json::from_str::<PayeTable>(&json).unwrap(), table);
+    }
+
+    #[test]
+    fn deserialize_rejects_an_empty_band_table() {
+        let json = serde_json::to_string(&RawPayeTable {
+            id: test_paye_table_id(),
+            bands: Vec::new(),
+            legal_effective_from: date(2000, 1, 1),
+            payroll_effective_from: date(2000, 1, 1),
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<PayeTable>(&json).is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_a_first_band_that_does_not_start_at_zero() {
+        let json = serde_json::to_string(&RawPayeTable {
+            id: test_paye_table_id(),
+            bands: vec![PayeBand::new(money(dec!(100)), dec!(0.2)).unwrap()],
+            legal_effective_from: date(2000, 1, 1),
+            payroll_effective_from: date(2000, 1, 1),
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<PayeTable>(&json).is_err());
     }
 
     #[test]
