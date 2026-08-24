@@ -1,6 +1,6 @@
 # Salt — Namibian Statutory Conformance
 
-**Status:** Grilled. Decisions settled, ready for `/to-spec`.
+**Status:** Status: Grilled and specified — implementation tracked by GitHub issue #7.
 **Product:** Salt
 **Market:** Namibia
 **Date:** 2026-08-24
