@@ -14,7 +14,11 @@ This document records the settled domain design for Salt's payroll calculation c
 Companion documents:
 
 - `CONTEXT.md` — the glossary. Every term below is defined there.
-- `docs/adr/0001`–`0006` — the six decisions that were hard to reverse, with their rejected alternatives.
+- `docs/adr/0001`–`0008` — the decisions that were hard to reverse, with their rejected alternatives.
+- `docs/domain/statutory-conformance.md` — **amends this document.** It settles which of these rules are Namibian law, which are Salt's own policy, and what nobody has published an answer to.
+- `docs/conformance/` — one provenance file per shipped rule table.
+
+> **Amended by the statutory conformance grill of 2026-08-24.** Where this document and `statutory-conformance.md` disagree, that one wins. Five changes reach into the model below: `NonTaxableAllowance` is removed (§5.3 there); `RulesetId` is replaced by a `PayeTableId` and an `SscRulesId` on separate effective-date axes, and `ruleset_for` returns an owned composed value (ADR-0007); `YearToDateContext` gains a three-valued `PriorEmployment` fact that refuses on both `Unknown` **and** `Some` while SC-OPEN-4 is open (ADR-0001); `PayrollInput` gains an `UnsupportedDeductionStatus` knowledge state that refuses on `Present` and `Unknown`; and statutory annual band arithmetic is exposed as an exact **unrounded** seam so no statutory claim depends on Salt's rounding policy. Sections below are marked where they are superseded.
 
 This document is still **not** a database schema, an API specification, a UI specification, or a Rust module layout. It is the agreed meaning of payroll in Salt.
 
@@ -69,7 +73,9 @@ Salt answers "why did this employee receive this result for this historical peri
 
 ### 3.4 Statutory rules are effective-dated
 
-Rules apply to a defined period and are identified by a `RulesetId`. Rule changes are ordinary, not invasive. Two real examples already in scope: the SSC ceiling moved N$9,000 → N$11,000 on 1 March 2025, and N$11,000 → N$12,500 on 1 September 2026.
+Rules apply to a defined period. Rule changes are ordinary, not invasive. Two real examples already in scope: the SSC ceiling moved N$9,000 → N$11,000 on 1 March 2025, and N$11,000 → N$12,500 on 1 September 2026.
+
+**Superseded in part (ADR-0007).** There is no single `RulesetId`. The PAYE table and the SSC rules resolve on independent effective-date axes, named by a `PayeTableId` and an `SscRulesId`, because the PAYE table has not moved since 1 March 2024 while the SSC ceiling moves four more times before 2029. Each also carries a `legal_effective_from` and a `payroll_effective_from`, which differ when a regulator defers an instrument's own stated date.
 
 ### 3.5 Finalized payroll is history
 
@@ -159,7 +165,7 @@ CompensationTerms
 
 ### 4.5 PayPeriod and PaySchedule
 
-See ADR-0005. Most Namibian SMEs run a 26th-to-25th cycle, so a PayPeriod is **not** assumed to be a calendar month.
+See ADR-0005. The period end day is configurable and a PayPeriod is **not** assumed to be a calendar month. 26th-to-25th is the common example, not the rule — 18th-to-17th is equally valid. A pay period belongs to the month its **end date** falls in.
 
 ```text
 PaySchedule (on Employer)
@@ -186,12 +192,12 @@ The statutory and agreed calculation rules in force for an effective period, as 
 
 ```text
 PayrollRules
-- RulesetId
-- EffectivePeriod
-- PAYEBands
-- SocialSecurityRules (rate, floor, ceiling)
+- PayeTable   (PayeTableId, EffectivePeriod, PAYEBands)
+- SscRuleset  (SscRulesId,  EffectivePeriod, rate, floor, ceiling)
 - RoundingRule
 ```
+
+The two halves are resolved independently by period end date and frozen together (ADR-0007). `PayrollRules` itself is no longer effective-dated; its halves are.
 
 Rules are never scattered as magic constants across unrelated source files.
 
@@ -208,7 +214,10 @@ PayrollInput
 - Earnings
 - YearToDateContext
 - PaySchedule
+- UnsupportedDeductionStatus   (ConfirmedNone | Present(kinds) | Unknown)
 ```
+
+`UnsupportedDeductionStatus` is a **knowledge state**, not a list. An empty list would mean either "confirmed none" or "nobody asked"; the four kinds Salt cannot calculate — approved pension, provident fund, retirement annuity, child-education policy — are refused when `Present`, and so is `Unknown`. The governing rule: Salt requires affirmative knowledge of facts that materially affect statutory calculation, and absence of data is never read as absence of the condition.
 
 `PaySchedule` is carried inside `PayrollInput`, not passed beside it: it exists only to validate dates — that `PayrollInput.PayPeriod` is one of the periods the schedule generates, and that `CompensationTerms.EffectiveFrom` is one of their start dates (INV-014). It never selects or generates the `PayPeriod` — the caller supplies that directly, and the calculator checks it rather than replacing it. But the same `PayrollInput` must produce the same result every time (INV-002). Passing it beside the input, the way `PayrollRules` is, would let one caller-supplied schedule accept a `CompensationTerms` that another schedule rejects for the identical `PayrollInput` — a hidden second axis of determinism that finalization (§10) does not freeze.
 
@@ -221,7 +230,17 @@ fn calculate(
 ) -> Result<PayrollCalculation, PayrollError>
 ```
 
-This makes the caller choose a ruleset deliberately, and it reads clearly in tests: same input, different ruleset, different answer.
+This makes the caller choose rules deliberately, and it reads clearly in tests: same input, different rules, different answer. The signature is **unchanged** by the conformance work, borrowed arguments included — the calculator performs no rule resolution and never reaches for a catalogue.
+
+Resolution is `ruleset_for`'s job, and that seam does change. It resolves the PAYE table and the SSC ruleset from their independent catalogues and returns an **owned** composed `PayrollRules`; there is no longer a single static value to borrow (ADR-0007).
+
+```text
+paye_table_for(period_end)
+                      \
+                       +--> ruleset_for -> owned PayrollRules
+                      /
+ssc_rules_for(period_end)
+```
 
 ### 5.1 EmploymentSnapshot
 
@@ -245,16 +264,14 @@ EmploymentSnapshot
 Earning
 - BasicPay
 - TaxableAllowance
-- NonTaxableAllowance     (travel / subsistence)
 ```
-
-This is the smallest set that exercises every distinction Salt claims to make:
 
 | | SSC base | PAYE base | Gross |
 |---|---|---|---|
 | BasicPay | yes | yes | yes |
 | TaxableAllowance | no | yes | yes |
-| NonTaxableAllowance | no | no | yes |
+
+**Superseded (statutory conformance §5.3).** `NonTaxableAllowance` is **removed**, not renamed. Allowances are not generically tax-free: Schedule 2 includes them in remuneration, and NamRA Practice Note 1 of 2024 makes travel and subsistence non-PAYE only on qualifying facts, up to UN rates or a prescribed kilometre rate that has not been announced. A user-facing "non-taxable" box could not be filled in correctly by anyone. Legal classification is a separate seam upstream of the calculator, which only ever receives Earnings already classified.
 
 Overtime, night work, Sunday work, public holiday work, commission, and bonus are refused in v1 and added later. A single `taxable: bool` flag is explicitly rejected as too weak.
 
@@ -285,8 +302,13 @@ YearToDateContext
 - TaxYear
 - PriorTaxableRemuneration
 - PriorPAYE
-- PeriodsElapsed
+- PeriodsElapsed          (position in the TaxYear, 0-11 — not periods worked)
+- PriorEmployment         (None | Some(taxable, paye) | Unknown)
 ```
+
+`PriorEmployment` is what stops a zero meaning "nobody asked" (ADR-0001). `None` proceeds; `Unknown` refuses; `Some(..)` **also** refuses, because how a new employer must treat another employer's figures is unresolved (SC-OPEN-4) — the values ride into the typed error rather than being discarded or consumed. This is a different fact from the `OpeningBalance` in §5.6, which is prior payroll for this *same* Employment and stays fully supported.
+
+`PeriodsElapsed` stays tax-year position: counting periods *worked* instead would over-withhold from a mid-year joiner, not correct them.
 
 **It is summed by the application layer from live, non-reversed `FinalizedPayroll` records plus the Employment's `OpeningBalance`.** It is never stored as a running total, and the calculator never queries it.
 
@@ -302,6 +324,8 @@ OpeningBalance (per Employment, per TaxYear)
 ```
 
 Without it, only employers starting on the first period of a tax year could use Salt.
+
+**Not the same fact as `PriorEmployment`.** An `OpeningBalance` is prior payroll for this *same* Employment and Employer, carried in from whatever system Salt is replacing. It is fully supported. `PriorEmployment` is remuneration from a *different* Employer earlier in the same tax year, and it is refused while SC-OPEN-4 is open. The two must never be collapsed into one another.
 
 ---
 
@@ -321,7 +345,7 @@ PayrollCalculation
 
 ### 6.1 Gross is not taxable
 
-`GrossRemuneration != TaxableRemuneration`, and neither is derived by summing all visible pay lines. A `NonTaxableAllowance` appears in gross and not in taxable — this is the distinction PC-008 exists to prove.
+`GrossRemuneration != TaxableRemuneration`, and neither is derived by summing all visible pay lines. A `TaxableAllowance` appears in gross and taxable but never in the SSC base — that is the distinction PC-008 now exists to prove, since `NonTaxableAllowance` is removed.
 
 ### 6.2 Employer contributions are not employee deductions
 
@@ -353,12 +377,18 @@ No free-text formula strings. The UI and the payslip render from this data.
 
 **Errors** stop the calculation and return `PayrollError`:
 
-- no applicable ruleset, or overlapping rulesets;
+- no applicable PAYE table, or overlapping PAYE tables;
+- no applicable SSC ruleset, or overlapping SSC rulesets — a separate variant, so a message can name which axis failed;
 - invalid or straddling pay period;
 - missing `YearToDateContext`;
-- unsupported employment or pay arrangement (concurrent employments, non-monthly basis, unsupported earning kind, unsupported deduction);
+- prior employment status `Unknown` — the fact was never established;
+- prior employment `Some(..)` — treatment unconfirmed (SC-OPEN-4), carrying the recorded figures;
+- unsupported deduction status `Unknown`, or `Present` — naming every kind seen;
+- unsupported employment or pay arrangement (concurrent employments, non-monthly basis, unsupported earning kind);
 - contradictory employment dates;
 - `CompensationTerms` not covering the period.
+
+Every one of these is a typed variant carrying what a caller needs to act on. `Display` may be human-friendly; the domain contract is the type, never a string.
 
 **Warnings** never block review or finalization, but are **copied into the `FinalizedPayroll`**, so the audit trail shows Salt raised a flag and a human proceeded anyway. Anything that must genuinely block is an Error, not a Warning.
 
@@ -419,6 +449,8 @@ Proration divides by the length of the supplied `PayPeriod`, so that period must
 
 Exact decimals throughout. Round **half-up to 2 decimal places once, per output line** — each earning line, PAYE, each SSC figure, and NetPay. Intermediate arithmetic is never rounded. The rounding rule lives in `PayrollRules` and is therefore versioned and frozen into history.
 
+**Rounding is Salt policy (SC-OPEN-2), and the seams keep it out of statutory arithmetic.** Statutory bands applied to a cents-exact amount can yield fractions of a cent, so the statutory annual-tax seam returns an exact unrounded value; the rounding rule is applied only afterwards, inside the calculator. A statutory table test therefore never asserts the rounding policy, and changing that policy cannot invalidate one.
+
 ---
 
 ## 9. Payroll run
@@ -442,8 +474,8 @@ Finalization freezes, per Employment (ADR-0004):
 
 - the complete `PayrollInput`;
 - the complete `PayrollCalculation`, including warnings and traces;
-- the resolved `PayrollRules` **values**, not only the `RulesetId`;
-- the `RulesetId`;
+- the resolved `PayrollRules` **values**, not only their ids;
+- the `PayeTableId` and the `SscRulesId`;
 - the Salt version that produced it;
 - who finalized it, and when.
 
@@ -542,7 +574,7 @@ PostgreSQL with SQLx. Tables are designed in the spec, not here. Known needs:
 - `PaySchedule` per Employer;
 - `OpeningBalance` per Employment per TaxYear;
 - `PayrollRun` with membership frozen at `Calculated`;
-- `FinalizedPayroll` — immutable, storing frozen input, output, rule values, `RulesetId`, and Salt version;
+- `FinalizedPayroll` — immutable, storing frozen input, output, rule values, `PayeTableId` and `SscRulesId`, and Salt version;
 - `Reversal` — immutable;
 - append-only action log;
 - year-to-date read query over live `FinalizedPayroll` plus `OpeningBalance`.
@@ -564,7 +596,7 @@ Create Employer (with PaySchedule)
   -> View compliant payslip
 ```
 
-In scope: one Employer; monthly salaried Employments; `BasicPay`, `TaxableAllowance`, `NonTaxableAllowance`; cumulative PAYE; employee and employer SSC; joiner and leaver proration; opening balances; reversal and replacement; compliant payslip.
+In scope: one Employer; monthly salaried Employments; `BasicPay` and `TaxableAllowance`; cumulative PAYE; employee and employer SSC; joiner and leaver proration; opening balances; reversal and replacement; compliant payslip.
 
 Out of scope: leave; overtime; bonuses; loans; voluntary deductions; concurrent employments; non-monthly pay bases; off-cycle and supplementary runs; imports; multi-currency; desktop or offline mode; accounting integration; automatic statutory filing.
 

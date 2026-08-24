@@ -7,4 +7,5 @@ Statutory rules change rarely, are dangerous when wrong, and need tests and comp
 ## Consequences
 
 - Changing a statutory rule means a release, which is correct: it should be reviewed and tested.
-- Because code can change, `RulesetId` alone is not a durable historical reference — see ADR-0004.
+- Because code can change, an id alone is not a durable historical reference — see ADR-0004.
+- **Amended by ADR-0007.** There is no single `RulesetId`. PAYE bands and SSC rules are separately identified and separately effective-dated, as a `PayeTableId` and an `SscRulesId`. Everything above still holds; it now holds twice, once per axis. This decision is unchanged in substance: statutory rules remain typed Rust shipped with the release, never editable configuration.
