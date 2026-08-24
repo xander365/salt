@@ -15,8 +15,6 @@ pub enum Earning {
     BasicPay(Money),
     /// An allowance that counts toward `TaxableRemuneration`.
     TaxableAllowance(Money),
-    /// An allowance that counts toward `GrossRemuneration` only.
-    NonTaxableAllowance(Money),
 }
 
 impl Earning {
@@ -24,7 +22,6 @@ impl Earning {
         match self {
             Earning::BasicPay(amount) => amount,
             Earning::TaxableAllowance(amount) => amount,
-            Earning::NonTaxableAllowance(amount) => amount,
         }
     }
 }
@@ -36,7 +33,7 @@ impl Earning {
 /// lines", taxable is not "gross less something", and the social security
 /// base is not either of them: the three totals never share a summation,
 /// and each line states which of them it feeds in one exhaustive `match`.
-/// A fourth `Earning` kind therefore cannot be added without deciding, in
+/// A third `Earning` kind therefore cannot be added without deciding, in
 /// that one place, what it does to all three — the compiler refuses the
 /// build until it is decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +56,12 @@ impl RemunerationBases {
         };
 
         for line in lines {
-            // The three-way table of §5.2, stated once. `BasicPay` counts
+            // The two-way table of §5.2, stated once. `BasicPay` counts
             // toward SSC, PAYE, and gross; `TaxableAllowance` toward PAYE
-            // and gross; `NonTaxableAllowance` toward gross alone.
+            // and gross alone. Each line states which bases it feeds in
+            // one exhaustive match, so a future kind cannot be added
+            // without deciding its effect on all three bases in this one
+            // place.
             match *line {
                 Earning::BasicPay(amount) => {
                     bases.social_security = bases.social_security.checked_add(amount)?;
@@ -70,9 +70,6 @@ impl RemunerationBases {
                 }
                 Earning::TaxableAllowance(amount) => {
                     bases.taxable = bases.taxable.checked_add(amount)?;
-                    bases.gross = bases.gross.checked_add(amount)?;
-                }
-                Earning::NonTaxableAllowance(amount) => {
                     bases.gross = bases.gross.checked_add(amount)?;
                 }
             }
@@ -138,28 +135,16 @@ mod tests {
     }
 
     #[test]
-    fn a_non_taxable_allowance_feeds_gross_alone() {
-        let bases =
-            RemunerationBases::accumulate(&[Earning::NonTaxableAllowance(money(dec!(1200.00)))])
-                .unwrap();
-
-        assert_eq!(bases.social_security(), Money::ZERO);
-        assert_eq!(bases.taxable(), Money::ZERO);
-        assert_eq!(bases.gross(), money(dec!(1200.00)));
-    }
-
-    #[test]
-    fn the_three_bases_differ_when_all_three_kinds_are_present() {
+    fn social_security_differs_from_taxable_and_gross_when_an_allowance_is_present() {
         let bases = RemunerationBases::accumulate(&[
             Earning::BasicPay(money(dec!(15000.00))),
             Earning::TaxableAllowance(money(dec!(2000.00))),
-            Earning::NonTaxableAllowance(money(dec!(1200.00))),
         ])
         .unwrap();
 
         assert_eq!(bases.social_security(), money(dec!(15000.00)));
         assert_eq!(bases.taxable(), money(dec!(17000.00)));
-        assert_eq!(bases.gross(), money(dec!(18200.00)));
+        assert_eq!(bases.gross(), money(dec!(17000.00)));
     }
 
     #[test]
@@ -177,7 +162,7 @@ mod tests {
     #[test]
     fn an_overflowing_total_is_reported_rather_than_wrapped() {
         let huge = Money::from_cents(i64::MAX).unwrap();
-        let lines = [Earning::NonTaxableAllowance(huge), Earning::BasicPay(huge)];
+        let lines = [Earning::TaxableAllowance(huge), Earning::BasicPay(huge)];
 
         assert_eq!(
             RemunerationBases::accumulate(&lines),
@@ -194,10 +179,6 @@ mod tests {
         assert_eq!(
             Earning::TaxableAllowance(money(dec!(2.00))).amount(),
             money(dec!(2.00))
-        );
-        assert_eq!(
-            Earning::NonTaxableAllowance(money(dec!(3.00))).amount(),
-            money(dec!(3.00))
         );
     }
 

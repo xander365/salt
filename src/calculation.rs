@@ -642,9 +642,6 @@ mod tests {
                     taxable = taxable.checked_add(amount).unwrap();
                     gross = gross.checked_add(amount).unwrap();
                 }
-                Earning::NonTaxableAllowance(amount) => {
-                    gross = gross.checked_add(amount).unwrap();
-                }
             }
         }
         assert_eq!(
@@ -1317,10 +1314,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
-            vec![
-                Earning::TaxableAllowance(money(dec!(800.00))),
-                Earning::NonTaxableAllowance(money(dec!(500.00))),
-            ],
+            vec![Earning::TaxableAllowance(money(dec!(800.00)))],
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
         );
@@ -1331,13 +1325,11 @@ mod tests {
             vec![
                 Earning::BasicPay(money(dec!(3000.00))),
                 Earning::TaxableAllowance(money(dec!(800.00))),
-                Earning::NonTaxableAllowance(money(dec!(500.00))),
             ]
         );
-        // Both allowance kinds are paid in full: 3,000.00 + 800.00 +
-        // 500.00 gross, 3,000.00 + 800.00 taxable, and SSC still on the
-        // prorated 3,000.00 alone.
-        assert_eq!(calc.gross_remuneration, money(dec!(4300.00)));
+        // The allowance is paid in full: 3,000.00 + 800.00 gross and
+        // taxable, and SSC still on the prorated 3,000.00 alone.
+        assert_eq!(calc.gross_remuneration, money(dec!(3800.00)));
         assert_eq!(calc.taxable_remuneration, money(dec!(3800.00)));
         assert_eq!(calc.employee_social_security.amount, money(dec!(27.00)));
         assert_invariants(&calc);
@@ -1559,82 +1551,6 @@ mod tests {
         assert_invariants(&calc);
     }
 
-    // PC-008: non-taxable travel allowance — gross differs from taxable.
-    // BasicPay 15,000.00 + NonTaxableAllowance 1,200.00: the allowance
-    // swells gross to 16,200.00 but taxable stays 15,000.00, so PAYE and
-    // SSC are identical to PC-001. Gross, taxable, and net all differ.
-    #[test]
-    fn pc_008_non_taxable_allowance_differs_gross_from_taxable() {
-        let input = PayrollInput::new(
-            employment_paying(dec!(15000.00)),
-            test_period(),
-            vec![Earning::NonTaxableAllowance(money(dec!(1200.00)))],
-            ytd(dec!(110000.00), dec!(0.00), 11),
-            test_schedule(),
-        );
-        let calc = calculate(&input, &test_rules()).unwrap();
-
-        assert_eq!(calc.gross_remuneration, money(dec!(16200.00)));
-        assert_eq!(calc.taxable_remuneration, money(dec!(15000.00)));
-        assert_eq!(calc.paye.amount, money(dec!(1000.00)));
-        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
-        assert_eq!(calc.net_pay, money(dec!(15101.00)));
-        assert_ne!(calc.gross_remuneration, calc.taxable_remuneration);
-        assert_ne!(calc.taxable_remuneration, calc.net_pay);
-        assert_ne!(calc.gross_remuneration, calc.net_pay);
-        assert_eq!(
-            calc.earning_lines,
-            vec![
-                Earning::BasicPay(money(dec!(15000.00))),
-                Earning::NonTaxableAllowance(money(dec!(1200.00))),
-            ]
-        );
-        assert_eq!(
-            calc.employee_social_security.trace.basic_pay,
-            money(dec!(15000.00))
-        );
-        assert_invariants(&calc);
-    }
-
-    // Both allowance kinds at once: the full three-way table in one
-    // scenario. BasicPay 15,000.00 + TaxableAllowance 2,000.00 +
-    // NonTaxableAllowance 1,200.00, period 12 (bands unscaled). Gross is
-    // 18,200.00, taxable 17,000.00, and the social security base is the
-    // 15,000.00 of BasicPay alone. Year-to-date taxable is 110,000 +
-    // 17,000 = 127,000: 7,000 above the 120,000 threshold at 20% is
-    // 1,400.00 of PAYE. Net is 18,200.00 - 1,400.00 - 99.00 = 16,701.00.
-    #[test]
-    fn both_allowance_kinds_give_three_different_totals() {
-        let input = PayrollInput::new(
-            employment_paying(dec!(15000.00)),
-            test_period(),
-            vec![
-                Earning::TaxableAllowance(money(dec!(2000.00))),
-                Earning::NonTaxableAllowance(money(dec!(1200.00))),
-            ],
-            ytd(dec!(110000.00), dec!(0.00), 11),
-            test_schedule(),
-        );
-        let calc = calculate(&input, &test_rules()).unwrap();
-
-        assert_eq!(calc.gross_remuneration, money(dec!(18200.00)));
-        assert_eq!(calc.taxable_remuneration, money(dec!(17000.00)));
-        assert_eq!(
-            calc.employee_social_security.trace.basic_pay,
-            money(dec!(15000.00))
-        );
-        assert_eq!(calc.paye.amount, money(dec!(1400.00)));
-        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
-        assert_eq!(calc.net_pay, money(dec!(16701.00)));
-
-        // Gross, taxable, and net are three genuinely different numbers.
-        assert_ne!(calc.gross_remuneration, calc.taxable_remuneration);
-        assert_ne!(calc.taxable_remuneration, calc.net_pay);
-        assert_ne!(calc.gross_remuneration, calc.net_pay);
-
-        assert_invariants(&calc);
-    }
-
     // A payslip renders the lines it is given, so each one is returned
     // separately and in the order supplied — two allowances of one kind
     // are never collapsed into a single line, even when their amounts are
@@ -1645,9 +1561,9 @@ mod tests {
             employment_paying(dec!(15000.00)),
             test_period(),
             vec![
-                Earning::NonTaxableAllowance(money(dec!(600.00))),
                 Earning::TaxableAllowance(money(dec!(600.00))),
-                Earning::NonTaxableAllowance(money(dec!(600.00))),
+                Earning::TaxableAllowance(money(dec!(700.00))),
+                Earning::TaxableAllowance(money(dec!(600.00))),
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
@@ -1658,13 +1574,13 @@ mod tests {
             calc.earning_lines,
             vec![
                 Earning::BasicPay(money(dec!(15000.00))),
-                Earning::NonTaxableAllowance(money(dec!(600.00))),
                 Earning::TaxableAllowance(money(dec!(600.00))),
-                Earning::NonTaxableAllowance(money(dec!(600.00))),
+                Earning::TaxableAllowance(money(dec!(700.00))),
+                Earning::TaxableAllowance(money(dec!(600.00))),
             ]
         );
-        assert_eq!(calc.gross_remuneration, money(dec!(16800.00)));
-        assert_eq!(calc.taxable_remuneration, money(dec!(15600.00)));
+        assert_eq!(calc.gross_remuneration, money(dec!(16900.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(16900.00)));
         assert_invariants(&calc);
     }
 
@@ -1701,7 +1617,7 @@ mod tests {
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::NonTaxableAllowance(
+            vec![Earning::TaxableAllowance(
                 Money::from_cents(i64::MAX).unwrap(),
             )],
             ytd(dec!(110000.00), dec!(0.00), 11),
