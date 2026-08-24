@@ -1551,6 +1551,80 @@ mod tests {
         assert_invariants(&calc);
     }
 
+    // PC-008: the social security base is a third number, not derivable
+    // from gross or from taxable. BasicPay 15,000.00 +
+    // TaxableAllowance 5,000.00, period 12 (bands unscaled). The
+    // allowance moves gross and taxable by the full 5,000.00 and leaves
+    // the social security base exactly where a no-allowance payroll put
+    // it, so the three bases are proved apart by comparison with that
+    // baseline rather than by literals alone. Year-to-date taxable is
+    // 110,000 + 20,000 = 130,000: 10,000 above the 120,000 threshold at
+    // 20% is 2,000.00 of PAYE. Net is 20,000.00 - 2,000.00 - 99.00.
+    //
+    // Since `NonTaxableAllowance` is removed, gross and taxable carry
+    // equal amounts here. That is the coincidence of the two v1 kinds,
+    // not an identity — they are still accumulated apart, which is what
+    // `assert_invariants` re-derives from the returned lines.
+    #[test]
+    fn pc_008_the_social_security_base_is_independent_of_gross_and_taxable() {
+        let ytd_context = ytd(dec!(110000.00), dec!(0.00), 11);
+        let input = PayrollInput::new(
+            employment_paying(dec!(15000.00)),
+            test_period(),
+            vec![Earning::TaxableAllowance(money(dec!(5000.00)))],
+            ytd_context,
+            test_schedule(),
+        );
+        let calc = calculate(&input, &test_rules()).unwrap();
+        let baseline = calculate(&input_for(dec!(15000.00), ytd_context), &test_rules()).unwrap();
+
+        assert_eq!(calc.gross_remuneration, money(dec!(20000.00)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(20000.00)));
+        assert_eq!(calc.paye.amount, money(dec!(2000.00)));
+        assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
+        assert_eq!(calc.net_pay, money(dec!(17901.00)));
+
+        // Gross and taxable both moved by the whole allowance.
+        assert_eq!(
+            calc.gross_remuneration
+                .checked_sub(baseline.gross_remuneration)
+                .unwrap(),
+            money(dec!(5000.00))
+        );
+        assert_eq!(
+            calc.taxable_remuneration
+                .checked_sub(baseline.taxable_remuneration)
+                .unwrap(),
+            money(dec!(5000.00))
+        );
+
+        // The social security base and both contributions did not.
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            baseline.employee_social_security.trace.basic_pay
+        );
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            money(dec!(15000.00))
+        );
+        assert_eq!(
+            calc.employee_social_security.amount,
+            baseline.employee_social_security.amount
+        );
+        assert_eq!(
+            calc.employer_social_security.amount,
+            baseline.employer_social_security.amount
+        );
+
+        // The social security base is none of the other three totals.
+        let ssc_base = calc.employee_social_security.trace.basic_pay;
+        assert_ne!(ssc_base, calc.gross_remuneration);
+        assert_ne!(ssc_base, calc.taxable_remuneration);
+        assert_ne!(ssc_base, calc.net_pay);
+
+        assert_invariants(&calc);
+    }
+
     // A payslip renders the lines it is given, so each one is returned
     // separately and in the order supplied — two allowances of one kind
     // are never collapsed into a single line, even when their amounts are

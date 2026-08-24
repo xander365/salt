@@ -36,6 +36,15 @@ impl Earning {
 /// A third `Earning` kind therefore cannot be added without deciding, in
 /// that one place, what it does to all three — the compiler refuses the
 /// build until it is decided.
+///
+/// `gross` and `taxable` carry equal amounts today, because every v1
+/// earning kind feeds both. That is an arithmetic coincidence of the
+/// current two kinds, not an identity: gross is everything payable and
+/// taxable is what PAYE is charged on, and they are different questions.
+/// Do not collapse the two fields. A legally-named kind added later — a
+/// qualifying subsistence or business-travel reimbursement, which
+/// Schedule 2 excludes from remuneration — feeds gross without feeding
+/// taxable, and the field it would need must already be here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RemunerationBases {
     social_security: Money,
@@ -58,10 +67,10 @@ impl RemunerationBases {
         for line in lines {
             // The two-way table of §5.2, stated once. `BasicPay` counts
             // toward SSC, PAYE, and gross; `TaxableAllowance` toward PAYE
-            // and gross alone. Each line states which bases it feeds in
-            // one exhaustive match, so a future kind cannot be added
-            // without deciding its effect on all three bases in this one
-            // place.
+            // and gross but not SSC. Each line states which of the three
+            // bases it feeds in this one exhaustive match, so a future
+            // kind cannot be added without deciding its effect on all
+            // three here.
             match *line {
                 Earning::BasicPay(amount) => {
                     bases.social_security = bases.social_security.checked_add(amount)?;
@@ -89,7 +98,8 @@ impl RemunerationBases {
         self.taxable
     }
 
-    /// `GrossRemuneration` — everything payable, taxable or not.
+    /// `GrossRemuneration` — everything payable, whatever its tax
+    /// treatment. Its own accumulator, never derived from `taxable`.
     pub(crate) fn gross(self) -> Money {
         self.gross
     }

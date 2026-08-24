@@ -258,7 +258,7 @@ EmploymentSnapshot
 
 ### 5.2 Earnings
 
-**v1 supports exactly three Earning kinds:**
+**v1 supports exactly two Earning kinds:**
 
 ```text
 Earning
@@ -345,7 +345,7 @@ PayrollCalculation
 
 ### 6.1 Gross is not taxable
 
-`GrossRemuneration != TaxableRemuneration`, and neither is derived by summing all visible pay lines. A `TaxableAllowance` appears in gross and taxable but never in the SSC base — that is the distinction PC-008 now exists to prove, since `NonTaxableAllowance` is removed.
+`GrossRemuneration != TaxableRemuneration`, and neither is derived by summing all visible pay lines. A `TaxableAllowance` appears in gross and taxable but never in the SSC base — that is the distinction PC-008 now exists to prove, since `NonTaxableAllowance` is removed. Gross and taxable therefore carry equal amounts under the two v1 kinds. That is an arithmetic coincidence of the current kinds, not an identity, and the two remain separate accumulators: a legally-named kind added later that Schedule 2 excludes from remuneration would feed gross without feeding taxable.
 
 ### 6.2 Employer contributions are not employee deductions
 
@@ -615,7 +615,7 @@ The calculator seam is proven before the tracer bullet is completed.
 | PC-005 | Employment starts mid-period | Proration, joiner |
 | PC-006 | Employment ends mid-period | Proration, leaver |
 | PC-007 | Taxable allowance | Classification affects PAYE, not SSC |
-| PC-008 | Non-taxable travel allowance | Gross differs from taxable |
+| PC-008 | Taxable allowance beside a baseline payroll | The SSC base is independent of gross and taxable |
 | PC-009 | BasicPay above the SSC ceiling | Ceiling clamp |
 | PC-010 | BasicPay below the SSC floor | Floor clamp |
 | PC-011 | Mid-year adoption with OpeningBalance | Cumulative PAYE from prior totals |
