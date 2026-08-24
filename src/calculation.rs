@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn varying_only_the_ruleset_against_a_fixed_input_changes_the_result() {
+    fn salt_policy_varying_only_the_ruleset_against_a_fixed_input_changes_the_result() {
         let input = input_for(
             dec!(12000.00),
             YearToDateContext::first_period(test_tax_year()),
@@ -1630,7 +1630,7 @@ mod tests {
     // are never collapsed into a single line, even when their amounts are
     // equal.
     #[test]
-    fn allowance_lines_are_returned_individually_in_order() {
+    fn salt_policy_allowance_lines_are_returned_individually_in_order() {
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
@@ -1661,7 +1661,7 @@ mod tests {
     // A zero-amount allowance is a real line an employer may deliberately
     // record. It is kept and it changes nothing.
     #[test]
-    fn a_zero_amount_allowance_is_kept_and_changes_nothing() {
+    fn salt_policy_a_zero_amount_allowance_is_kept_and_changes_nothing() {
         let with_zero = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
@@ -1721,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_when_prior_paye_exceeds_recalculated_liability() {
+    fn salt_policy_refuses_when_prior_paye_exceeds_recalculated_liability() {
         // A prior_paye figure inconsistent with any valid history: more tax
         // was supposedly already withheld than the recalculated
         // year-to-date liability can justify.
