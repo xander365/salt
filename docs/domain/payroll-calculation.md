@@ -449,7 +449,7 @@ Proration divides by the length of the supplied `PayPeriod`, so that period must
 
 Exact decimals throughout. Round **half-up to 2 decimal places once, per output line** — each earning line, PAYE, each SSC figure, and NetPay. Intermediate arithmetic is never rounded. The rounding rule lives in `PayrollRules` and is therefore versioned and frozen into history.
 
-**Rounding is Salt policy (SC-OPEN-2), and the seams keep it out of statutory arithmetic.** Statutory bands applied to a cents-exact amount can yield fractions of a cent, so the statutory annual-tax seam returns an exact unrounded value; the rounding rule is applied only afterwards, inside the calculator. A statutory table test therefore never asserts the rounding policy, and changing that policy cannot invalidate one.
+**Rounding is Salt policy (SC-OPEN-2), and the seams keep it out of statutory arithmetic.** Statutory bands applied to a cents-exact amount can yield fractions of a cent, so the statutory annual-tax seam takes `Money` and returns an exact unrounded value; the rounding rule is applied only afterwards, inside the calculator. A statutory table test therefore never asserts the rounding policy, and changing that policy cannot invalidate one.
 
 ---
 

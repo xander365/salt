@@ -311,6 +311,9 @@ It matches the N$4.50 and N$112.50 figures the SSC itself publishes, and half-ce
 **Rounding is not part of the statutory arithmetic, and the seam must show it.** The statutory bands applied to a cents-exact taxable amount can produce fractions of a cent — N$0.01 above a threshold at 18% is exactly N$0.0018. A statutory annual-tax function that returned `Money` would therefore be forcing an unconfirmed Salt policy inside a seam claiming to be law. It returns an exact unrounded value instead:
 
 ```text
+       taxable remuneration        (Money — non-negative, cents-exact)
+              |
+              v
 statutory annual band arithmetic   (exact, unrounded)
               |
               v
@@ -322,6 +325,8 @@ statutory annual band arithmetic   (exact, unrounded)
               v
             Money
 ```
+
+The seam is deliberately asymmetric: it takes `Money` and returns an exact unrounded value. Taxable remuneration is a monetary domain value and must stay non-negative and cents-exact at the public boundary rather than degrading to a bare decimal; the *result* cannot be `Money` for the reason above. The conversion happens inside, before the band arithmetic.
 
 Two consequences: changing the rounding policy must not invalidate a single statutory table test, and the calculator applies rounding only after statutory arithmetic has produced an exact value. There is still only one implementation of progressive-band arithmetic — the statutory seam is that same walk entered without threshold scaling, not a second copy.
 
