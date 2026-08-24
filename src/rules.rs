@@ -509,17 +509,17 @@ mod tests {
     }
 
     #[test]
-    fn tax_owed_is_zero_within_the_first_band() {
+    fn algorithm_tax_owed_is_zero_within_the_first_band() {
         assert_eq!(rules().tax_owed_on(dec!(50000), 12).unwrap().0, dec!(0));
     }
 
     #[test]
-    fn tax_owed_is_zero_at_the_top_of_the_first_band() {
+    fn algorithm_tax_owed_is_zero_at_the_top_of_the_first_band() {
         assert_eq!(rules().tax_owed_on(dec!(120000), 12).unwrap().0, dec!(0));
     }
 
     #[test]
-    fn tax_owed_taxes_only_the_portion_within_the_second_band() {
+    fn algorithm_tax_owed_taxes_only_the_portion_within_the_second_band() {
         // At period 12 (full annual thresholds): 5,000 above the 120,000
         // threshold at 20%.
         assert_eq!(
@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn tax_owed_sums_across_every_band_crossed() {
+    fn algorithm_tax_owed_sums_across_every_band_crossed() {
         // 120,000 @ 0% + 120,000 @ 20% + 240,000 @ 30% + 30,000 @ 40%.
         assert_eq!(
             rules().tax_owed_on(dec!(510000), 12).unwrap().0,
@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn same_ytd_taxable_owes_more_later_in_the_tax_year() {
+    fn algorithm_same_ytd_taxable_owes_more_later_in_the_tax_year() {
         // At period 3, the first band's threshold is scaled to 120,000 *
         // 3/12 = 30,000, so 50,000 already reaches the second band.
         let (early, _) = rules().tax_owed_on(dec!(50000), 3).unwrap();
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn band_contributions_report_the_scaled_threshold_and_rate() {
+    fn algorithm_band_contributions_report_the_scaled_threshold_and_rate() {
         // 50,000 at period 3 reaches into the second band, so both the
         // (zero-tax) first band and the second band contribute an entry.
         let (_, contributions) = rules().tax_owed_on(dec!(50000), 3).unwrap();
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn base_clamps_to_the_ceiling() {
+    fn algorithm_base_clamps_to_the_ceiling() {
         assert_eq!(
             social_security().base(money(dec!(20000))),
             (money(dec!(11000)), SscClamp::Ceiling)
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn base_clamps_to_the_floor() {
+    fn algorithm_base_clamps_to_the_floor() {
         assert_eq!(
             social_security().base(money(dec!(300))),
             (money(dec!(500)), SscClamp::Floor)
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn base_is_unchanged_between_the_floor_and_ceiling() {
+    fn algorithm_base_is_unchanged_between_the_floor_and_ceiling() {
         assert_eq!(
             social_security().base(money(dec!(9000))),
             (money(dec!(9000)), SscClamp::None)

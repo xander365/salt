@@ -696,7 +696,7 @@ mod tests {
     // PC-001: ordinary monthly salaried employee (baseline). Period 12 of
     // the tax year, so the PAYE bands are unscaled.
     #[test]
-    fn pc_001_ordinary_monthly_salaried_employee() {
+    fn salt_policy_pc_001_ordinary_monthly_salaried_employee() {
         let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -711,7 +711,7 @@ mod tests {
 
     // PC-002: employee below the PAYE threshold — zero-PAYE path.
     #[test]
-    fn pc_002_below_the_paye_threshold() {
+    fn salt_policy_pc_002_below_the_paye_threshold() {
         let input = input_for(
             dec!(5000.00),
             YearToDateContext::first_period(test_tax_year()),
@@ -726,7 +726,7 @@ mod tests {
 
     // PC-003: employee crossing a tax bracket — progressive band logic.
     #[test]
-    fn pc_003_crossing_a_tax_bracket() {
+    fn salt_policy_pc_003_crossing_a_tax_bracket() {
         let input = input_for(dec!(15000.00), ytd(dec!(19000.00), dec!(0.00), 2));
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -751,7 +751,7 @@ mod tests {
 
     // PC-004: employee crossing multiple brackets — higher-range logic.
     #[test]
-    fn pc_004_crossing_multiple_brackets() {
+    fn salt_policy_pc_004_crossing_multiple_brackets() {
         let input = input_for(dec!(180000.00), ytd(dec!(150000.00), dec!(25000.00), 5));
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -763,7 +763,7 @@ mod tests {
 
     // PC-009: BasicPay above the SSC ceiling — ceiling clamp.
     #[test]
-    fn pc_009_above_the_ssc_ceiling() {
+    fn salt_policy_pc_009_above_the_ssc_ceiling() {
         let input = input_for(
             dec!(20000.00),
             YearToDateContext::first_period(test_tax_year()),
@@ -783,7 +783,7 @@ mod tests {
 
     // PC-010: BasicPay below the SSC floor — floor clamp.
     #[test]
-    fn pc_010_below_the_ssc_floor() {
+    fn salt_policy_pc_010_below_the_ssc_floor() {
         let input = input_for(
             dec!(300.00),
             YearToDateContext::first_period(test_tax_year()),
@@ -803,7 +803,7 @@ mod tests {
     // PC-011: mid-year adoption with an OpeningBalance — cumulative PAYE
     // from prior totals entered at adoption, not accumulated by Salt.
     #[test]
-    fn pc_011_mid_year_adoption_with_opening_balance() {
+    fn salt_policy_pc_011_mid_year_adoption_with_opening_balance() {
         let input = input_for(dec!(100000.00), ytd(dec!(200000.00), dec!(32000.00), 7));
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -814,7 +814,7 @@ mod tests {
 
     // PC-012: second period of a tax year — PAYE net of prior withholding.
     #[test]
-    fn pc_012_second_period_of_a_tax_year() {
+    fn salt_policy_pc_012_second_period_of_a_tax_year() {
         let input = input_for(dec!(20000.00), ytd(dec!(15000.00), dec!(1000.00), 1));
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -844,7 +844,7 @@ mod tests {
     // September ruleset's N$12,500 ceiling applies to the entire period.
     // Under the old N$11,000 ceiling this BasicPay would have clamped.
     #[test]
-    fn pc_013_period_end_selects_the_ruleset_across_the_ceiling_change() {
+    fn salt_policy_pc_013_period_end_selects_the_ruleset_across_the_ceiling_change() {
         let period = PayPeriod::new(date(2026, 8, 26), date(2026, 9, 25)).unwrap();
         let rules = ruleset_for(period.end()).unwrap();
         let input = input_for_period(
@@ -871,7 +871,7 @@ mod tests {
     // clamp at the N$11,000 ceiling. Without this the September figures
     // above would pass even if the ceiling change had never been shipped.
     #[test]
-    fn pc_013_the_period_before_the_change_still_clamps_at_the_old_ceiling() {
+    fn salt_policy_pc_013_the_period_before_the_change_still_clamps_at_the_old_ceiling() {
         let period = PayPeriod::new(date(2026, 7, 26), date(2026, 8, 25)).unwrap();
         let rules = ruleset_for(period.end()).unwrap();
         assert_eq!(rules.ruleset_id().as_str(), "namibia-2025-03");
@@ -900,7 +900,7 @@ mod tests {
     // starts in the tax year starting 2025, but falls wholly in the tax
     // year starting 2026 because that is where its end date lands.
     #[test]
-    fn pc_014_period_end_selects_the_tax_year_across_the_year_end() {
+    fn salt_policy_pc_014_period_end_selects_the_tax_year_across_the_year_end() {
         let period = PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap();
         assert_eq!(
             TaxYear::for_period_end(period.start()),
@@ -1016,7 +1016,7 @@ mod tests {
     // "correction" path; it is simply given the fixed totals and continues
     // as normal (ADR-0002).
     #[test]
-    fn pc_015_corrected_earlier_period_absorbed_forward() {
+    fn salt_policy_pc_015_corrected_earlier_period_absorbed_forward() {
         let input = input_for(dec!(25000.00), ytd(dec!(45000.00), dec!(3000.00), 3));
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1069,7 +1069,7 @@ mod tests {
     // is worked: 300.00 x 10 = 3,000.00, well under the first period's
     // scaled zero-tax band (120,000/12 = 10,000), so PAYE is zero.
     #[test]
-    fn pc_005_employment_starts_mid_period_prorates_basic_pay() {
+    fn salt_policy_pc_005_employment_starts_mid_period_prorates_basic_pay() {
         let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
         let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(9300.00))).unwrap();
         let employment = snapshot(date(2026, 1, 22), None, terms);
@@ -1100,7 +1100,7 @@ mod tests {
     // Feb 1-12 (12 days) is worked: 300.00 x 12 = 3,600.00, again under
     // the zero-tax band, so PAYE is zero.
     #[test]
-    fn pc_006_employment_ends_mid_period_prorates_basic_pay() {
+    fn salt_policy_pc_006_employment_ends_mid_period_prorates_basic_pay() {
         let period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
         let terms = CompensationTerms::new(date(2026, 2, 1), None, money(dec!(8400.00))).unwrap();
         let employment = snapshot(date(2025, 1, 1), Some(date(2026, 2, 12)), terms);
@@ -1131,7 +1131,7 @@ mod tests {
     // denominator would give 2,900.00 and a hardcoded 28 would give
     // 3,107.14.
     #[test]
-    fn proration_divides_by_a_leap_year_februarys_own_29_days() {
+    fn salt_policy_proration_divides_by_a_leap_year_februarys_own_29_days() {
         let period = PayPeriod::new(date(2028, 2, 1), date(2028, 2, 29)).unwrap();
         let terms = CompensationTerms::new(date(2028, 2, 1), None, money(dec!(8700.00))).unwrap();
         let employment = snapshot(date(2028, 2, 20), None, terms);
@@ -1157,7 +1157,7 @@ mod tests {
     // 300.00/day; the employee leaves Apr 20, so Apr 1-20 (20 days) is
     // worked: 300.00 x 20 = 6,000.00.
     #[test]
-    fn proration_divides_by_a_30_day_periods_own_length() {
+    fn salt_policy_proration_divides_by_a_30_day_periods_own_length() {
         let period = PayPeriod::new(date(2026, 4, 1), date(2026, 4, 30)).unwrap();
         let terms = CompensationTerms::new(date(2026, 4, 1), None, money(dec!(9000.00))).unwrap();
         let employment = snapshot(date(2025, 1, 1), Some(date(2026, 4, 20)), terms);
@@ -1184,7 +1184,7 @@ mod tests {
     // which becomes 3,225.81. SSC is then charged on the rounded line:
     // 3,225.81 x 0.009 = 29.03229 -> 29.03.
     #[test]
-    fn a_proration_that_does_not_divide_evenly_is_rounded_half_up_to_cents() {
+    fn salt_policy_a_proration_that_does_not_divide_evenly_is_rounded_half_up_to_cents() {
         let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
         let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(10000.00))).unwrap();
         let employment = snapshot(date(2026, 1, 22), None, terms);
@@ -1211,7 +1211,7 @@ mod tests {
     // Those terms are in force for every day being paid for, so the
     // calculation prorates exactly as PC-006 does rather than refusing.
     #[test]
-    fn a_leaver_whose_terms_end_on_their_last_day_is_prorated_not_refused() {
+    fn salt_policy_a_leaver_whose_terms_end_on_their_last_day_is_prorated_not_refused() {
         let period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
         let terms = CompensationTerms::new(
             date(2026, 2, 1),
@@ -1307,7 +1307,7 @@ mod tests {
     // Proration applies to BasicPay only: a joiner's allowance is paid in
     // full even though BasicPay is cut down to the days worked.
     #[test]
-    fn proration_never_touches_an_allowance() {
+    fn salt_policy_proration_never_touches_an_allowance() {
         let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
         let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(9300.00))).unwrap();
         let employment = snapshot(date(2026, 1, 22), None, terms);
@@ -1342,7 +1342,7 @@ mod tests {
     // rounding drift here; skipping division when the period is fully
     // covered is what keeps the total exact.
     #[test]
-    fn twelve_consecutive_full_periods_sum_to_exactly_twelve_months_pay() {
+    fn salt_policy_twelve_consecutive_full_periods_sum_to_exactly_twelve_months_pay() {
         let schedule = test_schedule();
         let periods = schedule
             .generate_periods(2026, Month::new(1).unwrap(), 12)
@@ -1519,7 +1519,7 @@ mod tests {
     // SSC is charged on BasicPay alone, so it is unchanged from PC-001
     // despite the extra 2,000 of remuneration.
     #[test]
-    fn pc_007_taxable_allowance_affects_paye_not_ssc() {
+    fn salt_policy_pc_007_taxable_allowance_affects_paye_not_ssc() {
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
@@ -1566,7 +1566,7 @@ mod tests {
     // not an identity — they are still accumulated apart, which is what
     // `assert_invariants` re-derives from the returned lines.
     #[test]
-    fn pc_008_the_social_security_base_is_independent_of_gross_and_taxable() {
+    fn salt_policy_pc_008_the_social_security_base_is_independent_of_gross_and_taxable() {
         let ytd_context = ytd(dec!(110000.00), dec!(0.00), 11);
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
