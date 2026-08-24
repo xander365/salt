@@ -19,9 +19,10 @@ pub enum UnsupportedDeductionKind {
 }
 
 /// A non-empty set of `UnsupportedDeductionKind`s an Employee has. Built
-/// only through `new`, which rejects an empty `Vec` — an empty collection
-/// would be indistinguishable from `UnsupportedDeductionStatus::ConfirmedNone`,
-/// the exact ambiguity this type exists to remove (§3.5).
+/// only through `new`, which rejects an empty `Vec` and collapses repeated
+/// kinds while preserving their first-seen order. An empty collection would
+/// be indistinguishable from `UnsupportedDeductionStatus::ConfirmedNone`, the
+/// exact ambiguity this type exists to remove (§3.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<UnsupportedDeductionKind>")]
 #[serde(into = "Vec<UnsupportedDeductionKind>")]
@@ -49,7 +50,13 @@ impl UnsupportedDeductionKinds {
         if kinds.is_empty() {
             Err(EmptyUnsupportedDeductionKinds)
         } else {
-            Ok(UnsupportedDeductionKinds(kinds))
+            let mut unique_kinds = Vec::with_capacity(kinds.len());
+            for kind in kinds {
+                if !unique_kinds.contains(&kind) {
+                    unique_kinds.push(kind);
+                }
+            }
+            Ok(UnsupportedDeductionKinds(unique_kinds))
         }
     }
 
@@ -117,6 +124,23 @@ mod tests {
         let kinds = UnsupportedDeductionKinds::new(vec![
             UnsupportedDeductionKind::EducationPolicy,
             UnsupportedDeductionKind::ApprovedPensionFund,
+        ])
+        .unwrap();
+        assert_eq!(
+            kinds.as_slice(),
+            &[
+                UnsupportedDeductionKind::EducationPolicy,
+                UnsupportedDeductionKind::ApprovedPensionFund,
+            ]
+        );
+    }
+
+    #[test]
+    fn new_deduplicates_repeated_kinds_preserving_first_seen_order() {
+        let kinds = UnsupportedDeductionKinds::new(vec![
+            UnsupportedDeductionKind::EducationPolicy,
+            UnsupportedDeductionKind::ApprovedPensionFund,
+            UnsupportedDeductionKind::EducationPolicy,
         ])
         .unwrap();
         assert_eq!(
