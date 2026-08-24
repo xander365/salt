@@ -491,7 +491,10 @@ mod tests {
         CompensationTerms, EmployerId, EmploymentId, PersonId, PersonReference,
     };
     use crate::pay_schedule::{DayOfMonth, Month, PeriodEndDay};
-    use crate::rules::{EffectivePeriod, PayeBand, RoundingRule, RulesetId, SocialSecurityRules};
+    use crate::rules::{
+        EffectivePeriod, PayeBand, PayeTable, PayeTableId, RoundingRule, RulesetId,
+        SocialSecurityRules,
+    };
     use crate::ruleset::ruleset_for;
     use crate::year_to_date::PeriodsElapsed;
     use chrono::NaiveDate;
@@ -520,13 +523,40 @@ mod tests {
     /// synthetic test figures, not the statutory table `ruleset_for`
     /// resolves; most PC-0XX scenarios are indifferent to the actual
     /// rates, so they stay pinned to these round numbers instead.
-    fn test_rules() -> PayrollRules {
+    fn test_paye_table_id() -> PayeTableId {
+        PayeTableId::new("test-paye-table")
+    }
+
+    fn test_paye_table() -> PayeTable {
         let bands = vec![
             PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap(),
             PayeBand::new(money(dec!(120000)), dec!(0.20)).unwrap(),
             PayeBand::new(money(dec!(240000)), dec!(0.30)).unwrap(),
             PayeBand::new(money(dec!(480000)), dec!(0.40)).unwrap(),
         ];
+        PayeTable::new(
+            test_paye_table_id(),
+            bands,
+            date(2000, 1, 1),
+            date(2000, 1, 1),
+        )
+        .unwrap()
+    }
+
+    /// A single always-zero-rate band, for scenarios that need a valid
+    /// `PayeTable` but are indifferent to PAYE itself.
+    fn zero_rate_paye_table() -> PayeTable {
+        let bands = vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()];
+        PayeTable::new(
+            test_paye_table_id(),
+            bands,
+            date(2000, 1, 1),
+            date(2000, 1, 1),
+        )
+        .unwrap()
+    }
+
+    fn test_rules() -> PayrollRules {
         let social_security = SocialSecurityRules::new(
             dec!(0.009),
             dec!(0.009),
@@ -537,7 +567,7 @@ mod tests {
         PayrollRules::new(
             test_ruleset_id(),
             test_effective_period(),
-            bands,
+            test_paye_table(),
             social_security,
             RoundingRule::HalfUpToCents,
         )
@@ -934,7 +964,7 @@ mod tests {
         PayrollRules::new(
             test_ruleset_id(),
             test_effective_period(),
-            vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()],
+            zero_rate_paye_table(),
             SocialSecurityRules::new(dec!(0.009), dec!(0.009), money(dec!(500)), money(ceiling))
                 .unwrap(),
             RoundingRule::HalfUpToCents,
@@ -970,7 +1000,7 @@ mod tests {
         let out_of_period_rules = PayrollRules::new(
             test_ruleset_id(),
             EffectivePeriod::new(date(2030, 1, 1), None).unwrap(),
-            vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()],
+            zero_rate_paye_table(),
             SocialSecurityRules::new(
                 dec!(0.009),
                 dec!(0.009),
@@ -1735,7 +1765,6 @@ mod tests {
 
     #[test]
     fn refuses_when_deductions_would_exceed_gross_remuneration() {
-        let bands = vec![PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap()];
         // A deliberately pathological 200% employee rate to exercise the
         // refusal path; real rates are validated elsewhere to stay sane.
         let social_security =
@@ -1744,7 +1773,7 @@ mod tests {
         let rules = PayrollRules::new(
             test_ruleset_id(),
             test_effective_period(),
-            bands,
+            zero_rate_paye_table(),
             social_security,
             RoundingRule::HalfUpToCents,
         )

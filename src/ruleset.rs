@@ -9,7 +9,8 @@ use std::sync::LazyLock;
 use crate::calculation::PayrollError;
 use crate::money::Money;
 use crate::rules::{
-    EffectivePeriod, PayeBand, PayrollRules, RoundingRule, RulesetId, SocialSecurityRules,
+    EffectivePeriod, PayeBand, PayeTable, PayeTableId, PayrollRules, RoundingRule, RulesetId,
+    SocialSecurityRules,
 };
 
 fn money(cents: i64) -> Money {
@@ -33,12 +34,27 @@ fn paye_bands() -> Vec<PayeBand> {
     ]
 }
 
+/// The `PayeTable` shared by every ruleset Salt has shipped so far. Its
+/// own effective dates are not yet resolved on an independent axis —
+/// `ruleset_for` still selects by the containing `PayrollRules`'
+/// `EffectivePeriod` alone (ADR-0007's two-axis resolution is later work)
+/// — so both dates here are pinned to the earliest ruleset's start.
+fn paye_table() -> PayeTable {
+    PayeTable::new(
+        PayeTableId::new("namibia-synthetic"),
+        paye_bands(),
+        date(2025, 3, 1),
+        date(2025, 3, 1),
+    )
+    .unwrap()
+}
+
 /// SSC ceiling N$11,000 from 1 March 2025 to 31 August 2026.
 fn namibia_2025_march() -> PayrollRules {
     PayrollRules::new(
         RulesetId::new("namibia-2025-03"),
         EffectivePeriod::new(date(2025, 3, 1), Some(date(2026, 8, 31))).unwrap(),
-        paye_bands(),
+        paye_table(),
         SocialSecurityRules::new(
             Decimal::new(9, 3),
             Decimal::new(9, 3),
@@ -56,7 +72,7 @@ fn namibia_2026_september() -> PayrollRules {
     PayrollRules::new(
         RulesetId::new("namibia-2026-09"),
         EffectivePeriod::new(date(2026, 9, 1), None).unwrap(),
-        paye_bands(),
+        paye_table(),
         SocialSecurityRules::new(
             Decimal::new(9, 3),
             Decimal::new(9, 3),
@@ -158,7 +174,7 @@ mod tests {
         PayrollRules::new(
             RulesetId::new(id),
             EffectivePeriod::new(from, until).unwrap(),
-            paye_bands(),
+            paye_table(),
             SocialSecurityRules::new(Decimal::new(9, 3), Decimal::new(9, 3), money(0), money(1))
                 .unwrap(),
             RoundingRule::HalfUpToCents,

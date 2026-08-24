@@ -5,6 +5,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::calculation::PayrollError;
 use crate::money::{Money, MoneyError};
 
 /// Why a `PayrollRules` component could not be constructed.
@@ -88,6 +89,141 @@ impl From<PayeBand> for RawPayeBand {
         RawPayeBand {
             from: band.from,
             rate: band.rate,
+        }
+    }
+}
+
+/// Identifies a `PayeTable`, independent of the `RulesetId` its containing
+/// `PayrollRules` carries: PAYE and social security move on separate
+/// effective-date axes (ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PayeTableId(String);
+
+impl PayeTableId {
+    pub fn new(id: impl Into<String>) -> Self {
+        PayeTableId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PayeTableId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A progressive annual PAYE band table, with its own identity and its own
+/// pair of effective dates (ADR-0007): `legal_effective_from` is what the
+/// instrument says, `payroll_effective_from` is what payroll actually
+/// applies.
+///
+/// Structural only so far: `ruleset_for` does not yet resolve a
+/// `PayeTable` on its own axis, and the values shipped through it are not
+/// yet the real NamRA table (GitHub issue #7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawPayeTable", into = "RawPayeTable")]
+pub struct PayeTable {
+    id: PayeTableId,
+    bands: Vec<PayeBand>,
+    legal_effective_from: NaiveDate,
+    payroll_effective_from: NaiveDate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawPayeTable {
+    pub id: PayeTableId,
+    pub bands: Vec<PayeBand>,
+    pub legal_effective_from: NaiveDate,
+    pub payroll_effective_from: NaiveDate,
+}
+
+impl PayeTable {
+    /// `bands` must be non-empty, strictly ascending by `from`, with the
+    /// first band's `from` at `Money::ZERO`.
+    pub fn new(
+        id: PayeTableId,
+        bands: Vec<PayeBand>,
+        legal_effective_from: NaiveDate,
+        payroll_effective_from: NaiveDate,
+    ) -> Result<Self, PayrollRulesError> {
+        let Some(first) = bands.first() else {
+            return Err(PayrollRulesError::EmptyBandTable);
+        };
+        if first.from != Money::ZERO {
+            return Err(PayrollRulesError::FirstBandNotZero);
+        }
+        if bands.windows(2).any(|pair| pair[1].from <= pair[0].from) {
+            return Err(PayrollRulesError::BandsNotAscending);
+        }
+        Ok(PayeTable {
+            id,
+            bands,
+            legal_effective_from,
+            payroll_effective_from,
+        })
+    }
+
+    pub fn id(&self) -> &PayeTableId {
+        &self.id
+    }
+
+    pub fn bands(&self) -> &[PayeBand] {
+        &self.bands
+    }
+
+    pub fn legal_effective_from(&self) -> NaiveDate {
+        self.legal_effective_from
+    }
+
+    pub fn payroll_effective_from(&self) -> NaiveDate {
+        self.payroll_effective_from
+    }
+
+    /// The exact, unrounded annual tax owed on `taxable` — statutory band
+    /// arithmetic alone, with no `PayrollInput` or `YearToDateContext` in
+    /// sight. Runs the same band walk as `PayrollRules::tax_owed_on`,
+    /// entered here with a threshold scale factor of 1 (the full, unscaled
+    /// annual bands), so a change to that per-period walk cannot silently
+    /// diverge from this one.
+    ///
+    /// Never rounds. Rounding is Salt policy (SC-OPEN-2), decided by
+    /// `RoundingRule`, not statutory arithmetic — a change to
+    /// `RoundingRule` changes no `annual_tax` result. `taxable` stays
+    /// `Money` at this boundary because taxable remuneration is a monetary
+    /// domain value (non-negative, cents-exact); the result cannot be
+    /// `Money`, since a cent above a threshold can owe a fraction of a
+    /// cent in tax.
+    pub fn annual_tax(&self, taxable: Money) -> Result<Decimal, PayrollError> {
+        let (total, _) = band_walk(&self.bands, taxable.as_decimal(), |from| {
+            Ok(from.as_decimal())
+        })?;
+        Ok(total)
+    }
+}
+
+impl TryFrom<RawPayeTable> for PayeTable {
+    type Error = PayrollRulesError;
+
+    fn try_from(raw: RawPayeTable) -> Result<Self, PayrollRulesError> {
+        PayeTable::new(
+            raw.id,
+            raw.bands,
+            raw.legal_effective_from,
+            raw.payroll_effective_from,
+        )
+    }
+}
+
+impl From<PayeTable> for RawPayeTable {
+    fn from(table: PayeTable) -> RawPayeTable {
+        RawPayeTable {
+            id: table.id,
+            bands: table.bands,
+            legal_effective_from: table.legal_effective_from,
+            payroll_effective_from: table.payroll_effective_from,
         }
     }
 }
@@ -214,6 +350,46 @@ pub struct BandContribution {
     pub tax: Decimal,
 }
 
+/// The one progressive-band walk in the crate. Sums `rate * span` across
+/// every band `taxable` reaches, where a band's threshold is
+/// `scaled_threshold` applied to its `from`. `PayrollRules::tax_owed_on`
+/// passes a closure that scales thresholds to `period_number`/12
+/// (ADR-0001); `PayeTable::annual_tax` passes one that returns `from`
+/// unscaled — a threshold scale factor of 1. Never a second copy of this
+/// loop: that is what keeps a rounding-policy change from ever touching a
+/// statutory result (SC-OPEN-2).
+fn band_walk(
+    bands: &[PayeBand],
+    taxable: Decimal,
+    scaled_threshold: impl Fn(Money) -> Result<Decimal, MoneyError>,
+) -> Result<(Decimal, Vec<BandContribution>), MoneyError> {
+    // Every step is checked: `Decimal`'s operators panic on overflow, and
+    // a rules table is data a caller supplies.
+    let mut total = Decimal::ZERO;
+    let mut contributions = Vec::new();
+    for (index, band) in bands.iter().enumerate() {
+        let threshold = scaled_threshold(band.from)?;
+        if taxable <= threshold {
+            break;
+        }
+        let upper = match bands.get(index + 1) {
+            Some(next) => taxable.min(scaled_threshold(next.from)?),
+            None => taxable,
+        };
+        let tax = upper
+            .checked_sub(threshold)
+            .and_then(|span| span.checked_mul(band.rate))
+            .ok_or(MoneyError::Overflow)?;
+        total = total.checked_add(tax).ok_or(MoneyError::Overflow)?;
+        contributions.push(BandContribution {
+            threshold,
+            rate: band.rate,
+            tax,
+        });
+    }
+    Ok((total, contributions))
+}
+
 /// Identifies which `PayrollRules` produced a historical result. Rules are
 /// typed Rust, not database rows (ADR-0003), so this alone is not a
 /// durable historical reference: a later bug fix would change what an old
@@ -312,7 +488,7 @@ impl From<EffectivePeriod> for RawEffectivePeriod {
 pub struct PayrollRules {
     ruleset_id: RulesetId,
     effective_period: EffectivePeriod,
-    paye_bands: Vec<PayeBand>,
+    paye_table: PayeTable,
     social_security: SocialSecurityRules,
     rounding_rule: RoundingRule,
 }
@@ -321,37 +497,23 @@ pub struct PayrollRules {
 pub struct RawPayrollRules {
     pub ruleset_id: RulesetId,
     pub effective_period: EffectivePeriod,
-    pub paye_bands: Vec<PayeBand>,
+    pub paye_table: PayeTable,
     pub social_security: SocialSecurityRules,
     pub rounding_rule: RoundingRule,
 }
 
 impl PayrollRules {
-    /// `paye_bands` must be non-empty, strictly ascending by `from`, with
-    /// the first band's `from` at `Money::ZERO`.
     pub fn new(
         ruleset_id: RulesetId,
         effective_period: EffectivePeriod,
-        paye_bands: Vec<PayeBand>,
+        paye_table: PayeTable,
         social_security: SocialSecurityRules,
         rounding_rule: RoundingRule,
     ) -> Result<Self, PayrollRulesError> {
-        let Some(first) = paye_bands.first() else {
-            return Err(PayrollRulesError::EmptyBandTable);
-        };
-        if first.from != Money::ZERO {
-            return Err(PayrollRulesError::FirstBandNotZero);
-        }
-        if paye_bands
-            .windows(2)
-            .any(|pair| pair[1].from <= pair[0].from)
-        {
-            return Err(PayrollRulesError::BandsNotAscending);
-        }
         Ok(PayrollRules {
             ruleset_id,
             effective_period,
-            paye_bands,
+            paye_table,
             social_security,
             rounding_rule,
         })
@@ -363,6 +525,10 @@ impl PayrollRules {
 
     pub fn effective_period(&self) -> EffectivePeriod {
         self.effective_period
+    }
+
+    pub fn paye_table(&self) -> &PayeTable {
+        &self.paye_table
     }
 
     pub fn social_security(&self) -> SocialSecurityRules {
@@ -392,38 +558,13 @@ impl PayrollRules {
     ) -> Result<(Decimal, Vec<BandContribution>), MoneyError> {
         let elapsed = Decimal::from(period_number);
         let twelve = Decimal::from(12u32);
-        // Every step is checked: `Decimal`'s operators panic on overflow,
-        // and a rules table is data a caller supplies.
         let scaled_threshold = |from: Money| -> Result<Decimal, MoneyError> {
             from.as_decimal()
                 .checked_mul(elapsed)
                 .and_then(|scaled| scaled.checked_div(twelve))
                 .ok_or(MoneyError::Overflow)
         };
-
-        let mut total = Decimal::ZERO;
-        let mut contributions = Vec::new();
-        for (index, band) in self.paye_bands.iter().enumerate() {
-            let threshold = scaled_threshold(band.from)?;
-            if annual_taxable <= threshold {
-                break;
-            }
-            let upper = match self.paye_bands.get(index + 1) {
-                Some(next) => annual_taxable.min(scaled_threshold(next.from)?),
-                None => annual_taxable,
-            };
-            let tax = upper
-                .checked_sub(threshold)
-                .and_then(|span| span.checked_mul(band.rate))
-                .ok_or(MoneyError::Overflow)?;
-            total = total.checked_add(tax).ok_or(MoneyError::Overflow)?;
-            contributions.push(BandContribution {
-                threshold,
-                rate: band.rate,
-                tax,
-            });
-        }
-        Ok((total, contributions))
+        band_walk(&self.paye_table.bands, annual_taxable, scaled_threshold)
     }
 }
 
@@ -434,7 +575,7 @@ impl TryFrom<RawPayrollRules> for PayrollRules {
         PayrollRules::new(
             raw.ruleset_id,
             raw.effective_period,
-            raw.paye_bands,
+            raw.paye_table,
             raw.social_security,
             raw.rounding_rule,
         )
@@ -446,7 +587,7 @@ impl From<PayrollRules> for RawPayrollRules {
         RawPayrollRules {
             ruleset_id: rules.ruleset_id,
             effective_period: rules.effective_period,
-            paye_bands: rules.paye_bands,
+            paye_table: rules.paye_table,
             social_security: rules.social_security,
             rounding_rule: rules.rounding_rule,
         }
@@ -497,11 +638,25 @@ mod tests {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
     }
 
+    fn test_paye_table_id() -> PayeTableId {
+        PayeTableId::new("test-paye-table")
+    }
+
+    fn paye_table() -> PayeTable {
+        PayeTable::new(
+            test_paye_table_id(),
+            bands(),
+            date(2000, 1, 1),
+            date(2000, 1, 1),
+        )
+        .unwrap()
+    }
+
     fn rules() -> PayrollRules {
         PayrollRules::new(
             test_ruleset_id(),
             test_effective_period(),
-            bands(),
+            paye_table(),
             social_security(),
             RoundingRule::HalfUpToCents,
         )
@@ -567,6 +722,34 @@ mod tests {
     }
 
     #[test]
+    fn algorithm_annual_tax_matches_tax_owed_on_at_period_12() {
+        // At period 12 the per-period walk's thresholds are the full,
+        // unscaled annual bands — exactly what `annual_tax` runs.
+        let (expected, _) = rules().tax_owed_on(dec!(510000), 12).unwrap();
+        assert_eq!(
+            paye_table().annual_tax(money(dec!(510000))).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn algorithm_annual_tax_is_zero_within_the_first_band() {
+        assert_eq!(
+            paye_table().annual_tax(money(dec!(50000))).unwrap(),
+            dec!(0)
+        );
+    }
+
+    #[test]
+    fn algorithm_annual_tax_never_rounds() {
+        // One cent above the second band's 120,000 threshold, at 20%, is
+        // exactly N$0.002 — a value `RoundingRule::apply` would reject as
+        // `FractionalCents` if it ever reached `Money`.
+        let tax = paye_table().annual_tax(money(dec!(120000.01))).unwrap();
+        assert_eq!(tax, dec!(0.002));
+    }
+
+    #[test]
     fn algorithm_base_clamps_to_the_ceiling() {
         assert_eq!(
             social_security().base(money(dec!(20000))),
@@ -627,12 +810,11 @@ mod tests {
     #[test]
     fn rejects_an_empty_band_table() {
         assert_eq!(
-            PayrollRules::new(
-                test_ruleset_id(),
-                test_effective_period(),
+            PayeTable::new(
+                test_paye_table_id(),
                 Vec::new(),
-                social_security(),
-                RoundingRule::HalfUpToCents
+                date(2000, 1, 1),
+                date(2000, 1, 1)
             ),
             Err(PayrollRulesError::EmptyBandTable)
         );
@@ -642,12 +824,11 @@ mod tests {
     fn rejects_a_first_band_that_does_not_start_at_zero() {
         let bands = vec![PayeBand::new(money(dec!(100)), dec!(0.20)).unwrap()];
         assert_eq!(
-            PayrollRules::new(
-                test_ruleset_id(),
-                test_effective_period(),
+            PayeTable::new(
+                test_paye_table_id(),
                 bands,
-                social_security(),
-                RoundingRule::HalfUpToCents
+                date(2000, 1, 1),
+                date(2000, 1, 1)
             ),
             Err(PayrollRulesError::FirstBandNotZero)
         );
@@ -661,12 +842,11 @@ mod tests {
             PayeBand::new(money(dec!(100)), dec!(0.30)).unwrap(),
         ];
         assert_eq!(
-            PayrollRules::new(
-                test_ruleset_id(),
-                test_effective_period(),
+            PayeTable::new(
+                test_paye_table_id(),
                 bands,
-                social_security(),
-                RoundingRule::HalfUpToCents
+                date(2000, 1, 1),
+                date(2000, 1, 1)
             ),
             Err(PayrollRulesError::BandsNotAscending)
         );
@@ -680,20 +860,26 @@ mod tests {
     }
 
     #[test]
+    fn paye_table_deserialize_round_trips() {
+        let table = paye_table();
+        let json = serde_json::to_string(&table).unwrap();
+        assert_eq!(serde_json::from_str::<PayeTable>(&json).unwrap(), table);
+    }
+
+    #[test]
     fn deserialize_rejects_an_unsorted_band_table() {
-        let json = serde_json::to_string(&RawPayrollRules {
-            ruleset_id: test_ruleset_id(),
-            effective_period: test_effective_period(),
-            paye_bands: vec![
+        let json = serde_json::to_string(&RawPayeTable {
+            id: test_paye_table_id(),
+            bands: vec![
                 PayeBand::new(money(dec!(0)), dec!(0.0)).unwrap(),
                 PayeBand::new(money(dec!(200)), dec!(0.1)).unwrap(),
                 PayeBand::new(money(dec!(100)), dec!(0.2)).unwrap(),
             ],
-            social_security: social_security(),
-            rounding_rule: RoundingRule::HalfUpToCents,
+            legal_effective_from: date(2000, 1, 1),
+            payroll_effective_from: date(2000, 1, 1),
         })
         .unwrap();
-        assert!(serde_json::from_str::<PayrollRules>(&json).is_err());
+        assert!(serde_json::from_str::<PayeTable>(&json).is_err());
     }
 
     #[test]

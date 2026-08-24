@@ -40,9 +40,9 @@ pub use pay_schedule::{
     PeriodGenerationError,
 };
 pub use rules::{
-    BandContribution, EffectivePeriod, PayeBand, PayrollRules, PayrollRulesError,
-    RawEffectivePeriod, RawPayeBand, RawPayrollRules, RawSocialSecurityRules, RoundingRule,
-    RulesetId, SocialSecurityRules, SscClamp,
+    BandContribution, EffectivePeriod, PayeBand, PayeTable, PayeTableId, PayrollRules,
+    PayrollRulesError, RawEffectivePeriod, RawPayeBand, RawPayeTable, RawPayrollRules,
+    RawSocialSecurityRules, RoundingRule, RulesetId, SocialSecurityRules, SscClamp,
 };
 pub use ruleset::ruleset_for;
 pub use tax_year::TaxYear;
