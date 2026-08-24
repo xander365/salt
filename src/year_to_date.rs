@@ -72,15 +72,74 @@ impl From<PeriodsElapsed> for u8 {
     }
 }
 
-/// The TaxYear, taxable remuneration, PAYE withheld, and periods elapsed so
-/// far for one Employment. Required, never optional (INV-013): the first
-/// period of adoption passes explicit zeros, not a missing value.
+/// The taxable remuneration and PAYE from an Employee's tax certificate
+/// for taxable employment with another Employer earlier in the same tax
+/// year. Carried by `PriorEmployment::Some` and into
+/// `PayrollError::PriorEmploymentPresent`, so nothing has to be
+/// re-gathered once SC-OPEN-4 is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorEmploymentFigures {
+    taxable_remuneration: Money,
+    paye: Money,
+}
+
+impl PriorEmploymentFigures {
+    pub fn new(taxable_remuneration: Money, paye: Money) -> Self {
+        PriorEmploymentFigures {
+            taxable_remuneration,
+            paye,
+        }
+    }
+
+    pub fn taxable_remuneration(self) -> Money {
+        self.taxable_remuneration
+    }
+
+    pub fn paye(self) -> Money {
+        self.paye
+    }
+}
+
+/// Whether the Employee had taxable employment with a *different*
+/// Employer earlier in the same tax year.
+///
+/// This is never the same fact as an `OpeningBalance`
+/// (`prior_taxable_remuneration`, `prior_paye`, `periods_elapsed` above):
+/// an `OpeningBalance` is prior year-to-date figures for *this same*
+/// Employment and Employer, from before Salt — a mid-year system
+/// replacement, settled and unaffected by this type (ADR-0001).
+/// `PriorEmployment` is taxable employment with a *different* Employer,
+/// and the two must never be conflated.
+///
+/// Explicitly three-valued so a zero can never be mistaken for "nobody
+/// asked" (SC-OPEN-4). There is no Salt policy for `Some` — only a
+/// refusal: how a new employer must treat another employer's remuneration
+/// and PAYE, and whether a NamRA directive or certificate is required
+/// first, is unresolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PriorEmployment {
+    /// Confirmed: no earlier taxable employment this tax year.
+    /// `calculate` proceeds under Salt's documented policy.
+    None,
+    /// Figures from the employee's tax certificate. `calculate` refuses,
+    /// carrying the figures into the typed error.
+    Some(PriorEmploymentFigures),
+    /// Nobody has established the fact. `calculate` refuses rather than
+    /// treat an unasked question as a confirmed `None`.
+    Unknown,
+}
+
+/// The TaxYear, taxable remuneration, PAYE withheld, periods elapsed, and
+/// PriorEmployment fact so far for one Employment. Required, never
+/// optional (INV-013): the first period of adoption passes explicit
+/// zeros, not a missing value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct YearToDateContext {
     tax_year: TaxYear,
     prior_taxable_remuneration: Money,
     prior_paye: Money,
     periods_elapsed: PeriodsElapsed,
+    prior_employment: PriorEmployment,
 }
 
 impl YearToDateContext {
@@ -89,19 +148,29 @@ impl YearToDateContext {
         prior_taxable_remuneration: Money,
         prior_paye: Money,
         periods_elapsed: PeriodsElapsed,
+        prior_employment: PriorEmployment,
     ) -> Self {
         YearToDateContext {
             tax_year,
             prior_taxable_remuneration,
             prior_paye,
             periods_elapsed,
+            prior_employment,
         }
     }
 
     /// The first period of a tax year: no prior remuneration, no prior
-    /// PAYE, no periods elapsed.
+    /// PAYE, no periods elapsed, and prior employment confirmed none. A
+    /// caller with a different `PriorEmployment` fact must use `new`
+    /// directly.
     pub fn first_period(tax_year: TaxYear) -> Self {
-        YearToDateContext::new(tax_year, Money::ZERO, Money::ZERO, PeriodsElapsed::NONE)
+        YearToDateContext::new(
+            tax_year,
+            Money::ZERO,
+            Money::ZERO,
+            PeriodsElapsed::NONE,
+            PriorEmployment::None,
+        )
     }
 
     pub fn tax_year(self) -> TaxYear {
@@ -118,6 +187,10 @@ impl YearToDateContext {
 
     pub fn periods_elapsed(self) -> PeriodsElapsed {
         self.periods_elapsed
+    }
+
+    pub fn prior_employment(self) -> PriorEmployment {
+        self.prior_employment
     }
 }
 
@@ -154,6 +227,39 @@ mod tests {
         assert_eq!(ytd.prior_taxable_remuneration(), Money::ZERO);
         assert_eq!(ytd.prior_paye(), Money::ZERO);
         assert_eq!(ytd.periods_elapsed(), PeriodsElapsed::NONE);
+        assert_eq!(ytd.prior_employment(), PriorEmployment::None);
+    }
+
+    #[test]
+    fn prior_employment_figures_expose_the_recorded_amounts() {
+        let figures = PriorEmploymentFigures::new(
+            Money::from_cents(150_000).unwrap(),
+            Money::from_cents(20_000).unwrap(),
+        );
+        assert_eq!(
+            figures.taxable_remuneration(),
+            Money::from_cents(150_000).unwrap()
+        );
+        assert_eq!(figures.paye(), Money::from_cents(20_000).unwrap());
+    }
+
+    #[test]
+    fn prior_employment_round_trips_through_all_three_states() {
+        let states = [
+            PriorEmployment::None,
+            PriorEmployment::Unknown,
+            PriorEmployment::Some(PriorEmploymentFigures::new(
+                Money::from_cents(150_000).unwrap(),
+                Money::from_cents(20_000).unwrap(),
+            )),
+        ];
+        for state in states {
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(
+                serde_json::from_str::<PriorEmployment>(&json).unwrap(),
+                state
+            );
+        }
     }
 
     #[test]
@@ -163,6 +269,7 @@ mod tests {
             Money::from_cents(100).unwrap(),
             Money::from_cents(10).unwrap(),
             PeriodsElapsed::new(3).unwrap(),
+            PriorEmployment::None,
         );
         let json = serde_json::to_string(&ytd).unwrap();
         assert_eq!(

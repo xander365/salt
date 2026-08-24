@@ -19,7 +19,9 @@ use crate::pay_schedule::PaySchedule;
 use crate::rules::{BandContribution, PayrollRules, RulesetId, SscClamp};
 use crate::tax_year::TaxYear;
 use crate::unsupported_deduction::{UnsupportedDeductionKinds, UnsupportedDeductionStatus};
-use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
+use crate::year_to_date::{
+    PeriodsElapsed, PriorEmployment, PriorEmploymentFigures, YearToDateContext,
+};
 
 /// The complete, self-contained set of facts one calculation needs. If it
 /// is not in the `PayrollInput`, the calculator cannot see it. `schedule`
@@ -151,6 +153,17 @@ pub enum PayrollError {
     /// Carries `UnsupportedDeductionKinds`, not a bare `Vec`, so the
     /// refusal itself cannot claim "present" with nothing named.
     UnsupportedDeductionsPresent { kinds: UnsupportedDeductionKinds },
+    /// `PayrollInput.year_to_date.prior_employment()` is `Unknown`: nobody
+    /// has established whether the Employee had taxable employment with
+    /// another Employer earlier in this tax year. An unasked question
+    /// must never pass as a confirmed `None` (SC-OPEN-4).
+    PriorEmploymentUnknown,
+    /// The Employee had taxable employment with another Employer earlier
+    /// in this tax year. How a new employer must treat those figures is
+    /// unresolved (SC-OPEN-4), so `calculate` refuses rather than guess —
+    /// carrying the recorded figures so nothing has to be re-gathered once
+    /// the treatment is confirmed.
+    PriorEmploymentPresent { figures: PriorEmploymentFigures },
 }
 
 impl std::fmt::Display for PayrollError {
@@ -233,6 +246,20 @@ impl std::fmt::Display for PayrollError {
                 write!(
                     f,
                     "the employee has deductions Salt does not calculate: {kinds}"
+                )
+            }
+            PayrollError::PriorEmploymentUnknown => {
+                write!(
+                    f,
+                    "whether the employee had taxable employment with another employer earlier this tax year has not been established"
+                )
+            }
+            PayrollError::PriorEmploymentPresent { figures } => {
+                write!(
+                    f,
+                    "the employee had taxable employment with another employer earlier this tax year (taxable remuneration {}, PAYE {}); treatment is unresolved",
+                    figures.taxable_remuneration().as_decimal(),
+                    figures.paye().as_decimal()
                 )
             }
         }
@@ -351,6 +378,19 @@ pub fn calculate(
             return Err(PayrollError::UnsupportedDeductionsPresent {
                 kinds: kinds.clone(),
             });
+        }
+    }
+
+    // Checked before any arithmetic runs, for the same reason as
+    // unsupported deductions above: there is no Salt policy for prior
+    // employment with another Employer, only a refusal (SC-OPEN-4).
+    match input.year_to_date.prior_employment() {
+        PriorEmployment::None => {}
+        PriorEmployment::Unknown => {
+            return Err(PayrollError::PriorEmploymentUnknown);
+        }
+        PriorEmployment::Some(figures) => {
+            return Err(PayrollError::PriorEmploymentPresent { figures });
         }
     }
 
@@ -695,6 +735,7 @@ mod tests {
             money(prior_taxable),
             money(prior_paye),
             PeriodsElapsed::new(periods_elapsed).unwrap(),
+            PriorEmployment::None,
         )
     }
 
@@ -1198,6 +1239,107 @@ mod tests {
             calculate(&input, &test_rules()),
             Err(PayrollError::UnsupportedDeductionStatusUnknown)
         );
+    }
+
+    fn input_with_prior_employment(prior_employment: PriorEmployment) -> PayrollInput {
+        PayrollInput::new(
+            employment_paying(dec!(25000.00)),
+            test_period(),
+            Vec::new(),
+            YearToDateContext::new(
+                test_tax_year(),
+                Money::ZERO,
+                Money::ZERO,
+                PeriodsElapsed::NONE,
+                prior_employment,
+            ),
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        )
+    }
+
+    // §5.6: `None` is the only state that lets `calculate` proceed — the
+    // same happy path every other `salt_policy_*` scenario already
+    // exercises via `first_period`, asserted directly here.
+    #[test]
+    fn salt_policy_prior_employment_none_calculates_normally() {
+        let input = input_with_prior_employment(PriorEmployment::None);
+        assert!(calculate(&input, &test_rules()).is_ok());
+    }
+
+    // §5.6: an unasked question must never pass as a confirmed `None`.
+    #[test]
+    fn salt_policy_prior_employment_unknown_refuses() {
+        let input = input_with_prior_employment(PriorEmployment::Unknown);
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PriorEmploymentUnknown)
+        );
+    }
+
+    // §5.6 / SC-OPEN-4: recorded figures are refused, not consumed — and
+    // the figures survive into the error so nothing has to be re-gathered
+    // once the treatment is confirmed.
+    #[test]
+    fn salt_policy_prior_employment_some_refuses_carrying_the_figures() {
+        let figures = PriorEmploymentFigures::new(money(dec!(150000.00)), money(dec!(20000.00)));
+        let input = input_with_prior_employment(PriorEmployment::Some(figures));
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PriorEmploymentPresent {
+                figures: PriorEmploymentFigures::new(money(dec!(150000.00)), money(dec!(20000.00))),
+            })
+        );
+    }
+
+    // §5.6: the refusal runs before any arithmetic, so an input that is
+    // also wrong further down still refuses on prior employment — nothing
+    // downstream is reached, and no partial figures are produced.
+    #[test]
+    fn salt_policy_prior_employment_refuses_before_any_arithmetic_runs() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(25000.00)),
+            test_period(),
+            // A duplicate BasicPay line, refused further down `calculate`.
+            vec![Earning::BasicPay(money(dec!(5000.00)))],
+            YearToDateContext::new(
+                test_tax_year(),
+                Money::ZERO,
+                Money::ZERO,
+                PeriodsElapsed::NONE,
+                PriorEmployment::Unknown,
+            ),
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PriorEmploymentUnknown)
+        );
+    }
+
+    // A first-time employee starting mid tax year (a joiner, PC-005) still
+    // calculates correctly under confirmed none — `first_period` defaults
+    // `PriorEmployment` to `None`.
+    #[test]
+    fn salt_policy_first_time_employee_starting_mid_tax_year_calculates_under_confirmed_none() {
+        let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
+        let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(9300.00))).unwrap();
+        let employment = snapshot(date(2026, 1, 22), None, terms);
+        let ytd = YearToDateContext::first_period(test_tax_year());
+        assert_eq!(ytd.prior_employment(), PriorEmployment::None);
+        let input = PayrollInput::new(
+            employment,
+            period,
+            Vec::new(),
+            ytd,
+            calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+
+        assert!(calculate(&input, &test_rules()).is_ok());
     }
 
     #[test]

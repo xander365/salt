@@ -51,4 +51,7 @@ pub use unsupported_deduction::{
     EmptyUnsupportedDeductionKinds, UnsupportedDeductionKind, UnsupportedDeductionKinds,
     UnsupportedDeductionStatus,
 };
-pub use year_to_date::{InvalidPeriodsElapsed, PeriodsElapsed, YearToDateContext};
+pub use year_to_date::{
+    InvalidPeriodsElapsed, PeriodsElapsed, PriorEmployment, PriorEmploymentFigures,
+    YearToDateContext,
+};
