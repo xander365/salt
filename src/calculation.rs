@@ -1301,6 +1301,51 @@ mod tests {
         );
     }
 
+    // §5.6 / SC-OPEN-4: the refusal is on the *fact*, not on the size of
+    // the figures. Zeroed figures are still prior employment with another
+    // Employer, and still refuse.
+    #[test]
+    fn salt_policy_prior_employment_some_refuses_even_when_the_figures_are_zero() {
+        let figures = PriorEmploymentFigures::new(Money::ZERO, Money::ZERO);
+        let input = input_with_prior_employment(PriorEmployment::Some(figures));
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::PriorEmploymentPresent { figures })
+        );
+    }
+
+    // §5.6: the two facts are never conflated. The same non-zero
+    // OpeningBalance (PC-011) still calculates under confirmed `None`, and
+    // still refuses under `Some` — and the refusal carries the
+    // prior-employment figures, never the OpeningBalance ones.
+    #[test]
+    fn salt_policy_prior_employment_is_not_conflated_with_an_opening_balance() {
+        let opening_balance = ytd(dec!(200000.00), dec!(32000.00), 7);
+        assert_eq!(opening_balance.prior_employment(), PriorEmployment::None);
+
+        let adopted = input_for(dec!(100000.00), opening_balance);
+        let calc = calculate(&adopted, &test_rules()).unwrap();
+        assert_eq!(calc.paye.amount, money(dec!(26000.00)));
+
+        let figures = PriorEmploymentFigures::new(money(dec!(150000.00)), money(dec!(20000.00)));
+        let with_prior_employer = input_for(
+            dec!(100000.00),
+            YearToDateContext::new(
+                opening_balance.tax_year(),
+                opening_balance.prior_taxable_remuneration(),
+                opening_balance.prior_paye(),
+                opening_balance.periods_elapsed(),
+                PriorEmployment::Some(figures),
+            ),
+        );
+
+        assert_eq!(
+            calculate(&with_prior_employer, &test_rules()),
+            Err(PayrollError::PriorEmploymentPresent { figures })
+        );
+    }
+
     // §5.6: the refusal runs before any arithmetic, so an input that is
     // also wrong further down still refuses on prior employment — nothing
     // downstream is reached, and no partial figures are produced.

@@ -262,6 +262,31 @@ mod tests {
         }
     }
 
+    // The whole point of the fact is that an unasked question cannot pass
+    // as a confirmed `None`. A wire format that let the field be omitted
+    // would put that ambiguity straight back, so absence is a hard error.
+    #[test]
+    fn deserialize_requires_the_prior_employment_fact() {
+        let ytd = YearToDateContext::new(
+            TaxYear::starting(2026),
+            Money::from_cents(100).unwrap(),
+            Money::from_cents(10).unwrap(),
+            PeriodsElapsed::new(3).unwrap(),
+            PriorEmployment::None,
+        );
+        let mut fields: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ytd).unwrap()).unwrap();
+        // Sanity: the complete value deserializes, so only the removal below
+        // can be what makes the next assertion fail.
+        assert_eq!(
+            serde_json::from_value::<YearToDateContext>(fields.clone()).unwrap(),
+            ytd
+        );
+
+        fields.as_object_mut().unwrap().remove("prior_employment");
+        assert!(serde_json::from_value::<YearToDateContext>(fields).is_err());
+    }
+
     #[test]
     fn deserialize_round_trips() {
         let ytd = YearToDateContext::new(
