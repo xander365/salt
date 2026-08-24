@@ -18,6 +18,20 @@ pub enum UnsupportedDeductionKind {
     EducationPolicy,
 }
 
+impl std::fmt::Display for UnsupportedDeductionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            UnsupportedDeductionKind::ApprovedPensionFund => "approved pension fund contribution",
+            UnsupportedDeductionKind::ProvidentFund => "provident fund contribution",
+            UnsupportedDeductionKind::RetirementAnnuityFund => {
+                "retirement annuity fund contribution"
+            }
+            UnsupportedDeductionKind::EducationPolicy => "education policy premium",
+        };
+        f.write_str(name)
+    }
+}
+
 /// A non-empty set of `UnsupportedDeductionKind`s an Employee has. Built
 /// only through `new`, which rejects an empty `Vec` and collapses repeated
 /// kinds while preserving their first-seen order. An empty collection would
@@ -62,6 +76,29 @@ impl UnsupportedDeductionKinds {
 
     pub fn as_slice(&self) -> &[UnsupportedDeductionKind] {
         &self.0
+    }
+}
+
+/// Human-friendly only. The domain contract is the type, never this string
+/// — a caller branches on `UnsupportedDeductionKind`, never on prose.
+impl std::fmt::Display for UnsupportedDeductionKinds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, kind) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{kind}")?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> IntoIterator for &'a UnsupportedDeductionKinds {
+    type Item = &'a UnsupportedDeductionKind;
+    type IntoIter = std::slice::Iter<'a, UnsupportedDeductionKind>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -156,6 +193,33 @@ mod tests {
     fn deserialize_rejects_an_empty_collection() {
         let result: Result<UnsupportedDeductionKinds, _> = serde_json::from_str("[]");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn status_deserialize_rejects_a_present_with_no_kinds() {
+        let result: Result<UnsupportedDeductionStatus, _> =
+            serde_json::from_str(r#"{"Present":[]}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn status_round_trips_through_all_three_states() {
+        let statuses = [
+            UnsupportedDeductionStatus::ConfirmedNone,
+            UnsupportedDeductionStatus::Unknown,
+            UnsupportedDeductionStatus::Present(
+                UnsupportedDeductionKinds::new(vec![
+                    UnsupportedDeductionKind::ApprovedPensionFund,
+                    UnsupportedDeductionKind::ProvidentFund,
+                ])
+                .unwrap(),
+            ),
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let round_tripped: UnsupportedDeductionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, round_tripped);
+        }
     }
 
     #[test]

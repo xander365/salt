@@ -18,7 +18,7 @@ use crate::pay_period::PayPeriod;
 use crate::pay_schedule::PaySchedule;
 use crate::rules::{BandContribution, PayrollRules, RulesetId, SscClamp};
 use crate::tax_year::TaxYear;
-use crate::unsupported_deduction::{UnsupportedDeductionKind, UnsupportedDeductionStatus};
+use crate::unsupported_deduction::{UnsupportedDeductionKinds, UnsupportedDeductionStatus};
 use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 
 /// The complete, self-contained set of facts one calculation needs. If it
@@ -148,9 +148,9 @@ pub enum PayrollError {
     /// The Employee has one or more of the four deduction kinds Salt v1
     /// does not support. Every kind supplied is named, not just the
     /// first, so nothing has to be re-established once support ships.
-    UnsupportedDeductionsPresent {
-        kinds: Vec<UnsupportedDeductionKind>,
-    },
+    /// Carries `UnsupportedDeductionKinds`, not a bare `Vec`, so the
+    /// refusal itself cannot claim "present" with nothing named.
+    UnsupportedDeductionsPresent { kinds: UnsupportedDeductionKinds },
 }
 
 impl std::fmt::Display for PayrollError {
@@ -232,7 +232,7 @@ impl std::fmt::Display for PayrollError {
             PayrollError::UnsupportedDeductionsPresent { kinds } => {
                 write!(
                     f,
-                    "the employee has unsupported deduction kind(s) Salt does not calculate: {kinds:?}"
+                    "the employee has deductions Salt does not calculate: {kinds}"
                 )
             }
         }
@@ -349,7 +349,7 @@ pub fn calculate(
         }
         UnsupportedDeductionStatus::Present(kinds) => {
             return Err(PayrollError::UnsupportedDeductionsPresent {
-                kinds: kinds.as_slice().to_vec(),
+                kinds: kinds.clone(),
             });
         }
     }
@@ -543,7 +543,7 @@ mod tests {
         SocialSecurityRules,
     };
     use crate::ruleset::ruleset_for;
-    use crate::unsupported_deduction::UnsupportedDeductionKinds;
+    use crate::unsupported_deduction::{UnsupportedDeductionKind, UnsupportedDeductionKinds};
     use crate::year_to_date::PeriodsElapsed;
     use chrono::NaiveDate;
     use rust_decimal_macros::dec;
@@ -1147,11 +1147,56 @@ mod tests {
         assert_eq!(
             calculate(&input, &test_rules()),
             Err(PayrollError::UnsupportedDeductionsPresent {
-                kinds: vec![
+                kinds: UnsupportedDeductionKinds::new(vec![
                     UnsupportedDeductionKind::ApprovedPensionFund,
                     UnsupportedDeductionKind::EducationPolicy,
-                ],
+                ])
+                .unwrap(),
             })
+        );
+    }
+
+    // §3.5: all four kinds are refused the same way — no kind is handled
+    // more gently than the others.
+    #[test]
+    fn salt_policy_unsupported_deductions_present_refuses_every_one_of_the_four_kinds() {
+        for kind in [
+            UnsupportedDeductionKind::ApprovedPensionFund,
+            UnsupportedDeductionKind::ProvidentFund,
+            UnsupportedDeductionKind::RetirementAnnuityFund,
+            UnsupportedDeductionKind::EducationPolicy,
+        ] {
+            let kinds = UnsupportedDeductionKinds::new(vec![kind]).unwrap();
+            let input =
+                input_with_unsupported_deductions(UnsupportedDeductionStatus::Present(kinds));
+
+            assert_eq!(
+                calculate(&input, &test_rules()),
+                Err(PayrollError::UnsupportedDeductionsPresent {
+                    kinds: UnsupportedDeductionKinds::new(vec![kind]).unwrap(),
+                })
+            );
+        }
+    }
+
+    // §5.5: the refusal runs before any arithmetic, so an input that is
+    // also wrong further down still refuses on the deduction — nothing
+    // downstream is reached, and no partial figures are produced.
+    #[test]
+    fn salt_policy_unsupported_deductions_refuse_before_any_arithmetic_runs() {
+        let input = PayrollInput::new(
+            employment_paying(dec!(25000.00)),
+            test_period(),
+            // A duplicate BasicPay line, refused further down `calculate`.
+            vec![Earning::BasicPay(money(dec!(5000.00)))],
+            YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
+            UnsupportedDeductionStatus::Unknown,
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedDeductionStatusUnknown)
         );
     }
 
