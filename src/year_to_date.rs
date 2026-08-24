@@ -72,7 +72,7 @@ impl From<PeriodsElapsed> for u8 {
     }
 }
 
-/// The taxable remuneration and PAYE from an Employee's tax certificate
+/// The taxable remuneration and PAYE from a Person's tax certificate
 /// for taxable employment with another Employer earlier in the same tax
 /// year. Carried by `PriorEmployment::Some` and into
 /// `PayrollError::PriorEmploymentPresent`, so nothing has to be
@@ -100,7 +100,7 @@ impl PriorEmploymentFigures {
     }
 }
 
-/// Whether the Employee had taxable employment with a *different*
+/// Whether the Person had taxable employment with a *different*
 /// Employer earlier in the same tax year.
 ///
 /// This is never the same fact as an `OpeningBalance`
@@ -121,7 +121,7 @@ pub enum PriorEmployment {
     /// Confirmed: no earlier taxable employment this tax year.
     /// `calculate` proceeds under Salt's documented policy.
     None,
-    /// Figures from the employee's tax certificate. `calculate` refuses,
+    /// Figures from the Person's tax certificate. `calculate` refuses,
     /// carrying the figures into the typed error.
     Some(PriorEmploymentFigures),
     /// Nobody has established the fact. `calculate` refuses rather than
@@ -159,11 +159,11 @@ impl YearToDateContext {
         }
     }
 
-    /// The first period of a tax year: no prior remuneration, no prior
-    /// PAYE, no periods elapsed, and prior employment confirmed none. A
-    /// caller with a different `PriorEmployment` fact must use `new`
-    /// directly.
-    pub fn first_period(tax_year: TaxYear) -> Self {
+    /// The first period of a tax year after the caller has established
+    /// that the Person had no prior employment in that tax year. The
+    /// explicit name prevents an unanswered prior-employment question from
+    /// silently becoming a confirmed `PriorEmployment::None`.
+    pub fn first_period_with_no_prior_employment(tax_year: TaxYear) -> Self {
         YearToDateContext::new(
             tax_year,
             Money::ZERO,
@@ -222,8 +222,8 @@ mod tests {
     }
 
     #[test]
-    fn first_period_is_all_zeros() {
-        let ytd = YearToDateContext::first_period(TaxYear::starting(2026));
+    fn first_period_with_no_prior_employment_is_all_zeros() {
+        let ytd = YearToDateContext::first_period_with_no_prior_employment(TaxYear::starting(2026));
         assert_eq!(ytd.prior_taxable_remuneration(), Money::ZERO);
         assert_eq!(ytd.prior_paye(), Money::ZERO);
         assert_eq!(ytd.periods_elapsed(), PeriodsElapsed::NONE);

@@ -154,11 +154,11 @@ pub enum PayrollError {
     /// refusal itself cannot claim "present" with nothing named.
     UnsupportedDeductionsPresent { kinds: UnsupportedDeductionKinds },
     /// `PayrollInput.year_to_date.prior_employment()` is `Unknown`: nobody
-    /// has established whether the Employee had taxable employment with
+    /// has established whether the Person had taxable employment with
     /// another Employer earlier in this tax year. An unasked question
     /// must never pass as a confirmed `None` (SC-OPEN-4).
     PriorEmploymentUnknown,
-    /// The Employee had taxable employment with another Employer earlier
+    /// The Person had taxable employment with another Employer earlier
     /// in this tax year. How a new employer must treat those figures is
     /// unresolved (SC-OPEN-4), so `calculate` refuses rather than guess —
     /// carrying the recorded figures so nothing has to be re-gathered once
@@ -834,7 +834,7 @@ mod tests {
     fn salt_policy_pc_002_below_the_paye_threshold() {
         let input = input_for(
             dec!(5000.00),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -886,7 +886,7 @@ mod tests {
     fn salt_policy_pc_009_above_the_ssc_ceiling() {
         let input = input_for(
             dec!(20000.00),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -906,7 +906,7 @@ mod tests {
     fn salt_policy_pc_010_below_the_ssc_floor() {
         let input = input_for(
             dec!(300.00),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -970,7 +970,9 @@ mod tests {
         let input = input_for_period(
             dec!(12000.00),
             period,
-            YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                period.end(),
+            )),
         );
         let calc = calculate(&input, rules).unwrap();
 
@@ -999,7 +1001,9 @@ mod tests {
         let input = input_for_period(
             dec!(12000.00),
             period,
-            YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                period.end(),
+            )),
         );
         let calc = calculate(&input, rules).unwrap();
 
@@ -1035,7 +1039,9 @@ mod tests {
         let input = input_for_period(
             dec!(8000.00),
             period,
-            YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                period.end(),
+            )),
         );
         let calc = calculate(&input, rules).unwrap();
 
@@ -1066,7 +1072,7 @@ mod tests {
     fn salt_policy_varying_only_the_ruleset_against_a_fixed_input_changes_the_result() {
         let input = input_for(
             dec!(12000.00),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
         );
 
         let before = calculate(&input, &rules_with_ceiling(dec!(11000.00))).unwrap();
@@ -1103,7 +1109,7 @@ mod tests {
         .unwrap();
         let input = input_for(
             dec!(5000.00),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
         );
 
         assert_eq!(
@@ -1119,7 +1125,8 @@ mod tests {
     fn refuses_a_tax_year_that_does_not_match_the_periods_end_date() {
         let period = PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap();
         let rules = ruleset_for(period.end()).unwrap();
-        let wrong_ytd = YearToDateContext::first_period(TaxYear::starting(2025));
+        let wrong_ytd =
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::starting(2025));
         let input = input_for_period(dec!(8000.00), period, wrong_ytd);
 
         assert_eq!(
@@ -1150,7 +1157,7 @@ mod tests {
             employment_paying(dec!(25000.00)),
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             status,
         )
@@ -1230,7 +1237,7 @@ mod tests {
             test_period(),
             // A duplicate BasicPay line, refused further down `calculate`.
             vec![Earning::BasicPay(money(dec!(5000.00)))],
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::Unknown,
         );
@@ -1260,7 +1267,8 @@ mod tests {
 
     // §5.6: `None` is the only state that lets `calculate` proceed — the
     // same happy path every other `salt_policy_*` scenario already
-    // exercises via `first_period`, asserted directly here.
+    // exercises via `first_period_with_no_prior_employment`, asserted
+    // directly here.
     #[test]
     fn salt_policy_prior_employment_none_calculates_normally() {
         let input = input_with_prior_employment(PriorEmployment::None);
@@ -1320,15 +1328,21 @@ mod tests {
         );
     }
 
-    // A first-time employee starting mid tax year (a joiner, PC-005) still
-    // calculates correctly under confirmed none — `first_period` defaults
-    // `PriorEmployment` to `None`.
+    // A first-time Person starting mid tax year (a joiner, PC-005) still
+    // calculates correctly when the caller explicitly confirms no prior
+    // employment. January is period 11 of the TaxYear starting in March.
     #[test]
     fn salt_policy_first_time_employee_starting_mid_tax_year_calculates_under_confirmed_none() {
         let period = PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap();
         let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(9300.00))).unwrap();
         let employment = snapshot(date(2026, 1, 22), None, terms);
-        let ytd = YearToDateContext::first_period(test_tax_year());
+        let ytd = YearToDateContext::new(
+            test_tax_year(),
+            Money::ZERO,
+            Money::ZERO,
+            PeriodsElapsed::new(10).unwrap(),
+            PriorEmployment::None,
+        );
         assert_eq!(ytd.prior_employment(), PriorEmployment::None);
         let input = PayrollInput::new(
             employment,
@@ -1339,7 +1353,13 @@ mod tests {
             UnsupportedDeductionStatus::ConfirmedNone,
         );
 
-        assert!(calculate(&input, &test_rules()).is_ok());
+        let calculation = calculate(&input, &test_rules()).unwrap();
+        assert_eq!(calculation.gross_remuneration, money(dec!(3000.00)));
+        assert_eq!(calculation.paye.amount, Money::ZERO);
+        assert_eq!(
+            calculation.paye.trace.periods_elapsed,
+            PeriodsElapsed::new(10).unwrap()
+        );
     }
 
     #[test]
@@ -1350,7 +1370,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1371,7 +1391,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1396,7 +1416,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1428,7 +1448,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1460,7 +1480,9 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(TaxYear::for_period_end(date(2028, 2, 29))),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                date(2028, 2, 29),
+            )),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1487,7 +1509,9 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(TaxYear::for_period_end(date(2026, 4, 30))),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                date(2026, 4, 30),
+            )),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1515,7 +1539,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1548,7 +1572,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1577,7 +1601,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1603,7 +1627,7 @@ mod tests {
             employment.clone(),
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1620,7 +1644,7 @@ mod tests {
             employment,
             truncated,
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1643,7 +1667,7 @@ mod tests {
             employment,
             period,
             vec![Earning::TaxableAllowance(money(dec!(800.00)))],
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1686,7 +1710,9 @@ mod tests {
                 employment,
                 *period,
                 Vec::new(),
-                YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
+                YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                    period.end(),
+                )),
                 schedule,
                 UnsupportedDeductionStatus::ConfirmedNone,
             );
@@ -1712,7 +1738,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1733,7 +1759,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1758,7 +1784,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1781,7 +1807,9 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(TaxYear::for_period_end(date(2026, 3, 28))),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                date(2026, 3, 28),
+            )),
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1806,7 +1834,9 @@ mod tests {
             employment,
             period,
             Vec::new(),
-            YearToDateContext::first_period(TaxYear::for_period_end(date(2028, 3, 28))),
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                date(2028, 3, 28),
+            )),
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -1835,7 +1865,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -2051,7 +2081,7 @@ mod tests {
             employment_paying(dec!(5000.00)),
             test_period(),
             vec![Earning::BasicPay(money(dec!(5000.00)))],
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
         );
@@ -2092,7 +2122,7 @@ mod tests {
         .unwrap();
         let input = input_for(
             dec!(5000.00),
-            YearToDateContext::first_period(test_tax_year()),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
         );
 
         assert_eq!(
