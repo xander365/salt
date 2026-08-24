@@ -18,6 +18,7 @@ use crate::pay_period::PayPeriod;
 use crate::pay_schedule::PaySchedule;
 use crate::rules::{BandContribution, PayrollRules, RulesetId, SscClamp};
 use crate::tax_year::TaxYear;
+use crate::unsupported_deduction::{UnsupportedDeductionKind, UnsupportedDeductionStatus};
 use crate::year_to_date::{PeriodsElapsed, YearToDateContext};
 
 /// The complete, self-contained set of facts one calculation needs. If it
@@ -40,6 +41,12 @@ pub struct PayrollInput {
     /// `CompensationTerms.EffectiveFrom` against INV-014. It never selects
     /// or generates `period` — the caller supplies that directly.
     schedule: PaySchedule,
+    /// What Salt knows about whether the Employee has any of the four
+    /// deduction kinds Salt v1 does not support
+    /// (`docs/domain/statutory-conformance.md` §3.5, §5.5). There is no
+    /// default: a caller must state the fact, and `calculate` refuses
+    /// unless it is `ConfirmedNone`.
+    unsupported_deductions: UnsupportedDeductionStatus,
 }
 
 impl PayrollInput {
@@ -49,6 +56,7 @@ impl PayrollInput {
         earnings: Vec<Earning>,
         year_to_date: YearToDateContext,
         schedule: PaySchedule,
+        unsupported_deductions: UnsupportedDeductionStatus,
     ) -> Self {
         PayrollInput {
             employment,
@@ -56,6 +64,7 @@ impl PayrollInput {
             earnings,
             year_to_date,
             schedule,
+            unsupported_deductions,
         }
     }
 }
@@ -131,6 +140,17 @@ pub enum PayrollError {
         expected: TaxYear,
         supplied: TaxYear,
     },
+    /// `PayrollInput.unsupported_deductions` is `Unknown`: nobody has
+    /// established whether the Employee has any of the four deduction
+    /// kinds Salt v1 does not support. An unasked question must never
+    /// pass as a confirmed "no" (§5.5).
+    UnsupportedDeductionStatusUnknown,
+    /// The Employee has one or more of the four deduction kinds Salt v1
+    /// does not support. Every kind supplied is named, not just the
+    /// first, so nothing has to be re-established once support ships.
+    UnsupportedDeductionsPresent {
+        kinds: Vec<UnsupportedDeductionKind>,
+    },
 }
 
 impl std::fmt::Display for PayrollError {
@@ -201,6 +221,18 @@ impl std::fmt::Display for PayrollError {
                     "the year-to-date context's tax year starting {} does not match the tax year starting {} that the period end date falls in",
                     supplied.starting_year(),
                     expected.starting_year()
+                )
+            }
+            PayrollError::UnsupportedDeductionStatusUnknown => {
+                write!(
+                    f,
+                    "whether the employee has an unsupported deduction has not been established"
+                )
+            }
+            PayrollError::UnsupportedDeductionsPresent { kinds } => {
+                write!(
+                    f,
+                    "the employee has unsupported deduction kind(s) Salt does not calculate: {kinds:?}"
                 )
             }
         }
@@ -305,6 +337,21 @@ pub fn calculate(
             expected: expected_tax_year,
             supplied: input.year_to_date.tax_year(),
         });
+    }
+
+    // Checked before any arithmetic runs, so a refused input never yields
+    // partial figures (§5.5): an unsupported deduction is not a number
+    // Salt can approximate its way past.
+    match &input.unsupported_deductions {
+        UnsupportedDeductionStatus::ConfirmedNone => {}
+        UnsupportedDeductionStatus::Unknown => {
+            return Err(PayrollError::UnsupportedDeductionStatusUnknown);
+        }
+        UnsupportedDeductionStatus::Present(kinds) => {
+            return Err(PayrollError::UnsupportedDeductionsPresent {
+                kinds: kinds.as_slice().to_vec(),
+            });
+        }
     }
 
     if !input.employment.has_coherent_dates() {
@@ -496,6 +543,7 @@ mod tests {
         SocialSecurityRules,
     };
     use crate::ruleset::ruleset_for;
+    use crate::unsupported_deduction::UnsupportedDeductionKinds;
     use crate::year_to_date::PeriodsElapsed;
     use chrono::NaiveDate;
     use rust_decimal_macros::dec;
@@ -637,6 +685,7 @@ mod tests {
             Vec::new(),
             ytd,
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         )
     }
 
@@ -1055,6 +1104,57 @@ mod tests {
         assert_invariants(&calc);
     }
 
+    fn input_with_unsupported_deductions(status: UnsupportedDeductionStatus) -> PayrollInput {
+        PayrollInput::new(
+            employment_paying(dec!(25000.00)),
+            test_period(),
+            Vec::new(),
+            YearToDateContext::first_period(test_tax_year()),
+            test_schedule(),
+            status,
+        )
+    }
+
+    // §5.5: `ConfirmedNone` is the only state that lets `calculate`
+    // proceed — this is the same happy path every other `salt_policy_*`
+    // scenario already exercises via `input_for`, asserted directly here.
+    #[test]
+    fn salt_policy_unsupported_deduction_status_confirmed_none_calculates_normally() {
+        let input = input_with_unsupported_deductions(UnsupportedDeductionStatus::ConfirmedNone);
+        assert!(calculate(&input, &test_rules()).is_ok());
+    }
+
+    // §5.5: an unasked question must never pass as a confirmed "no".
+    #[test]
+    fn salt_policy_unsupported_deduction_status_unknown_refuses() {
+        let input = input_with_unsupported_deductions(UnsupportedDeductionStatus::Unknown);
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedDeductionStatusUnknown)
+        );
+    }
+
+    // §5.5: every kind present is named in the refusal, not just the first.
+    #[test]
+    fn salt_policy_unsupported_deductions_present_refuses_naming_every_kind() {
+        let kinds = UnsupportedDeductionKinds::new(vec![
+            UnsupportedDeductionKind::ApprovedPensionFund,
+            UnsupportedDeductionKind::EducationPolicy,
+        ])
+        .unwrap();
+        let input = input_with_unsupported_deductions(UnsupportedDeductionStatus::Present(kinds));
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedDeductionsPresent {
+                kinds: vec![
+                    UnsupportedDeductionKind::ApprovedPensionFund,
+                    UnsupportedDeductionKind::EducationPolicy,
+                ],
+            })
+        );
+    }
+
     #[test]
     fn refuses_contradictory_employment_dates() {
         let terms = CompensationTerms::new(date(2025, 1, 26), None, money(dec!(5000.00))).unwrap();
@@ -1065,6 +1165,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1085,6 +1186,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1109,6 +1211,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1140,6 +1243,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1171,6 +1275,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(TaxYear::for_period_end(date(2028, 2, 29))),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1197,6 +1302,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(TaxYear::for_period_end(date(2026, 4, 30))),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1224,6 +1330,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1256,6 +1363,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1284,6 +1392,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1309,6 +1418,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         assert_eq!(
             calculate(&input, &test_rules()),
@@ -1325,6 +1435,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         assert_eq!(
             calculate(&input, &test_rules()),
@@ -1347,6 +1458,7 @@ mod tests {
             vec![Earning::TaxableAllowance(money(dec!(800.00)))],
             YearToDateContext::first_period(test_tax_year()),
             calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1389,6 +1501,7 @@ mod tests {
                 Vec::new(),
                 YearToDateContext::first_period(TaxYear::for_period_end(period.end())),
                 schedule,
+                UnsupportedDeductionStatus::ConfirmedNone,
             );
             let calc = calculate(&input, &test_rules()).unwrap();
             assert_eq!(
@@ -1414,6 +1527,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1434,6 +1548,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1458,6 +1573,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             schedule,
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert!(calculate(&input, &test_rules()).is_ok());
@@ -1480,6 +1596,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(TaxYear::for_period_end(date(2026, 3, 28))),
             schedule,
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1504,6 +1621,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(TaxYear::for_period_end(date(2028, 3, 28))),
             schedule,
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1532,6 +1650,7 @@ mod tests {
             Vec::new(),
             YearToDateContext::first_period(test_tax_year()),
             schedule,
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1556,6 +1675,7 @@ mod tests {
             vec![Earning::TaxableAllowance(money(dec!(2000.00)))],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1604,6 +1724,7 @@ mod tests {
             vec![Earning::TaxableAllowance(money(dec!(5000.00)))],
             ytd_context,
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
         let baseline = calculate(&input_for(dec!(15000.00), ytd_context), &test_rules()).unwrap();
@@ -1671,6 +1792,7 @@ mod tests {
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&input, &test_rules()).unwrap();
 
@@ -1698,6 +1820,7 @@ mod tests {
             vec![Earning::TaxableAllowance(Money::ZERO)],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
         let calc = calculate(&with_zero, &test_rules()).unwrap();
         let baseline = calculate(
@@ -1726,6 +1849,7 @@ mod tests {
             )],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(
@@ -1742,6 +1866,7 @@ mod tests {
             vec![Earning::BasicPay(money(dec!(5000.00)))],
             YearToDateContext::first_period(test_tax_year()),
             test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
         );
 
         assert_eq!(

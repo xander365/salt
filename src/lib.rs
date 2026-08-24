@@ -21,6 +21,7 @@ mod pay_schedule;
 mod rules;
 mod ruleset;
 mod tax_year;
+mod unsupported_deduction;
 mod year_to_date;
 
 pub use calculation::{
@@ -46,4 +47,8 @@ pub use rules::{
 };
 pub use ruleset::ruleset_for;
 pub use tax_year::TaxYear;
+pub use unsupported_deduction::{
+    EmptyUnsupportedDeductionKinds, UnsupportedDeductionKind, UnsupportedDeductionKinds,
+    UnsupportedDeductionStatus,
+};
 pub use year_to_date::{InvalidPeriodsElapsed, PeriodsElapsed, YearToDateContext};
