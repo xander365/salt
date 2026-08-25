@@ -122,7 +122,7 @@ fn ssc_2028_march() -> SscRuleset {
 /// (`docs/conformance/ssc-2029-03.md`).
 fn ssc_2029_march() -> SscRuleset {
     SscRuleset::new(
-        SscRulesId::new("ssc-2029-03"),
+        SscRulesId::new("ssc-2029-03-typo"),
         Decimal::new(9, 3),
         Decimal::new(9, 3),
         money(50_000),
