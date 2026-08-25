@@ -16,7 +16,7 @@ use crate::employment::EmploymentSnapshot;
 use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
 use crate::pay_schedule::PaySchedule;
-use crate::rules::{BandContribution, PayrollRules, RulesetId, SscClamp};
+use crate::rules::{BandContribution, PayeTableId, PayrollRules, SscClamp, SscRulesId};
 use crate::tax_year::TaxYear;
 use crate::unsupported_deduction::{UnsupportedDeductionKinds, UnsupportedDeductionStatus};
 use crate::year_to_date::{
@@ -121,19 +121,37 @@ pub enum PayrollError {
     DeductionsExceedGrossRemuneration,
     /// A monetary amount overflowed `i64` cents during calculation.
     AmountOverflow,
-    /// `ruleset_for` found no `PayrollRules` whose `EffectivePeriod`
-    /// covers the given `PayPeriod` end date.
-    NoRulesetCoversDate { date: NaiveDate },
-    /// `ruleset_for` found two `PayrollRules` whose `EffectivePeriod`s
-    /// overlap. Detected explicitly rather than resolved by declaration
-    /// order or by taking the first match, because a silent resolution
-    /// would hide a data bug in the shipped rulesets.
-    OverlappingRulesets { first: RulesetId, second: RulesetId },
-    /// The supplied `PayrollRules`' `EffectivePeriod` does not cover
-    /// `PayrollInput.period`'s end date (ADR-0005). A caller that bypasses
-    /// `ruleset_for` cannot use rules that were not in force for the
-    /// period being calculated.
-    RulesetDoesNotCoverPeriod,
+    /// `paye_table_for` found no `PayeTable` whose payroll applicability
+    /// interval covers the given `PayPeriod` end date (ADR-0007).
+    NoPayeTableCoversDate { date: NaiveDate },
+    /// `paye_table_for` found two `PayeTable`s whose payroll applicability
+    /// intervals overlap. Detected explicitly rather than resolved by
+    /// declaration order or by taking the first match, because a silent
+    /// resolution would hide a data bug in the shipped catalogue.
+    OverlappingPayeTables {
+        first: PayeTableId,
+        second: PayeTableId,
+    },
+    /// `ssc_rules_for` found no `SscRuleset` whose payroll applicability
+    /// interval covers the given `PayPeriod` end date (ADR-0007).
+    NoSscRulesetCoversDate { date: NaiveDate },
+    /// `ssc_rules_for` found two `SscRuleset`s whose payroll applicability
+    /// intervals overlap. Detected explicitly rather than resolved by
+    /// declaration order or by taking the first match, because a silent
+    /// resolution would hide a data bug in the shipped catalogue.
+    OverlappingSscRulesets {
+        first: SscRulesId,
+        second: SscRulesId,
+    },
+    /// The supplied `PayrollRules`' `PayeTable` payroll applicability
+    /// interval does not cover `PayrollInput.period`'s end date
+    /// (ADR-0005, ADR-0007). A caller that bypasses `ruleset_for` cannot
+    /// use a table that was not in force for the period being calculated.
+    PayeTableDoesNotCoverPeriod,
+    /// The supplied `PayrollRules`' `SscRuleset` payroll applicability
+    /// interval does not cover `PayrollInput.period`'s end date
+    /// (ADR-0005, ADR-0007).
+    SscRulesetDoesNotCoverPeriod,
     /// `PayrollInput.year_to_date.tax_year()` is not the `TaxYear`
     /// `TaxYear::for_period_end` resolves for the period's end date
     /// (ADR-0005). A period straddling the tax year end must use the
@@ -213,19 +231,34 @@ impl std::fmt::Display for PayrollError {
                 write!(f, "deductions exceed gross remuneration")
             }
             PayrollError::AmountOverflow => write!(f, "a monetary amount overflowed"),
-            PayrollError::NoRulesetCoversDate { date } => {
-                write!(f, "no ruleset's effective period covers {date}")
+            PayrollError::NoPayeTableCoversDate { date } => {
+                write!(f, "no PAYE table's payroll applicability covers {date}")
             }
-            PayrollError::OverlappingRulesets { first, second } => {
+            PayrollError::OverlappingPayeTables { first, second } => {
                 write!(
                     f,
-                    "rulesets {first} and {second} have overlapping effective periods"
+                    "PAYE tables {first} and {second} have overlapping payroll applicability"
                 )
             }
-            PayrollError::RulesetDoesNotCoverPeriod => {
+            PayrollError::NoSscRulesetCoversDate { date } => {
+                write!(f, "no SSC ruleset's payroll applicability covers {date}")
+            }
+            PayrollError::OverlappingSscRulesets { first, second } => {
                 write!(
                     f,
-                    "the supplied rules' effective period does not cover the pay period's end date"
+                    "SSC rulesets {first} and {second} have overlapping payroll applicability"
+                )
+            }
+            PayrollError::PayeTableDoesNotCoverPeriod => {
+                write!(
+                    f,
+                    "the supplied PAYE table's payroll applicability does not cover the pay period's end date"
+                )
+            }
+            PayrollError::SscRulesetDoesNotCoverPeriod => {
+                write!(
+                    f,
+                    "the supplied SSC ruleset's payroll applicability does not cover the pay period's end date"
                 )
             }
             PayrollError::WrongTaxYearForPeriod { expected, supplied } => {
@@ -333,6 +366,13 @@ pub struct PayrollCalculation {
     pub earning_lines: Vec<Earning>,
     pub gross_remuneration: Money,
     pub taxable_remuneration: Money,
+    /// The `PayeTable` and `SscRuleset` that produced this calculation,
+    /// each identified independently (ADR-0007) — a durable historical
+    /// reference only alongside the resolved values `FinalizedPayroll`
+    /// stores (ADR-0004), since either catalogue entry can change in a
+    /// later release.
+    pub paye_table_id: PayeTableId,
+    pub ssc_rules_id: SscRulesId,
     pub paye: PayeResult,
     pub employee_social_security: SscResult,
     /// The Employer's own cost. Never appears in `deductions` and never
@@ -349,14 +389,27 @@ pub fn calculate(
     input: &PayrollInput,
     rules: &PayrollRules,
 ) -> Result<PayrollCalculation, PayrollError> {
-    // The period end date selects both the ruleset and the TaxYear
-    // (ADR-0005); `ruleset_for` and `TaxYear::for_period_end` are the
-    // seams that resolve them, but nothing stops a caller from supplying
-    // rules or a YearToDateContext that disagrees with the period being
-    // calculated. Checked before anything else so a mismatch can never be
-    // masked by a later refusal.
-    if !rules.effective_period().covers(input.period.end()) {
-        return Err(PayrollError::RulesetDoesNotCoverPeriod);
+    // The period end date selects the PAYE table, the SSC ruleset, and
+    // the TaxYear (ADR-0005, ADR-0007); `ruleset_for` and
+    // `TaxYear::for_period_end` are the seams that resolve them, but
+    // nothing stops a caller from supplying rules or a YearToDateContext
+    // that disagrees with the period being calculated. Checked before
+    // anything else so a mismatch can never be masked by a later refusal,
+    // and checked as two independent halves so a caller learns which one
+    // is wrong.
+    if !rules
+        .paye_table()
+        .payroll_applicability()
+        .covers(input.period.end())
+    {
+        return Err(PayrollError::PayeTableDoesNotCoverPeriod);
+    }
+    if !rules
+        .ssc_ruleset()
+        .payroll_applicability()
+        .covers(input.period.end())
+    {
+        return Err(PayrollError::SscRulesetDoesNotCoverPeriod);
     }
     let expected_tax_year = TaxYear::for_period_end(input.period.end());
     if input.year_to_date.tax_year() != expected_tax_year {
@@ -522,6 +575,8 @@ pub fn calculate(
         earning_lines,
         gross_remuneration,
         taxable_remuneration,
+        paye_table_id: rules.paye_table().id().clone(),
+        ssc_rules_id: rules.ssc_ruleset().id().clone(),
         paye: PayeResult {
             amount: paye_amount,
             trace: PayeTrace {
@@ -579,8 +634,7 @@ mod tests {
     };
     use crate::pay_schedule::{DayOfMonth, Month, PeriodEndDay};
     use crate::rules::{
-        EffectivePeriod, PayeBand, PayeTable, PayeTableId, RoundingRule, RulesetId,
-        SocialSecurityRules,
+        EffectivePeriod, PayeBand, PayeTable, PayeTableId, RoundingRule, SscRulesId, SscRuleset,
     };
     use crate::ruleset::ruleset_for;
     use crate::unsupported_deduction::{UnsupportedDeductionKind, UnsupportedDeductionKinds};
@@ -596,25 +650,25 @@ mod tests {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
     }
 
-    fn test_ruleset_id() -> RulesetId {
-        RulesetId::new("test-ruleset")
+    fn test_applicability() -> EffectivePeriod {
+        EffectivePeriod::new(date(2000, 1, 1), None).unwrap()
     }
 
-    fn test_effective_period() -> EffectivePeriod {
-        EffectivePeriod::new(date(2000, 1, 1), None).unwrap()
+    fn test_paye_table_id() -> PayeTableId {
+        PayeTableId::new("test-paye-table")
+    }
+
+    fn test_ssc_rules_id() -> SscRulesId {
+        SscRulesId::new("test-ssc-rules")
     }
 
     /// Thresholds are multiples of 12 so that scaling by
     /// periods_elapsed_inclusive/12 stays exact decimal arithmetic:
     /// 0-120,000: 0%, 120,000-240,000: 20%, 240,000-480,000: 30%,
     /// 480,000+: 40%. SSC 0.9% each way, floor N$500, ceiling N$11,000 —
-    /// synthetic test figures, not the statutory table `ruleset_for`
+    /// synthetic test figures, not the statutory tables `ruleset_for`
     /// resolves; most PC-0XX scenarios are indifferent to the actual
     /// rates, so they stay pinned to these round numbers instead.
-    fn test_paye_table_id() -> PayeTableId {
-        PayeTableId::new("test-paye-table")
-    }
-
     fn test_paye_table() -> PayeTable {
         let bands = vec![
             PayeBand::new(money(dec!(0)), dec!(0.00)).unwrap(),
@@ -626,7 +680,7 @@ mod tests {
             test_paye_table_id(),
             bands,
             date(2000, 1, 1),
-            date(2000, 1, 1),
+            test_applicability(),
         )
         .unwrap()
     }
@@ -639,24 +693,28 @@ mod tests {
             test_paye_table_id(),
             bands,
             date(2000, 1, 1),
+            test_applicability(),
+        )
+        .unwrap()
+    }
+
+    fn test_ssc_ruleset() -> SscRuleset {
+        SscRuleset::new(
+            test_ssc_rules_id(),
+            dec!(0.009),
+            dec!(0.009),
+            money(dec!(500)),
+            money(dec!(11000)),
             date(2000, 1, 1),
+            test_applicability(),
         )
         .unwrap()
     }
 
     fn test_rules() -> PayrollRules {
-        let social_security = SocialSecurityRules::new(
-            dec!(0.009),
-            dec!(0.009),
-            money(dec!(500)),
-            money(dec!(11000)),
-        )
-        .unwrap();
         PayrollRules::new(
-            test_ruleset_id(),
-            test_effective_period(),
             test_paye_table(),
-            social_security,
+            test_ssc_ruleset(),
             RoundingRule::HalfUpToCents,
         )
         .unwrap()
@@ -974,7 +1032,7 @@ mod tests {
                 period.end(),
             )),
         );
-        let calc = calculate(&input, rules).unwrap();
+        let calc = calculate(&input, &rules).unwrap();
 
         assert_eq!(
             calc.employee_social_security.trace.base,
@@ -996,7 +1054,7 @@ mod tests {
     fn salt_policy_pc_013_the_period_before_the_change_still_clamps_at_the_old_ceiling() {
         let period = PayPeriod::new(date(2026, 7, 26), date(2026, 8, 25)).unwrap();
         let rules = ruleset_for(period.end()).unwrap();
-        assert_eq!(rules.ruleset_id().as_str(), "namibia-2025-03");
+        assert_eq!(rules.ssc_ruleset().id().as_str(), "ssc-2025-03");
 
         let input = input_for_period(
             dec!(12000.00),
@@ -1005,7 +1063,7 @@ mod tests {
                 period.end(),
             )),
         );
-        let calc = calculate(&input, rules).unwrap();
+        let calc = calculate(&input, &rules).unwrap();
 
         assert_eq!(
             calc.employee_social_security.trace.base,
@@ -1043,7 +1101,7 @@ mod tests {
                 period.end(),
             )),
         );
-        let calc = calculate(&input, rules).unwrap();
+        let calc = calculate(&input, &rules).unwrap();
 
         assert_eq!(calc.paye.amount, Money::ZERO);
         assert_eq!(calc.employee_social_security.amount, money(dec!(72.00)));
@@ -1054,15 +1112,22 @@ mod tests {
     // Rules are passed beside `PayrollInput`, never inside it, precisely so
     // this is possible: the same input, calculated under two rulesets that
     // differ only in their SSC ceiling, gives a different result. Both
-    // share `test_effective_period()` so this stays a test of that one
-    // difference, not of `calculate`'s own effective-period check.
+    // share `test_applicability()` so this stays a test of that one
+    // difference, not of `calculate`'s own applicability check.
     fn rules_with_ceiling(ceiling: Decimal) -> PayrollRules {
+        let ssc_ruleset = SscRuleset::new(
+            test_ssc_rules_id(),
+            dec!(0.009),
+            dec!(0.009),
+            money(dec!(500)),
+            money(ceiling),
+            date(2000, 1, 1),
+            test_applicability(),
+        )
+        .unwrap();
         PayrollRules::new(
-            test_ruleset_id(),
-            test_effective_period(),
             zero_rate_paye_table(),
-            SocialSecurityRules::new(dec!(0.009), dec!(0.009), money(dec!(500)), money(ceiling))
-                .unwrap(),
+            ssc_ruleset,
             RoundingRule::HalfUpToCents,
         )
         .unwrap()
@@ -1091,19 +1156,20 @@ mod tests {
         );
     }
 
+    // The two halves are checked independently, so a caller learns which
+    // one is stale (ADR-0007) — PAYE is checked first.
     #[test]
-    fn refuses_rules_whose_effective_period_does_not_cover_the_period_end() {
-        let out_of_period_rules = PayrollRules::new(
-            test_ruleset_id(),
+    fn refuses_when_the_paye_table_does_not_cover_the_period_end() {
+        let out_of_period_paye_table = PayeTable::new(
+            test_paye_table_id(),
+            vec![PayeBand::new(Money::ZERO, dec!(0.00)).unwrap()],
+            date(2030, 1, 1),
             EffectivePeriod::new(date(2030, 1, 1), None).unwrap(),
-            zero_rate_paye_table(),
-            SocialSecurityRules::new(
-                dec!(0.009),
-                dec!(0.009),
-                money(dec!(500)),
-                money(dec!(11000)),
-            )
-            .unwrap(),
+        )
+        .unwrap();
+        let out_of_period_rules = PayrollRules::new(
+            out_of_period_paye_table,
+            test_ssc_ruleset(),
             RoundingRule::HalfUpToCents,
         )
         .unwrap();
@@ -1114,7 +1180,36 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &out_of_period_rules),
-            Err(PayrollError::RulesetDoesNotCoverPeriod)
+            Err(PayrollError::PayeTableDoesNotCoverPeriod)
+        );
+    }
+
+    #[test]
+    fn refuses_when_the_ssc_ruleset_does_not_cover_the_period_end() {
+        let out_of_period_ssc_ruleset = SscRuleset::new(
+            test_ssc_rules_id(),
+            dec!(0.009),
+            dec!(0.009),
+            money(dec!(500)),
+            money(dec!(11000)),
+            date(2030, 1, 1),
+            EffectivePeriod::new(date(2030, 1, 1), None).unwrap(),
+        )
+        .unwrap();
+        let out_of_period_rules = PayrollRules::new(
+            test_paye_table(),
+            out_of_period_ssc_ruleset,
+            RoundingRule::HalfUpToCents,
+        )
+        .unwrap();
+        let input = input_for(
+            dec!(5000.00),
+            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
+        );
+
+        assert_eq!(
+            calculate(&input, &out_of_period_rules),
+            Err(PayrollError::SscRulesetDoesNotCoverPeriod)
         );
     }
 
@@ -1130,7 +1225,7 @@ mod tests {
         let input = input_for_period(dec!(8000.00), period, wrong_ytd);
 
         assert_eq!(
-            calculate(&input, rules),
+            calculate(&input, &rules),
             Err(PayrollError::WrongTaxYearForPeriod {
                 expected: TaxYear::starting(2026),
                 supplied: TaxYear::starting(2025),
@@ -2154,14 +2249,19 @@ mod tests {
     fn refuses_when_deductions_would_exceed_gross_remuneration() {
         // A deliberately pathological 200% employee rate to exercise the
         // refusal path; real rates are validated elsewhere to stay sane.
-        let social_security =
-            SocialSecurityRules::new(dec!(2.00), dec!(0.009), money(dec!(0)), money(dec!(11000)))
-                .unwrap();
+        let ssc_ruleset = SscRuleset::new(
+            test_ssc_rules_id(),
+            dec!(2.00),
+            dec!(0.009),
+            money(dec!(0)),
+            money(dec!(11000)),
+            date(2000, 1, 1),
+            test_applicability(),
+        )
+        .unwrap();
         let rules = PayrollRules::new(
-            test_ruleset_id(),
-            test_effective_period(),
             zero_rate_paye_table(),
-            social_security,
+            ssc_ruleset,
             RoundingRule::HalfUpToCents,
         )
         .unwrap();

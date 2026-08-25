@@ -43,9 +43,10 @@ pub use pay_schedule::{
 pub use rules::{
     BandContribution, EffectivePeriod, PayeBand, PayeTable, PayeTableId, PayrollRules,
     PayrollRulesError, RawEffectivePeriod, RawPayeBand, RawPayeTable, RawPayrollRules,
-    RawSocialSecurityRules, RoundingRule, RulesetId, SocialSecurityRules, SscClamp,
+    RawSocialSecurityRules, RawSscRuleset, RoundingRule, SocialSecurityRules, SscClamp, SscRulesId,
+    SscRuleset,
 };
-pub use ruleset::ruleset_for;
+pub use ruleset::{paye_table_for, ruleset_for, ssc_rules_for};
 pub use tax_year::TaxYear;
 pub use unsupported_deduction::{
     EmptyUnsupportedDeductionKinds, UnsupportedDeductionKind, UnsupportedDeductionKinds,

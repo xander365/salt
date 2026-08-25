@@ -1,5 +1,6 @@
-//! `PayrollRules`: the statutory and agreed calculation rules in force for
-//! an effective period, as typed Rust (ADR-0003).
+//! `PayrollRules`: the statutory and agreed calculation rules Salt ships,
+//! composed from an independently-resolved `PayeTable` and `SscRuleset`
+//! (ADR-0007), as typed Rust (ADR-0003).
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -93,9 +94,8 @@ impl From<PayeBand> for RawPayeBand {
     }
 }
 
-/// Identifies a `PayeTable`, independent of the `RulesetId` its containing
-/// `PayrollRules` carries: PAYE and social security move on separate
-/// effective-date axes (ADR-0007).
+/// Identifies a `PayeTable`, independent of any `SscRulesId`: PAYE and
+/// social security move on separate effective-date axes (ADR-0007).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PayeTableId(String);
 
@@ -117,19 +117,16 @@ impl std::fmt::Display for PayeTableId {
 
 /// A progressive annual PAYE band table, with its own identity and its own
 /// pair of effective dates (ADR-0007): `legal_effective_from` is what the
-/// instrument says, `payroll_effective_from` is what payroll actually
-/// applies.
-///
-/// Structural only so far: `ruleset_for` does not yet resolve a
-/// `PayeTable` on its own axis, and the values shipped through it are not
-/// yet the real NamRA table (GitHub issue #7).
+/// instrument says, `payroll_effective_from` — the start of
+/// `payroll_applicability` — is what payroll actually applies.
+/// `paye_table_for` resolves a `PayeTable` on this axis alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawPayeTable", into = "RawPayeTable")]
 pub struct PayeTable {
     id: PayeTableId,
     bands: Vec<PayeBand>,
     legal_effective_from: NaiveDate,
-    payroll_effective_from: NaiveDate,
+    payroll_applicability: EffectivePeriod,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +134,7 @@ pub struct RawPayeTable {
     pub id: PayeTableId,
     pub bands: Vec<PayeBand>,
     pub legal_effective_from: NaiveDate,
-    pub payroll_effective_from: NaiveDate,
+    pub payroll_applicability: EffectivePeriod,
 }
 
 impl PayeTable {
@@ -147,7 +144,7 @@ impl PayeTable {
         id: PayeTableId,
         bands: Vec<PayeBand>,
         legal_effective_from: NaiveDate,
-        payroll_effective_from: NaiveDate,
+        payroll_applicability: EffectivePeriod,
     ) -> Result<Self, PayrollRulesError> {
         let Some(first) = bands.first() else {
             return Err(PayrollRulesError::EmptyBandTable);
@@ -162,7 +159,7 @@ impl PayeTable {
             id,
             bands,
             legal_effective_from,
-            payroll_effective_from,
+            payroll_applicability,
         })
     }
 
@@ -179,7 +176,17 @@ impl PayeTable {
     }
 
     pub fn payroll_effective_from(&self) -> NaiveDate {
-        self.payroll_effective_from
+        self.payroll_applicability.from()
+    }
+
+    /// The complete interval this table applies to payroll for, per
+    /// ADR-0007 — its `from` is `payroll_effective_from`, and it ends
+    /// where the next `PayeTable` in the catalogue takes over, or is
+    /// open-ended while this is the newest. `paye_table_for` selects on
+    /// this alone; `legal_effective_from` is never consulted for
+    /// selection.
+    pub fn payroll_applicability(&self) -> EffectivePeriod {
+        self.payroll_applicability
     }
 
     /// The exact, unrounded annual tax owed on `taxable` — statutory band
@@ -212,7 +219,7 @@ impl TryFrom<RawPayeTable> for PayeTable {
             raw.id,
             raw.bands,
             raw.legal_effective_from,
-            raw.payroll_effective_from,
+            raw.payroll_applicability,
         )
     }
 }
@@ -223,7 +230,7 @@ impl From<PayeTable> for RawPayeTable {
             id: table.id,
             bands: table.bands,
             legal_effective_from: table.legal_effective_from,
-            payroll_effective_from: table.payroll_effective_from,
+            payroll_applicability: table.payroll_applicability,
         }
     }
 }
@@ -322,6 +329,122 @@ impl From<SocialSecurityRules> for RawSocialSecurityRules {
     }
 }
 
+/// Identifies an `SscRuleset`, independent of any `PayeTableId`: PAYE and
+/// social security move on separate effective-date axes (ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SscRulesId(String);
+
+impl SscRulesId {
+    pub fn new(id: impl Into<String>) -> Self {
+        SscRulesId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SscRulesId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The social security contribution rules in force for a payroll
+/// applicability interval, with their own identity and their own pair of
+/// effective dates (ADR-0007): `legal_effective_from` is what the
+/// instrument says, `payroll_effective_from` — the start of
+/// `payroll_applicability` — is what payroll actually applies.
+/// `ssc_rules_for` resolves an `SscRuleset` on this axis alone, entirely
+/// independent of `PayeTable` resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawSscRuleset", into = "RawSscRuleset")]
+pub struct SscRuleset {
+    id: SscRulesId,
+    social_security: SocialSecurityRules,
+    legal_effective_from: NaiveDate,
+    payroll_applicability: EffectivePeriod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawSscRuleset {
+    pub id: SscRulesId,
+    pub social_security: SocialSecurityRules,
+    pub legal_effective_from: NaiveDate,
+    pub payroll_applicability: EffectivePeriod,
+}
+
+impl SscRuleset {
+    pub fn new(
+        id: SscRulesId,
+        employee_rate: Decimal,
+        employer_rate: Decimal,
+        floor: Money,
+        ceiling: Money,
+        legal_effective_from: NaiveDate,
+        payroll_applicability: EffectivePeriod,
+    ) -> Result<Self, PayrollRulesError> {
+        let social_security =
+            SocialSecurityRules::new(employee_rate, employer_rate, floor, ceiling)?;
+        Ok(SscRuleset {
+            id,
+            social_security,
+            legal_effective_from,
+            payroll_applicability,
+        })
+    }
+
+    pub fn id(&self) -> &SscRulesId {
+        &self.id
+    }
+
+    pub fn social_security(&self) -> SocialSecurityRules {
+        self.social_security
+    }
+
+    pub fn legal_effective_from(&self) -> NaiveDate {
+        self.legal_effective_from
+    }
+
+    pub fn payroll_effective_from(&self) -> NaiveDate {
+        self.payroll_applicability.from()
+    }
+
+    /// The complete interval this ruleset applies to payroll for, per
+    /// ADR-0007 — its `from` is `payroll_effective_from`, and it ends
+    /// where the next `SscRuleset` in the catalogue takes over, or is
+    /// open-ended while this is the newest. `ssc_rules_for` selects on
+    /// this alone; `legal_effective_from` is never consulted for
+    /// selection.
+    pub fn payroll_applicability(&self) -> EffectivePeriod {
+        self.payroll_applicability
+    }
+}
+
+impl TryFrom<RawSscRuleset> for SscRuleset {
+    type Error = PayrollRulesError;
+
+    fn try_from(raw: RawSscRuleset) -> Result<Self, PayrollRulesError> {
+        Ok(SscRuleset {
+            id: raw.id,
+            social_security: raw.social_security,
+            legal_effective_from: raw.legal_effective_from,
+            payroll_applicability: raw.payroll_applicability,
+        })
+    }
+}
+
+impl From<SscRuleset> for RawSscRuleset {
+    fn from(ruleset: SscRuleset) -> RawSscRuleset {
+        RawSscRuleset {
+            id: ruleset.id,
+            social_security: ruleset.social_security,
+            legal_effective_from: ruleset.legal_effective_from,
+            payroll_applicability: ruleset.payroll_applicability,
+        }
+    }
+}
+
 /// How an unrounded exact amount becomes a `Money` output line. A field of
 /// `PayrollRules` so a change in rounding policy is dated like any other
 /// rule; the mechanism itself lives in [`crate::money::round_half_up`].
@@ -390,41 +513,18 @@ fn band_walk(
     Ok((total, contributions))
 }
 
-/// Identifies which `PayrollRules` produced a historical result. Rules are
-/// typed Rust, not database rows (ADR-0003), so this alone is not a
-/// durable historical reference: a later bug fix would change what an old
-/// `RulesetId` means. `FinalizedPayroll` stores the resolved rule values
-/// alongside it for that reason (ADR-0004).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RulesetId(String);
-
-impl RulesetId {
-    pub fn new(id: impl Into<String>) -> Self {
-        RulesetId(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for RulesetId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// The date range a `PayrollRules` is in force for, inclusive at both
-/// ends. `ruleset_for` selects on this range keyed by `PayPeriod` end date
-/// (ADR-0005): a period straddling a change uses whichever ruleset covers
-/// its end date, in full — statutory ceilings are monthly amounts, never
-/// split pro-rata.
+/// The date range a `PayeTable` or `SscRuleset` is in force for, inclusive
+/// at both ends — each axis's `payroll_applicability` (ADR-0007).
+/// `paye_table_for` and `ssc_rules_for` each select on this range keyed by
+/// `PayPeriod` end date (ADR-0005): a period straddling a change uses
+/// whichever entry covers its end date, in full — statutory ceilings are
+/// monthly amounts, never split pro-rata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawEffectivePeriod", into = "RawEffectivePeriod")]
 pub struct EffectivePeriod {
     from: NaiveDate,
-    /// The last date this ruleset covers, or `None` while it is the
-    /// newest ruleset in force.
+    /// The last date this entry covers, or `None` while it is the newest
+    /// entry in force.
     until: Option<NaiveDate>,
 }
 
@@ -480,59 +580,55 @@ impl From<EffectivePeriod> for RawEffectivePeriod {
     }
 }
 
-/// The statutory and agreed calculation rules in force for an effective
-/// period. Passed beside `PayrollInput`, never inside it, so a test can
-/// vary rules against a fixed input (see `calculate`).
+/// The statutory and agreed calculation rules in force for a `PayPeriod`
+/// end date: a `PayeTable` and an `SscRuleset`, each resolved on its own
+/// effective-date axis and then frozen together by `ruleset_for`
+/// (ADR-0007). Passed beside `PayrollInput`, never inside it, so a test
+/// can vary rules against a fixed input (see `calculate`).
+///
+/// Carries no identity or effective period of its own: an id or a period
+/// that changed whenever only one half moved would recreate the
+/// combined-axis problem ADR-0007 removed. `calculate` checks the
+/// `PayPeriod` end date against each half's own `payroll_applicability`
+/// instead of a combined one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawPayrollRules", into = "RawPayrollRules")]
 pub struct PayrollRules {
-    ruleset_id: RulesetId,
-    effective_period: EffectivePeriod,
     paye_table: PayeTable,
-    social_security: SocialSecurityRules,
+    ssc_ruleset: SscRuleset,
     rounding_rule: RoundingRule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawPayrollRules {
-    pub ruleset_id: RulesetId,
-    pub effective_period: EffectivePeriod,
     pub paye_table: PayeTable,
-    pub social_security: SocialSecurityRules,
+    pub ssc_ruleset: SscRuleset,
     pub rounding_rule: RoundingRule,
 }
 
 impl PayrollRules {
     pub fn new(
-        ruleset_id: RulesetId,
-        effective_period: EffectivePeriod,
         paye_table: PayeTable,
-        social_security: SocialSecurityRules,
+        ssc_ruleset: SscRuleset,
         rounding_rule: RoundingRule,
     ) -> Result<Self, PayrollRulesError> {
         Ok(PayrollRules {
-            ruleset_id,
-            effective_period,
             paye_table,
-            social_security,
+            ssc_ruleset,
             rounding_rule,
         })
-    }
-
-    pub fn ruleset_id(&self) -> &RulesetId {
-        &self.ruleset_id
-    }
-
-    pub fn effective_period(&self) -> EffectivePeriod {
-        self.effective_period
     }
 
     pub fn paye_table(&self) -> &PayeTable {
         &self.paye_table
     }
 
+    pub fn ssc_ruleset(&self) -> &SscRuleset {
+        &self.ssc_ruleset
+    }
+
     pub fn social_security(&self) -> SocialSecurityRules {
-        self.social_security
+        self.ssc_ruleset.social_security()
     }
 
     pub fn rounding_rule(&self) -> RoundingRule {
@@ -572,23 +668,15 @@ impl TryFrom<RawPayrollRules> for PayrollRules {
     type Error = PayrollRulesError;
 
     fn try_from(raw: RawPayrollRules) -> Result<Self, PayrollRulesError> {
-        PayrollRules::new(
-            raw.ruleset_id,
-            raw.effective_period,
-            raw.paye_table,
-            raw.social_security,
-            raw.rounding_rule,
-        )
+        PayrollRules::new(raw.paye_table, raw.ssc_ruleset, raw.rounding_rule)
     }
 }
 
 impl From<PayrollRules> for RawPayrollRules {
     fn from(rules: PayrollRules) -> RawPayrollRules {
         RawPayrollRules {
-            ruleset_id: rules.ruleset_id,
-            effective_period: rules.effective_period,
             paye_table: rules.paye_table,
-            social_security: rules.social_security,
+            ssc_ruleset: rules.ssc_ruleset,
             rounding_rule: rules.rounding_rule,
         }
     }
@@ -626,16 +714,12 @@ mod tests {
         .unwrap()
     }
 
-    fn test_ruleset_id() -> RulesetId {
-        RulesetId::new("test-ruleset")
-    }
-
-    fn test_effective_period() -> EffectivePeriod {
-        EffectivePeriod::new(date(2000, 1, 1), None).unwrap()
-    }
-
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    fn test_applicability() -> EffectivePeriod {
+        EffectivePeriod::new(date(2000, 1, 1), None).unwrap()
     }
 
     fn test_paye_table_id() -> PayeTableId {
@@ -647,20 +731,30 @@ mod tests {
             test_paye_table_id(),
             bands(),
             date(2000, 1, 1),
+            test_applicability(),
+        )
+        .unwrap()
+    }
+
+    fn test_ssc_rules_id() -> SscRulesId {
+        SscRulesId::new("test-ssc-rules")
+    }
+
+    fn ssc_ruleset() -> SscRuleset {
+        SscRuleset::new(
+            test_ssc_rules_id(),
+            dec!(0.009),
+            dec!(0.009),
+            money(dec!(500)),
+            money(dec!(11000)),
             date(2000, 1, 1),
+            test_applicability(),
         )
         .unwrap()
     }
 
     fn rules() -> PayrollRules {
-        PayrollRules::new(
-            test_ruleset_id(),
-            test_effective_period(),
-            paye_table(),
-            social_security(),
-            RoundingRule::HalfUpToCents,
-        )
-        .unwrap()
+        PayrollRules::new(paye_table(), ssc_ruleset(), RoundingRule::HalfUpToCents).unwrap()
     }
 
     #[test]
@@ -796,7 +890,7 @@ mod tests {
             test_paye_table_id(),
             vec![PayeBand::new(Money::ZERO, dec!(1000000000000)).unwrap()],
             date(2000, 1, 1),
-            date(2000, 1, 1),
+            test_applicability(),
         )
         .unwrap();
         assert_eq!(
@@ -850,7 +944,7 @@ mod tests {
             test_paye_table_id(),
             bands(),
             date(2026, 3, 1),
-            date(2026, 9, 1),
+            EffectivePeriod::new(date(2026, 9, 1), None).unwrap(),
         )
         .unwrap();
         assert_eq!(table.legal_effective_from(), date(2026, 3, 1));
@@ -865,7 +959,7 @@ mod tests {
             id: test_paye_table_id(),
             bands: Vec::new(),
             legal_effective_from: date(2000, 1, 1),
-            payroll_effective_from: date(2000, 1, 1),
+            payroll_applicability: test_applicability(),
         })
         .unwrap();
         assert!(serde_json::from_str::<PayeTable>(&json).is_err());
@@ -877,7 +971,7 @@ mod tests {
             id: test_paye_table_id(),
             bands: vec![PayeBand::new(money(dec!(100)), dec!(0.2)).unwrap()],
             legal_effective_from: date(2000, 1, 1),
-            payroll_effective_from: date(2000, 1, 1),
+            payroll_applicability: test_applicability(),
         })
         .unwrap();
         assert!(serde_json::from_str::<PayeTable>(&json).is_err());
@@ -948,7 +1042,7 @@ mod tests {
                 test_paye_table_id(),
                 Vec::new(),
                 date(2000, 1, 1),
-                date(2000, 1, 1)
+                test_applicability()
             ),
             Err(PayrollRulesError::EmptyBandTable)
         );
@@ -962,7 +1056,7 @@ mod tests {
                 test_paye_table_id(),
                 bands,
                 date(2000, 1, 1),
-                date(2000, 1, 1)
+                test_applicability()
             ),
             Err(PayrollRulesError::FirstBandNotZero)
         );
@@ -980,7 +1074,7 @@ mod tests {
                 test_paye_table_id(),
                 bands,
                 date(2000, 1, 1),
-                date(2000, 1, 1)
+                test_applicability()
             ),
             Err(PayrollRulesError::BandsNotAscending)
         );
@@ -1010,7 +1104,7 @@ mod tests {
                 PayeBand::new(money(dec!(100)), dec!(0.2)).unwrap(),
             ],
             legal_effective_from: date(2000, 1, 1),
-            payroll_effective_from: date(2000, 1, 1),
+            payroll_applicability: test_applicability(),
         })
         .unwrap();
         assert!(serde_json::from_str::<PayeTable>(&json).is_err());
@@ -1064,5 +1158,64 @@ mod tests {
             serde_json::from_str::<EffectivePeriod>(&json).unwrap(),
             period
         );
+    }
+
+    #[test]
+    fn ssc_ruleset_keeps_both_of_its_effective_dates() {
+        // Mirrors `paye_table_keeps_both_of_its_effective_dates`: the two
+        // dates are distinct facts (ADR-0007), and an `SscRuleset` carries
+        // them exactly like a `PayeTable` does.
+        let ruleset = SscRuleset::new(
+            test_ssc_rules_id(),
+            dec!(0.009),
+            dec!(0.009),
+            money(dec!(500)),
+            money(dec!(12500)),
+            date(2026, 3, 1),
+            EffectivePeriod::new(date(2026, 9, 1), None).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ruleset.legal_effective_from(), date(2026, 3, 1));
+        assert_eq!(ruleset.payroll_effective_from(), date(2026, 9, 1));
+        assert_eq!(ruleset.id(), &test_ssc_rules_id());
+    }
+
+    #[test]
+    fn ssc_ruleset_new_delegates_negative_rate_validation() {
+        assert_eq!(
+            SscRuleset::new(
+                test_ssc_rules_id(),
+                dec!(-0.01),
+                dec!(0.009),
+                money(dec!(500)),
+                money(dec!(11000)),
+                date(2000, 1, 1),
+                test_applicability(),
+            ),
+            Err(PayrollRulesError::NegativeRate)
+        );
+    }
+
+    #[test]
+    fn ssc_ruleset_new_delegates_floor_above_ceiling_validation() {
+        assert_eq!(
+            SscRuleset::new(
+                test_ssc_rules_id(),
+                dec!(0.009),
+                dec!(0.009),
+                money(dec!(11000)),
+                money(dec!(500)),
+                date(2000, 1, 1),
+                test_applicability(),
+            ),
+            Err(PayrollRulesError::FloorAboveCeiling)
+        );
+    }
+
+    #[test]
+    fn ssc_ruleset_deserialize_round_trips() {
+        let ruleset = ssc_ruleset();
+        let json = serde_json::to_string(&ruleset).unwrap();
+        assert_eq!(serde_json::from_str::<SscRuleset>(&json).unwrap(), ruleset);
     }
 }
