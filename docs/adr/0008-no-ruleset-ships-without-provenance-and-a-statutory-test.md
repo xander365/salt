@@ -1,6 +1,6 @@
 # No ruleset ships without provenance and a statutory golden test
 
-Every PAYE table and every social security ruleset in the shipped catalogue must have a provenance document in `docs/conformance/` naming its Tier A source, and at least one statutory golden case asserting a literal expected value from that source. A verification test walks every shipped id and **fails the test suite** — `cargo test`, and CI with it — if either is missing. We rejected relying on code review to catch it.
+Every PAYE table and every social security ruleset in the shipped catalogue must have a provenance document in `docs/conformance/` naming its Tier A source, and at least one statutory golden case asserting a literal expected value from that source. A verification test walks every shipped id and **fails the test suite** — `cargo test`, and CI with it (`.github/workflows/verification-suite.yml`) — if either is missing. We rejected relying on code review to catch it.
 
 The gate reads an explicit **evidence catalogue**, not the source tree. An entry names a `rule_id`, a `provenance_document`, and the `statutory_case_ids` that prove it; the cases are themselves explicit data (`SC-PAYE-003`, `SC-SSC-003`, …) that the statutory tests iterate. We rejected scanning source files for test names beginning `statutory_`: that treats the test runner as a compliance registry, breaks under an ordinary rename, and can be satisfied by a name rather than by evidence. Test-name prefixes stay — as human semantics, for readers, not as the mechanism.
 

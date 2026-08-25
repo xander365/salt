@@ -1,0 +1,7 @@
+# Pinned so a compiler release cannot turn a green suite red, or a red suite
+# green, without a deliberate change to this file. See
+# .github/workflows/verification-suite.yml.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
