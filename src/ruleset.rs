@@ -486,11 +486,19 @@ mod tests {
         },
     ];
 
+    // Each case names the shipped table it proves, and that name is what
+    // selects the table here — not a hard-coded date. `annual_tax` is the
+    // only seam reached: no `PayrollInput`, no `YearToDateContext`, no
+    // `PeriodsElapsed`, no `RoundingRule`, and no per-period method.
     #[test]
     fn statutory_paye_cases_match_the_published_annual_table() {
         for case in statutory_paye_cases() {
-            let table = paye_table_for(date(2024, 3, 1)).unwrap();
-            assert_eq!(table.id().as_str(), case.rule_id, "{}", case.id);
+            let table = KNOWN_PAYE_TABLES
+                .iter()
+                .find(|table| table.id().as_str() == case.rule_id)
+                .unwrap_or_else(|| {
+                    panic!("{} names unshipped PAYE table {}", case.id, case.rule_id)
+                });
             assert_eq!(
                 table.annual_tax(case.annual_taxable).unwrap(),
                 case.expected_tax,

@@ -1172,6 +1172,59 @@ mod tests {
         );
     }
 
+    // ADR-0005: the `PayPeriod` end date selects the SSC ruleset, and a
+    // statutory ceiling is a monthly amount that is never split pro-rata.
+    // This period runs 26 August to 25 September 2026, straddling the
+    // ceiling change, and takes the September ceiling for its whole
+    // length — the full N$112.50 per side, never a blend of N$99.00 and
+    // N$112.50 weighted by the days each side of 1 September. Asserted
+    // through `calculate` rather than through the resolver alone, because
+    // "the period is not split" is a claim about the calculated
+    // contribution, not only about which ruleset was picked.
+    #[test]
+    fn salt_policy_a_period_straddling_the_september_2026_ceiling_change_is_not_split() {
+        let straddling = PayPeriod::new(date(2026, 8, 26), date(2026, 9, 25)).unwrap();
+        let rules = ruleset_for(straddling.end()).unwrap();
+        let input = input_for_period(
+            dec!(20000.00),
+            straddling,
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                straddling.end(),
+            )),
+        );
+        let calc = calculate(&input, &rules).unwrap();
+        assert_invariants(&calc);
+
+        assert_eq!(calc.ssc_rules_id, SscRulesId::new("ssc-2026-09"));
+        assert_eq!(
+            calc.employee_social_security.trace.ceiling,
+            money(dec!(12500.00))
+        );
+        assert_eq!(calc.employee_social_security.trace.clamp, SscClamp::Ceiling);
+        assert_eq!(calc.employee_social_security.amount, money(dec!(112.50)));
+        assert_eq!(calc.employer_social_security.amount, money(dec!(112.50)));
+
+        // The period immediately before it, wholly inside August, takes
+        // the old ceiling in full for the same reason.
+        let preceding = PayPeriod::new(date(2026, 7, 26), date(2026, 8, 25)).unwrap();
+        let preceding_input = input_for_period(
+            dec!(20000.00),
+            preceding,
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                preceding.end(),
+            )),
+        );
+        let preceding_calc =
+            calculate(&preceding_input, &ruleset_for(preceding.end()).unwrap()).unwrap();
+        assert_invariants(&preceding_calc);
+
+        assert_eq!(preceding_calc.ssc_rules_id, SscRulesId::new("ssc-2025-03"));
+        assert_eq!(
+            preceding_calc.employee_social_security.amount,
+            money(dec!(99.00))
+        );
+    }
+
     // The two halves are checked independently, so a caller learns which
     // one is stale (ADR-0007) — PAYE is checked first.
     #[test]
