@@ -151,7 +151,11 @@ static KNOWN_SSC_RULESETS: LazyLock<[SscRuleset; 5]> = LazyLock::new(|| {
 /// `resolve` runs identically over either catalogue, rather than each axis
 /// inventing its own overlap/gap logic (ADR-0007).
 trait Resolvable {
-    type Id: Clone;
+    /// `Eq` so a catalogue can be proved free of duplicate ids: two
+    /// entries sharing one id would leave a stored `PayrollCalculation`
+    /// naming an instrument that does not identify a single rule
+    /// (ADR-0007).
+    type Id: Clone + Eq + std::fmt::Debug;
 
     fn resolved_id(&self) -> Self::Id;
     fn resolved_applicability(&self) -> EffectivePeriod;
@@ -254,10 +258,11 @@ pub fn ssc_rules_for(period_end: NaiveDate) -> Result<&'static SscRuleset, Payro
 pub fn ruleset_for(period_end: NaiveDate) -> Result<PayrollRules, PayrollError> {
     let paye_table = paye_table_for(period_end)?.clone();
     let ssc_ruleset = ssc_rules_for(period_end)?.clone();
-    Ok(
-        PayrollRules::new(paye_table, ssc_ruleset, RoundingRule::HalfUpToCents)
-            .expect("composing already-validated catalogue entries cannot fail"),
-    )
+    Ok(PayrollRules::new(
+        paye_table,
+        ssc_ruleset,
+        RoundingRule::HalfUpToCents,
+    ))
 }
 
 #[cfg(test)]
@@ -803,32 +808,39 @@ mod tests {
     // be given a fixture for, so its coherence is asserted directly here.
     #[test]
     fn the_shipped_paye_catalogue_is_ordered_contiguous_and_free_of_overlaps() {
-        assert_shipped_catalogue_coherent(&*KNOWN_PAYE_TABLES, |t| t.id().to_string());
+        assert_shipped_catalogue_coherent(&*KNOWN_PAYE_TABLES);
     }
 
     // Same coherence property, asserted for the independent SSC axis.
     #[test]
     fn the_shipped_ssc_catalogue_is_ordered_contiguous_and_free_of_overlaps() {
-        assert_shipped_catalogue_coherent(&*KNOWN_SSC_RULESETS, |r| r.id().to_string());
+        assert_shipped_catalogue_coherent(&*KNOWN_SSC_RULESETS);
     }
 
     /// Without this, adding a `PayeTable` or `SscRuleset` that overlaps or
     /// leaves a gap would compile and ship, and fail for the first
     /// employer to run a payslip rather than for the release that
     /// introduced it. Generic so both catalogues run the identical check.
-    fn assert_shipped_catalogue_coherent<T: Resolvable>(
-        catalogue: &[T],
-        label: impl Fn(&T) -> String,
-    ) {
+    fn assert_shipped_catalogue_coherent<T: Resolvable>(catalogue: &[T]) {
         for (index, earlier) in catalogue.iter().enumerate() {
             for later in &catalogue[index + 1..] {
                 assert!(
                     !earlier
                         .resolved_applicability()
                         .overlaps(later.resolved_applicability()),
-                    "{} overlaps {}",
-                    label(earlier),
-                    label(later)
+                    "{:?} overlaps {:?}",
+                    earlier.resolved_id(),
+                    later.resolved_id()
+                );
+                // Two entries sharing an id are individually resolvable
+                // but jointly unidentifiable: `PayrollCalculation` would
+                // record an id that names two different rules, and the
+                // ADR-0008 evidence gate would prove one of them while
+                // appearing to prove both.
+                assert_ne!(
+                    earlier.resolved_id(),
+                    later.resolved_id(),
+                    "two shipped entries share an id"
                 );
             }
         }

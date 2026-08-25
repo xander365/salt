@@ -147,11 +147,20 @@ pub enum PayrollError {
     /// interval does not cover `PayrollInput.period`'s end date
     /// (ADR-0005, ADR-0007). A caller that bypasses `ruleset_for` cannot
     /// use a table that was not in force for the period being calculated.
-    PayeTableDoesNotCoverPeriod,
+    /// Names the offending table and the date it fails to cover, so the
+    /// refusal is explainable without re-deriving either.
+    PayeTableDoesNotCoverPeriod {
+        table: PayeTableId,
+        period_end: NaiveDate,
+    },
     /// The supplied `PayrollRules`' `SscRuleset` payroll applicability
     /// interval does not cover `PayrollInput.period`'s end date
-    /// (ADR-0005, ADR-0007).
-    SscRulesetDoesNotCoverPeriod,
+    /// (ADR-0005, ADR-0007). The SSC half of the check above, kept
+    /// separate so a caller learns which of the two axes is wrong.
+    SscRulesetDoesNotCoverPeriod {
+        ruleset: SscRulesId,
+        period_end: NaiveDate,
+    },
     /// `PayrollInput.year_to_date.tax_year()` is not the `TaxYear`
     /// `TaxYear::for_period_end` resolves for the period's end date
     /// (ADR-0005). A period straddling the tax year end must use the
@@ -249,16 +258,19 @@ impl std::fmt::Display for PayrollError {
                     "SSC rulesets {first} and {second} have overlapping payroll applicability"
                 )
             }
-            PayrollError::PayeTableDoesNotCoverPeriod => {
+            PayrollError::PayeTableDoesNotCoverPeriod { table, period_end } => {
                 write!(
                     f,
-                    "the supplied PAYE table's payroll applicability does not cover the pay period's end date"
+                    "PAYE table {table}'s payroll applicability does not cover the pay period's end date {period_end}"
                 )
             }
-            PayrollError::SscRulesetDoesNotCoverPeriod => {
+            PayrollError::SscRulesetDoesNotCoverPeriod {
+                ruleset,
+                period_end,
+            } => {
                 write!(
                     f,
-                    "the supplied SSC ruleset's payroll applicability does not cover the pay period's end date"
+                    "SSC ruleset {ruleset}'s payroll applicability does not cover the pay period's end date {period_end}"
                 )
             }
             PayrollError::WrongTaxYearForPeriod { expected, supplied } => {
@@ -402,14 +414,20 @@ pub fn calculate(
         .payroll_applicability()
         .covers(input.period.end())
     {
-        return Err(PayrollError::PayeTableDoesNotCoverPeriod);
+        return Err(PayrollError::PayeTableDoesNotCoverPeriod {
+            table: rules.paye_table().id().clone(),
+            period_end: input.period.end(),
+        });
     }
     if !rules
         .ssc_ruleset()
         .payroll_applicability()
         .covers(input.period.end())
     {
-        return Err(PayrollError::SscRulesetDoesNotCoverPeriod);
+        return Err(PayrollError::SscRulesetDoesNotCoverPeriod {
+            ruleset: rules.ssc_ruleset().id().clone(),
+            period_end: input.period.end(),
+        });
     }
     let expected_tax_year = TaxYear::for_period_end(input.period.end());
     if input.year_to_date.tax_year() != expected_tax_year {
@@ -717,7 +735,6 @@ mod tests {
             test_ssc_ruleset(),
             RoundingRule::HalfUpToCents,
         )
-        .unwrap()
     }
 
     fn test_period() -> PayPeriod {
@@ -1130,7 +1147,6 @@ mod tests {
             ssc_ruleset,
             RoundingRule::HalfUpToCents,
         )
-        .unwrap()
     }
 
     #[test]
@@ -1171,8 +1187,7 @@ mod tests {
             out_of_period_paye_table,
             test_ssc_ruleset(),
             RoundingRule::HalfUpToCents,
-        )
-        .unwrap();
+        );
         let input = input_for(
             dec!(5000.00),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
@@ -1180,7 +1195,10 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &out_of_period_rules),
-            Err(PayrollError::PayeTableDoesNotCoverPeriod)
+            Err(PayrollError::PayeTableDoesNotCoverPeriod {
+                table: test_paye_table_id(),
+                period_end: test_period().end(),
+            })
         );
     }
 
@@ -1200,8 +1218,7 @@ mod tests {
             test_paye_table(),
             out_of_period_ssc_ruleset,
             RoundingRule::HalfUpToCents,
-        )
-        .unwrap();
+        );
         let input = input_for(
             dec!(5000.00),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
@@ -1209,7 +1226,10 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &out_of_period_rules),
-            Err(PayrollError::SscRulesetDoesNotCoverPeriod)
+            Err(PayrollError::SscRulesetDoesNotCoverPeriod {
+                ruleset: test_ssc_rules_id(),
+                period_end: test_period().end(),
+            })
         );
     }
 
@@ -2263,8 +2283,7 @@ mod tests {
             zero_rate_paye_table(),
             ssc_ruleset,
             RoundingRule::HalfUpToCents,
-        )
-        .unwrap();
+        );
         let input = input_for(
             dec!(5000.00),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),

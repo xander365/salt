@@ -9,6 +9,7 @@ Each table also carries two dates rather than one. `legal_effective_from` is wha
 ## Consequences
 
 - A ruleset is no longer named by one string. Anything that displayed a `RulesetId` shows two.
+- The two dates record a *deferral* and only a deferral. `payroll_effective_from` may fall after `legal_effective_from`, never before — payroll applying a rule earlier than the instrument grants it legal effect would withhold under a rule that did not yet exist. `PayeTable::new` and `SscRuleset::new` refuse that pair outright, so the direction of the gap is a type-level fact rather than a convention.
 - `ruleset_for` gains a resolution step per axis, and a period whose two tables disagree about being in force is not representable — resolution either finds both or fails.
 - Adding a third axis later (remuneration classification, once that seam exists) follows the same shape rather than needing a redesign.
 - ADR-0003 still holds: these are typed Rust values shipped with the release, not database rows.

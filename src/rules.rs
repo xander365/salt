@@ -24,6 +24,13 @@ pub enum PayrollRulesError {
     FloorAboveCeiling,
     /// An `EffectivePeriod`'s `until` date was before its `from` date.
     EffectivePeriodEndsBeforeItStarts,
+    /// A `PayeTable` or `SscRuleset` claimed to apply to payroll before
+    /// the date its own instrument says it takes legal effect. The two
+    /// dates exist to record a *deferral* — payroll applying a rule later
+    /// than the law does, as `ssc-2026-09` does (ADR-0007). The reverse
+    /// has no justification: it would withhold under a rule that did not
+    /// yet exist.
+    PayrollAppliesBeforeLegalEffectiveDate,
 }
 
 impl std::fmt::Display for PayrollRulesError {
@@ -44,6 +51,12 @@ impl std::fmt::Display for PayrollRulesError {
                 write!(
                     f,
                     "the effective period's until date is before its from date"
+                )
+            }
+            PayrollRulesError::PayrollAppliesBeforeLegalEffectiveDate => {
+                write!(
+                    f,
+                    "payroll applicability starts before the legal effective date"
                 )
             }
         }
@@ -139,7 +152,9 @@ pub struct RawPayeTable {
 
 impl PayeTable {
     /// `bands` must be non-empty, strictly ascending by `from`, with the
-    /// first band's `from` at `Money::ZERO`.
+    /// first band's `from` at `Money::ZERO`, and `payroll_applicability`
+    /// must not start before `legal_effective_from` (ADR-0007: the two
+    /// dates record a deferral, never a retro-active application).
     pub fn new(
         id: PayeTableId,
         bands: Vec<PayeBand>,
@@ -154,6 +169,9 @@ impl PayeTable {
         }
         if bands.windows(2).any(|pair| pair[1].from <= pair[0].from) {
             return Err(PayrollRulesError::BandsNotAscending);
+        }
+        if payroll_applicability.from() < legal_effective_from {
+            return Err(PayrollRulesError::PayrollAppliesBeforeLegalEffectiveDate);
         }
         Ok(PayeTable {
             id,
@@ -375,6 +393,9 @@ pub struct RawSscRuleset {
 }
 
 impl SscRuleset {
+    /// `payroll_applicability` must not start before
+    /// `legal_effective_from` (ADR-0007: the two dates record a deferral,
+    /// never a retro-active application).
     pub fn new(
         id: SscRulesId,
         employee_rate: Decimal,
@@ -384,8 +405,27 @@ impl SscRuleset {
         legal_effective_from: NaiveDate,
         payroll_applicability: EffectivePeriod,
     ) -> Result<Self, PayrollRulesError> {
-        let social_security =
-            SocialSecurityRules::new(employee_rate, employer_rate, floor, ceiling)?;
+        SscRuleset::from_rules(
+            id,
+            SocialSecurityRules::new(employee_rate, employer_rate, floor, ceiling)?,
+            legal_effective_from,
+            payroll_applicability,
+        )
+    }
+
+    /// The single validating constructor. `new` and the `serde` boundary
+    /// both route through it, so an invariant added here cannot be
+    /// bypassed by deserializing a `RawSscRuleset` — the way the previous
+    /// hand-rolled `TryFrom` would have allowed.
+    pub fn from_rules(
+        id: SscRulesId,
+        social_security: SocialSecurityRules,
+        legal_effective_from: NaiveDate,
+        payroll_applicability: EffectivePeriod,
+    ) -> Result<Self, PayrollRulesError> {
+        if payroll_applicability.from() < legal_effective_from {
+            return Err(PayrollRulesError::PayrollAppliesBeforeLegalEffectiveDate);
+        }
         Ok(SscRuleset {
             id,
             social_security,
@@ -425,12 +465,12 @@ impl TryFrom<RawSscRuleset> for SscRuleset {
     type Error = PayrollRulesError;
 
     fn try_from(raw: RawSscRuleset) -> Result<Self, PayrollRulesError> {
-        Ok(SscRuleset {
-            id: raw.id,
-            social_security: raw.social_security,
-            legal_effective_from: raw.legal_effective_from,
-            payroll_applicability: raw.payroll_applicability,
-        })
+        SscRuleset::from_rules(
+            raw.id,
+            raw.social_security,
+            raw.legal_effective_from,
+            raw.payroll_applicability,
+        )
     }
 }
 
@@ -592,7 +632,7 @@ impl From<EffectivePeriod> for RawEffectivePeriod {
 /// `PayPeriod` end date against each half's own `payroll_applicability`
 /// instead of a combined one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "RawPayrollRules", into = "RawPayrollRules")]
+#[serde(from = "RawPayrollRules", into = "RawPayrollRules")]
 pub struct PayrollRules {
     paye_table: PayeTable,
     ssc_ruleset: SscRuleset,
@@ -607,16 +647,23 @@ pub struct RawPayrollRules {
 }
 
 impl PayrollRules {
+    /// Infallible by construction: every invariant belongs to one of the
+    /// three parts and has already been enforced by whoever built it —
+    /// `PayeTable::new`, `SscRuleset::new`, and `RoundingRule` being a
+    /// closed enum. `PayrollRules` deliberately adds no invariant of its
+    /// own, because a cross-half invariant here would be a combined axis
+    /// by another name (ADR-0007). A `Result` that can never be `Err`
+    /// would only teach `ruleset_for` to write `.expect`.
     pub fn new(
         paye_table: PayeTable,
         ssc_ruleset: SscRuleset,
         rounding_rule: RoundingRule,
-    ) -> Result<Self, PayrollRulesError> {
-        Ok(PayrollRules {
+    ) -> Self {
+        PayrollRules {
             paye_table,
             ssc_ruleset,
             rounding_rule,
-        })
+        }
     }
 
     pub fn paye_table(&self) -> &PayeTable {
@@ -664,10 +711,11 @@ impl PayrollRules {
     }
 }
 
-impl TryFrom<RawPayrollRules> for PayrollRules {
-    type Error = PayrollRulesError;
-
-    fn try_from(raw: RawPayrollRules) -> Result<Self, PayrollRulesError> {
+impl From<RawPayrollRules> for PayrollRules {
+    /// Total, unlike every other `Raw*` conversion in this module: the
+    /// three parts each validate themselves on the way in through their
+    /// own `serde` boundary, and `PayrollRules` adds nothing to check.
+    fn from(raw: RawPayrollRules) -> PayrollRules {
         PayrollRules::new(raw.paye_table, raw.ssc_ruleset, raw.rounding_rule)
     }
 }
@@ -754,7 +802,7 @@ mod tests {
     }
 
     fn rules() -> PayrollRules {
-        PayrollRules::new(paye_table(), ssc_ruleset(), RoundingRule::HalfUpToCents).unwrap()
+        PayrollRules::new(paye_table(), ssc_ruleset(), RoundingRule::HalfUpToCents)
     }
 
     #[test]
@@ -1217,5 +1265,98 @@ mod tests {
         let ruleset = ssc_ruleset();
         let json = serde_json::to_string(&ruleset).unwrap();
         assert_eq!(serde_json::from_str::<SscRuleset>(&json).unwrap(), ruleset);
+    }
+
+    // ADR-0007's two dates record a deferral: `ssc-2026-09` is gazetted
+    // 1 March 2026 but applied from the September 2026 payroll. The
+    // reverse — payroll applying a rule before the instrument gives it
+    // legal effect — would withhold under a rule that did not yet exist,
+    // so it is refused at construction on both axes.
+    #[test]
+    fn paye_table_refuses_payroll_applicability_starting_before_its_legal_effective_date() {
+        assert_eq!(
+            PayeTable::new(
+                test_paye_table_id(),
+                bands(),
+                date(2026, 3, 1),
+                EffectivePeriod::new(date(2026, 2, 28), None).unwrap(),
+            ),
+            Err(PayrollRulesError::PayrollAppliesBeforeLegalEffectiveDate)
+        );
+    }
+
+    #[test]
+    fn ssc_ruleset_refuses_payroll_applicability_starting_before_its_legal_effective_date() {
+        assert_eq!(
+            SscRuleset::new(
+                test_ssc_rules_id(),
+                dec!(0.009),
+                dec!(0.009),
+                money(dec!(500)),
+                money(dec!(11000)),
+                date(2026, 3, 1),
+                EffectivePeriod::new(date(2026, 2, 28), None).unwrap(),
+            ),
+            Err(PayrollRulesError::PayrollAppliesBeforeLegalEffectiveDate)
+        );
+    }
+
+    #[test]
+    fn a_deferred_payroll_effective_date_is_accepted_on_both_axes() {
+        let deferred = EffectivePeriod::new(date(2026, 9, 1), None).unwrap();
+        assert!(PayeTable::new(test_paye_table_id(), bands(), date(2026, 3, 1), deferred).is_ok());
+        assert!(
+            SscRuleset::new(
+                test_ssc_rules_id(),
+                dec!(0.009),
+                dec!(0.009),
+                money(dec!(500)),
+                money(dec!(11000)),
+                date(2026, 3, 1),
+                deferred,
+            )
+            .is_ok()
+        );
+    }
+
+    // `SscRuleset` is the one type here whose `Raw` form once bypassed its
+    // constructor. Deserializing must run the same validation, or an
+    // invariant added to `from_rules` would hold for `new` and silently
+    // not for `serde`.
+    #[test]
+    fn ssc_ruleset_deserialize_rejects_payroll_applicability_before_the_legal_date() {
+        let json = serde_json::json!({
+            "id": "ssc-backdated",
+            "social_security": {
+                "employee_rate": "0.009",
+                "employer_rate": "0.009",
+                "floor": 50000,
+                "ceiling": 1100000
+            },
+            "legal_effective_from": "2026-03-01",
+            "payroll_applicability": { "from": "2026-02-28", "until": null }
+        })
+        .to_string();
+
+        assert!(
+            serde_json::from_str::<SscRuleset>(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("payroll applicability starts before the legal effective date")
+        );
+
+        // Positive control: the identical document with the legal date
+        // moved back parses, proving the refusal above is the invariant
+        // firing and not a malformed fixture.
+        assert!(
+            serde_json::from_str::<SscRuleset>(&json.replace("2026-03-01", "2026-01-01")).is_ok()
+        );
+    }
+
+    #[test]
+    fn payroll_rules_deserialize_round_trips() {
+        let rules = rules();
+        let json = serde_json::to_string(&rules).unwrap();
+        assert_eq!(serde_json::from_str::<PayrollRules>(&json).unwrap(), rules);
     }
 }
