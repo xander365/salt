@@ -301,6 +301,21 @@ impl SocialSecurityRules {
         })
     }
 
+    /// `basic_pay` clamped to the **full monthly** floor and ceiling, and
+    /// which bound was applied.
+    ///
+    /// The clamp is never prorated, even when `basic_pay` itself has been
+    /// prorated for a part-month joiner or leaver: the regulations state
+    /// the floor and ceiling as monthly amounts, and ADR-0005 already
+    /// refuses to split a monthly statutory amount pro-rata. A person who
+    /// works one day for N$200 still contributes N$4.50 per side.
+    ///
+    /// **Salt policy, not a statutory claim.** Whether the SSC agrees is
+    /// unresolved (SC-OPEN-3, `NEEDS SSC CONFIRMATION`,
+    /// `docs/domain/statutory-conformance.md` §5.7), so part-month
+    /// clamping is asserted by `salt_policy_ssc_*` tests only. The rate,
+    /// the floor and the ceiling values themselves *are* statutory; the
+    /// part-month treatment of them is not.
     pub(crate) fn base(self, basic_pay: Money) -> (Money, SscClamp) {
         if basic_pay < self.floor {
             (self.floor, SscClamp::Floor)
@@ -488,6 +503,15 @@ impl From<SscRuleset> for RawSscRuleset {
 /// How an unrounded exact amount becomes a `Money` output line. A field of
 /// `PayrollRules` so a change in rounding policy is dated like any other
 /// rule; the mechanism itself lives in [`crate::money::round_half_up`].
+///
+/// **Salt policy, not a statutory claim.** No source found prescribes a
+/// rounding behaviour for PAYE or SSC (SC-OPEN-2, `NEEDS NAMRA
+/// CONFIRMATION`); half-up to cents is Salt's choice, defended by the
+/// N$4.50 and N$112.50 amounts the Commission itself publishes
+/// (`docs/domain/statutory-conformance.md` §5.8). It is applied only
+/// *after* statutory arithmetic has produced an exact value, so changing
+/// this enum can invalidate a `salt_policy_*` test and can never
+/// invalidate a statutory one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoundingRule {
     HalfUpToCents,
@@ -503,9 +527,10 @@ impl RoundingRule {
 
 /// One PAYE band's contribution to the tax owed on a year-to-date taxable
 /// amount, for explainability. `threshold` is the band's annual `from`
-/// scaled to the period number within the TaxYear (see
-/// [`PayrollRules::tax_owed_on`]);
-/// intermediate arithmetic like this is never rounded to cents.
+/// scaled to the period number within the TaxYear by
+/// `PayrollRules::tax_owed_on` — Salt's own per-period method (SC-OPEN-1),
+/// not a statutory one. Intermediate arithmetic like this is never rounded
+/// to cents, so `threshold` and `tax` are exact and unrounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BandContribution {
     pub threshold: Decimal,
@@ -684,6 +709,14 @@ impl PayrollRules {
 
     /// The exact, unrounded tax owed on `annual_taxable`, and the band-by-
     /// band breakdown that produced it.
+    ///
+    /// **Salt policy, not a statutory claim.** No published Namibian
+    /// source prescribes how one period's PAYE is derived from the annual
+    /// table (SC-OPEN-1, `NEEDS NAMRA CONFIRMATION`). Sage ships two
+    /// methods for Namibia and Salt implements a third shape. Results from
+    /// this function are asserted by `salt_policy_*` tests and may never
+    /// be cited as conformance evidence — only [`PayeTable::annual_tax`],
+    /// the unscaled entry into the same walk, carries a statutory claim.
     ///
     /// Cumulative PAYE is never annualised (ADR-0001): rather than scale
     /// `annual_taxable` up to a full-year estimate, this scales the annual

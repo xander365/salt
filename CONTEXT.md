@@ -87,11 +87,11 @@ A calculation choice Salt made because the law is silent or the prescribed metho
 _Avoid_: Convention, our rule, standard practice
 
 **YearToDateContext**:
-The taxable remuneration, PAYE withheld, periods elapsed, and PriorEmployment so far in the TaxYear for one Employment. Supplied to the calculator; never queried by it.
+The TaxYear, plus the taxable remuneration, PAYE withheld, periods elapsed, and PriorEmployment so far in it for one Employment. Required, never optional. Supplied to the calculator; never queried by it. Its first three figures are the OpeningBalance axis and are supported; PriorEmployment is a separate axis and is refused.
 _Avoid_: YTD totals, running totals, history
 
 **PeriodsElapsed**:
-The Employment's position in the TaxYear, 0 to 11. Not a count of periods the Employment has been paid, and not a count of days worked.
+The Employment's position in the TaxYear, 0 to 11. Not a count of periods the Employment has been paid, and not a count of days worked. Reading it as periods worked over-withholds from every mid-year joiner, which is why the distinction is stated at the type itself.
 _Avoid_: Periods worked, months employed
 
 **PriorEmployment**:
@@ -111,7 +111,7 @@ The record tying one shipped rule table to its provenance document and the Statu
 _Avoid_: Compliance record, audit trail
 
 **StatutoryCase**:
-One golden example whose expected value is a literal published by a regulator, identified so evidence can reference it. Distinct from a Salt-policy or algorithm case, neither of which can be cited as evidence.
+One golden example whose expected value is a literal published by a regulator, identified so evidence can reference it. Distinct from a Salt-policy or algorithm case, neither of which can be cited as evidence. The three test-name prefixes — `statutory_*`, `salt_policy_*`, `algorithm_*` — carry the same distinction for a reader.
 _Avoid_: Golden test, fixture, test case
 
 ### Process

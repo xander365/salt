@@ -9,7 +9,8 @@
 use serde::{Deserialize, Serialize};
 
 /// One of the four current deductions NamRA's brochure allows against
-/// taxable income (§3.5), none of which Salt v1 calculates.
+/// taxable income (`docs/domain/statutory-conformance.md` §3.5), none of
+/// which Salt v1 calculates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnsupportedDeductionKind {
     ApprovedPensionFund,
@@ -36,7 +37,8 @@ impl std::fmt::Display for UnsupportedDeductionKind {
 /// only through `new`, which rejects an empty `Vec` and collapses repeated
 /// kinds while preserving their first-seen order. An empty collection would
 /// be indistinguishable from `UnsupportedDeductionStatus::ConfirmedNone`, the
-/// exact ambiguity this type exists to remove (§3.5).
+/// exact ambiguity this type exists to remove
+/// (`docs/domain/statutory-conformance.md` §3.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<UnsupportedDeductionKind>")]
 #[serde(into = "Vec<UnsupportedDeductionKind>")]
@@ -118,7 +120,8 @@ impl From<UnsupportedDeductionKinds> for Vec<UnsupportedDeductionKind> {
 
 /// What Salt knows about whether an Employee has any of the four
 /// deduction kinds it does not support. The three states are distinct on
-/// purpose: nothing here can be mistaken for "nobody asked" (§5.5).
+/// purpose: nothing here can be mistaken for "nobody asked"
+/// (`docs/domain/statutory-conformance.md` §5.5).
 ///
 /// `Option<Vec<UnsupportedDeductionKind>>` and a bare `Vec` are both
 /// rejected as the representation: either lets an empty collection mean

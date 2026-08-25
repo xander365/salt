@@ -65,9 +65,10 @@ impl RemunerationBases {
         };
 
         for line in lines {
-            // The two-way table of §5.2, stated once. `BasicPay` counts
-            // toward SSC, PAYE, and gross; `TaxableAllowance` toward PAYE
-            // and gross but not SSC. Each line states which of the three
+            // The two-way table of `docs/domain/payroll-calculation.md`
+            // §5.2, stated once. `BasicPay` counts toward SSC, PAYE, and
+            // gross; `TaxableAllowance` toward PAYE and gross but not
+            // SSC. Each line states which of the three
             // bases it feeds in this one exhaustive match, so a future
             // kind cannot be added without deciding its effect on all
             // three here.

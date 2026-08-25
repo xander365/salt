@@ -103,7 +103,8 @@ pub enum PayrollError {
     ContradictoryEmploymentDates,
     /// The Employment does not overlap the `PayPeriod` at all. A joiner or
     /// leaver — the Employment starting or ending inside the period — is
-    /// not this error; it is prorated instead (§8.2).
+    /// not this error; it is prorated instead
+    /// (`docs/domain/payroll-calculation.md` §8.2).
     EmploymentDoesNotOverlapPeriod,
     /// `PayrollInput.earnings` contained a `BasicPay` line. `calculate`
     /// derives that line itself from the Employment's `CompensationTerms`,
@@ -172,7 +173,8 @@ pub enum PayrollError {
     /// `PayrollInput.unsupported_deductions` is `Unknown`: nobody has
     /// established whether the Employee has any of the four deduction
     /// kinds Salt v1 does not support. An unasked question must never
-    /// pass as a confirmed "no" (§5.5).
+    /// pass as a confirmed "no"
+    /// (`docs/domain/statutory-conformance.md` §5.5).
     UnsupportedDeductionStatusUnknown,
     /// The Employee has one or more of the four deduction kinds Salt v1
     /// does not support. Every kind supplied is named, not just the
@@ -323,9 +325,11 @@ impl From<MoneyError> for PayrollError {
     }
 }
 
-/// A condition Salt flags without blocking calculation. This ticket
-/// produces none; `warnings` is always empty until a later ticket
-/// introduces the first variant.
+/// A condition Salt flags without blocking calculation. Deliberately
+/// uninhabited today: `calculate` produces no warnings, so
+/// `PayrollCalculation.warnings` is always empty until a variant is added.
+/// Anything that must genuinely block is a `PayrollError`, never a
+/// `Warning` (`docs/domain/payroll-calculation.md` §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Warning {}
 
@@ -344,6 +348,9 @@ pub struct PayeTrace {
     pub year_to_date_tax_owed: Decimal,
     /// Which PAYE bands were crossed and how much each contributed.
     pub bands_applied: Vec<BandContribution>,
+    /// Position in the TaxYear, not periods worked — see
+    /// [`PeriodsElapsed`]. Recorded so a reviewer can see which scaling
+    /// produced `year_to_date_tax_owed` without re-deriving it.
     pub periods_elapsed: PeriodsElapsed,
 }
 
@@ -438,8 +445,9 @@ pub fn calculate(
     }
 
     // Checked before any arithmetic runs, so a refused input never yields
-    // partial figures (§5.5): an unsupported deduction is not a number
-    // Salt can approximate its way past.
+    // partial figures (`docs/domain/statutory-conformance.md` §5.5): an
+    // unsupported deduction is not a number Salt can approximate its way
+    // past.
     match &input.unsupported_deductions {
         UnsupportedDeductionStatus::ConfirmedNone => {}
         UnsupportedDeductionStatus::Unknown => {
@@ -509,8 +517,9 @@ pub fn calculate(
         return Err(PayrollError::DuplicateBasicPayLine);
     }
 
-    // Proration (§8.2) applies to BasicPay only, and only for a joiner or
-    // leaver — `employed_days < period_days`. A continuing employee's
+    // Proration (`docs/domain/payroll-calculation.md` §8.2) applies to
+    // BasicPay only, and only for a joiner or leaver —
+    // `employed_days < period_days`. A continuing employee's
     // BasicPay is carried through untouched, never round-tripped through
     // decimal division, so twelve full periods sum to exactly twelve
     // months' pay with no rounding drift.
@@ -559,6 +568,13 @@ pub fn calculate(
     }
     let paye_amount = rules.rounding_rule().apply(paye_unrounded)?;
 
+    // The rate, the floor and the ceiling below are statutory. What Salt
+    // does with them here is not: prorating `BasicPay` by calendar days
+    // and then clamping it to the *full monthly* floor and ceiling is
+    // Salt's own rule (SC-OPEN-3, `NEEDS SSC CONFIRMATION`), and rounding
+    // the result half-up is Salt's own rule too (SC-OPEN-2). Both are
+    // asserted by `salt_policy_*` tests, and neither may be cited as
+    // evidence under ADR-0008.
     let social_security = rules.social_security();
     // Taken from the accumulated bases, not re-read from the compensation
     // terms: the base an allowance must not reach is the same number the

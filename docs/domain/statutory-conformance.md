@@ -1,6 +1,6 @@
 # Salt — Namibian Statutory Conformance
 
-**Status:** Status: Grilled and specified — implementation tracked by GitHub issue #7.
+**Status:** Grilled, specified and implemented. Specified as GitHub issue #7; delivered by issues #8–#16. Authoritative: where the code disagrees with this document, the code is the defect.
 **Product:** Salt
 **Market:** Namibia
 **Date:** 2026-08-24
@@ -86,13 +86,13 @@ Sources: `docs/conformance/paye-2024-03.md`.
 
 **Note on the NamRA brochure.** The brochure's sixth row prints "Exceeds N$ 800 000". Every other source, and the table's own internal arithmetic, gives **N$ 850,000**. Salt implements N$850,000 and records the discrepancy here.
 
-**Current Salt state — BLOCKER.** Salt ships this synthetic table in production:
+**Current Salt state — closed.** Salt used to ship this synthetic table in production:
 
 ```text
 0 -> 0%   120,000 -> 20%   240,000 -> 30%   480,000 -> 40%
 ```
 
-Those values are legitimate `algorithm_*` fixtures. They are not Namibia's table and must not be reachable through `ruleset_for`.
+That was the blocker this document was written to end, and it is fixed. The table above is now the shipped `paye-2024-03` catalogue entry, and the synthetic values survive only as test fixtures — asserted unreachable through the public resolvers by `algorithm_synthetic_paye_bands_are_unreachable_through_production_resolvers`. The history stays recorded here because ADR-0008 exists because of it.
 
 ### 3.2 Individual tax year
 
@@ -196,15 +196,17 @@ Rejected: annualising the current period (`month × 12`, tax, `÷ 12`), which is
 
 Why: it reconciles exactly to the standard annual calculation at period 12, absorbs irregular remuneration without special cases, and self-corrects after a correction — which is what makes ADR-0002 cheap.
 
-Recorded in ADR-0001, amended to state plainly that this is Salt's choice under an unprescribed method.
+Recorded in ADR-0001, amended to state plainly that this is Salt's choice under an unprescribed method. Stamped SC-OPEN-1.
 
 ### 5.2 `PeriodsElapsed` counts tax-year position
 
-`PeriodsElapsed` is the employee's position in the **tax year**, 0–11. It is **not** a count of periods the Employment has been paid.
+`PeriodsElapsed` is the employee's position in the **tax year**, 0–11. It is **not** a count of periods the Employment has been paid, and **not** a count of days worked.
+
+This is Salt policy, not conformance. It has no stamp of its own because it is not a separate open question: it is an inseparable part of the per-period method stamped SC-OPEN-1, and it stands or falls with it. Any test asserting a period's PAYE under this interpretation is `salt_policy_*`.
 
 The draft treated this as the highest risk in the system, on the belief that a new starter would be materially under-taxed. Worked through, that is not what happens. A person starting in October on N$25,000 a month earns N$125,000 in the tax year; true annual liability is N$4,500. In October the thresholds are scaled to 8/12, so N$25,000 falls under the band and PAYE is N$0 — but by February the thresholds are whole and the full N$4,500 has been collected. The method self-corrects, and it reaches the correct annual figure.
 
-Counting *worked* periods instead would scale October's thresholds to 1/12, tax the new starter immediately, and **over**-withhold against their true annual liability.
+Counting *worked* periods instead would scale October's thresholds to 1/12, tax the new starter immediately, and **over**-withhold against their true annual liability — the failure this paragraph exists to prevent, and the reason the code carries the same warning at the type itself. A reader who "fixes" `PeriodsElapsed` into periods worked does not correct an under-taxation bug; they create an over-withholding one.
 
 The genuine hole is different, and §5.6 closes it: someone who already earned taxable remuneration elsewhere in the same tax year.
 
@@ -352,7 +354,15 @@ The period end date therefore selects both the `PayrollRules` and the `TaxYear`.
 
 ## 7. Test taxonomy
 
-Four prefixes, and they may not be mixed.
+**Three prefixes**, one per claim in §1, and they may not be mixed:
+
+| Prefix | Claim | Meaning |
+|---|---|---|
+| `statutory_*` | Statutory | The expected value is a literal published by a regulator. Traceable to a Tier A source, and the only kind of case an evidence entry may cite. Splits into two families by instrument: `statutory_paye_*` and `statutory_ssc_*`. |
+| `salt_policy_*` | Provisional Salt policy | Salt chose, because the law is silent or the method is unpublished. Defensible, tested, revisited on confirmation — and never citable as conformance evidence. |
+| `algorithm_*` | Algorithm | Synthetic values proving mechanics. Makes no claim about Namibia at all, and must stay unreachable through any public production resolver. |
+
+A test that carries none of the three prefixes makes no claim about a calculated outcome: it exercises a type's own construction, validation or serialization — `Money` rejecting a negative, `PeriodsElapsed` rejecting a thirteenth period, a shipped value round-tripping through `serde`. The moment a test asserts what an employee is paid, withheld or contributes, it takes a prefix, and which prefix it takes is a statement about what Salt is claiming.
 
 Test names carry **human** semantics. They are not the compliance mechanism — the evidence catalogue below is.
 
@@ -402,12 +412,15 @@ Part-month clamping is **not** a statutory case while SC-OPEN-3 is open.
 Any test of the form "this period's PAYE is X" belongs here, because the method is unconfirmed (SC-OPEN-1):
 
 - `salt_policy_paye_*` — new starter in October; same-employer mid-year `OpeningBalance` adoption; a correction absorbed by the next period; `PriorEmployment::Unknown` refuses; `PriorEmployment::Some` refuses pending SC-OPEN-4, with the figures surviving into the error; `UnsupportedDeductionStatus::Unknown` refuses; `Present(kinds)` refuses and names them.
-- `salt_policy_ssc_*` — part-month joiner and leaver clamping to the full monthly floor and ceiling.
-- `salt_policy_rounding_*` — half-up at each statutory output.
+- `salt_policy_ssc_*` — part-month joiner and leaver clamping to the full monthly floor and ceiling (SC-OPEN-3).
+- `salt_policy_rounding_*` — half-up at each statutory output (SC-OPEN-2).
+- **Ruleset selection by period end date** — that a period straddling a rate change uses the entry covering its **end date**, for its whole length. The rule is ADR-0005's, stated by the product owner; no Namibian source prescribes it. What is statutory is the ceiling value and its instrument's effective date. How Salt maps a pay period onto that date is Salt policy, so a straddle test is `salt_policy_*` and may never be cited as evidence. The N$11,000-to-N$12,500 straddle across 1 September 2026 is the live example.
 
 ### `algorithm_*` — synthetic mechanics
 
-The `0 / 120k / 240k / 480k` fixtures live here and nowhere else. They must be unmistakably synthetic and unreachable through any public production resolver.
+The `0 / 120k / 240k / 480k` fixtures are `algorithm_*` values. Every test that asserts something *about the fixtures themselves* — that the band walk sums correctly, that they never appear in a shipped catalogue, that no public resolver returns them — is `algorithm_*`, and they must be unmistakably synthetic and unreachable through any public production resolver.
+
+They may also serve as the rules fixture underneath a `salt_policy_*` test, and that is not a leak. A test of Salt's per-period method, its rounding, or its proration is asserting the *method*, and round synthetic thresholds make the arithmetic legible in a way the real table does not. What matters is the direction of the claim: a synthetic value may back a Salt-policy claim about mechanics, and may never back a statutory claim about Namibia. Only the statutory case catalogue can do that, and an evidence entry can reference nothing else.
 
 ### The conformance gate — explicit evidence
 
@@ -439,7 +452,7 @@ The external calculator is a cross-check, not a source of law.
 
 ## 9. Work this settles
 
-Specified as GitHub issue #7.
+Specified as GitHub issue #7, delivered as issues #8–#16. Each numbered item below is shipped; the list stays as the record of what the work covered, not as a plan.
 
 1. Replace the synthetic production PAYE bands with the real table (§3.1).
 2. Keep the synthetic bands as `algorithm_*` fixtures only, unreachable through any public resolver.

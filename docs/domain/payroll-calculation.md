@@ -1,6 +1,6 @@
 # Salt — Payroll Calculation Domain Design
 
-**Status:** Grilled. Decisions settled, ready for `/to-spec`.
+**Status:** Grilled and settled, then amended by the statutory conformance grill of 2026-08-24 — see the note below. Implemented for the calculation core.
 **Product:** Salt
 **Initial market:** Namibian SMEs
 **Date:** 2026-08-21
@@ -192,12 +192,14 @@ The statutory and agreed calculation rules in force for an effective period, as 
 
 ```text
 PayrollRules
-- PayeTable   (PayeTableId, EffectivePeriod, PAYEBands)
-- SscRuleset  (SscRulesId,  EffectivePeriod, rate, floor, ceiling)
+- PayeTable   (PayeTableId, PAYEBands,               legal_effective_from, payroll_applicability)
+- SscRuleset  (SscRulesId,  rate, floor, ceiling,    legal_effective_from, payroll_applicability)
 - RoundingRule
 ```
 
-The two halves are resolved independently by period end date and frozen together (ADR-0007). `PayrollRules` itself is no longer effective-dated; its halves are.
+The two halves are resolved independently by period end date and frozen together (ADR-0007). `PayrollRules` itself is no longer effective-dated and carries no id of its own; its halves carry both.
+
+Each half carries **two** dates. `legal_effective_from` is what the instrument says; `payroll_applicability` is the interval payroll actually applies it over, and its start is `payroll_effective_from`. Resolution keys on `payroll_applicability` alone — `legal_effective_from` is carried, stored and displayed, never consulted for selection. The pair may only record a *deferral*: payroll applying a rule later than the law does. The reverse is refused by the constructors, because it would withhold under a rule that did not yet exist.
 
 Rules are never scattered as magic constants across unrelated source files.
 
@@ -336,12 +338,19 @@ PayrollCalculation
 - EarningLines
 - GrossRemuneration
 - TaxableRemuneration
+- PayeTableId                     the PAYE instrument that produced this
+- SscRulesId                      the SSC instrument that produced this
 - PAYE            (with trace)
 - EmployeeSSC     (with trace)
 - EmployerSSC     (with trace)
+- Deductions                      PAYE and employee SSC only
 - NetPay
 - Warnings
 ```
+
+The two ids are recorded independently (ADR-0007), so a historical result names exactly which two instruments produced it. They are a reference, not the record: because rules are code (ADR-0003), a `FinalizedPayroll` stores the resolved rule *values* alongside them (ADR-0004).
+
+`Deductions` holds PAYE and employee SSC and nothing else, so `GrossRemuneration - Deductions == NetPay` holds line for line. Employer SSC is never in it (INV-007).
 
 ### 6.1 Gross is not taxable
 
@@ -356,20 +365,27 @@ Employer SSC is a payroll cost. It never reduces net pay (INV-007). The two feed
 Explanation is **structured data, never preformatted text**. Earnings and deductions are plain typed lines. PAYE and SSC additionally carry a small typed trace, because they are the two numbers people argue about.
 
 ```text
-PAYETrace
+PayeTrace
+- PriorTaxableRemuneration          the OpeningBalance axis, this same Employment
+- PriorPAYE                         likewise
+- ThisPeriodTaxableRemuneration
 - YearToDateTaxableRemuneration
-- BandApplied
-- YearToDateTaxOwed
-- PAYEAlreadyWithheld
-- PAYEThisPeriod
+- YearToDateTaxOwed                 exact and unrounded, not cents-exact
+- BandsApplied                      every band crossed, with its scaled threshold and its tax
+- PeriodsElapsed                    position in the TaxYear, not periods worked
 
-SSCTrace
-- BasicWageBase
-- FloorApplied?
-- CeilingApplied?
+SscTrace
+- BasicPay                          the basic wage the lines produced
+- Base                              BasicPay clamped — the amount actually charged
+- Clamp                             None | Floor | Ceiling
 - Rate
-- Contribution
+- Floor
+- Ceiling
 ```
+
+`BandsApplied` is a list, not one band: a cumulative calculation ordinarily crosses several, and a reviewer explaining a figure needs each one's contribution. `YearToDateTaxOwed` is deliberately the only non-`Money` figure in either trace — it is the exact unrounded value, before Salt's rounding policy touches it (§8.3), which is what lets a reviewer explain a PAYE figure without rerunning anything.
+
+The PAYE amount for the period is not in the trace; it is the result beside it, and it equals `YearToDateTaxOwed - PriorPAYE`, rounded.
 
 No free-text formula strings. The UI and the payslip render from this data.
 
@@ -380,7 +396,8 @@ No free-text formula strings. The UI and the payslip render from this data.
 - no applicable PAYE table, or overlapping PAYE tables;
 - no applicable SSC ruleset, or overlapping SSC rulesets — a separate variant, so a message can name which axis failed;
 - invalid or straddling pay period;
-- missing `YearToDateContext`;
+- a `PayrollRules` half that does not cover the period end date — one refusal per axis, so a caller bypassing `ruleset_for` learns which half is wrong;
+- a `YearToDateContext` naming a different `TaxYear` than the period end date falls in;
 - prior employment status `Unknown` — the fact was never established;
 - prior employment `Some(..)` — treatment unconfirmed (SC-OPEN-4), carrying the recorded figures;
 - unsupported deduction status `Unknown`, or `Present` — naming every kind seen;
@@ -389,6 +406,8 @@ No free-text formula strings. The UI and the payslip render from this data.
 - `CompensationTerms` not covering the period.
 
 Every one of these is a typed variant carrying what a caller needs to act on. `Display` may be human-friendly; the domain contract is the type, never a string.
+
+There is deliberately **no** "missing `YearToDateContext`" error. The context is a required field of `PayrollInput`, so the state is not representable and there is nothing to refuse (ADR-0001). The first period of adoption passes explicit zeros.
 
 **Warnings** never block review or finalization, but are **copied into the `FinalizedPayroll`**, so the audit trail shows Salt raised a flag and a human proceeded anyway. Anything that must genuinely block is an Error, not a Warning.
 
@@ -409,7 +428,7 @@ Small types guard local invariants; `calculate` guards everything relational.
 ## 8. Calculation pipeline
 
 ```text
- 1. Validate context (period is on the Employer's PaySchedule, rules cover period, terms cover every day employed, YTD present)
+ 1. Validate context (each rules half covers the period end date, the YTD context names the period's TaxYear, unsupported deductions are ConfirmedNone, prior employment is None, period is on the Employer's PaySchedule, terms cover every day employed)
  2. Determine applicable CompensationTerms for the period
  3. Build earning lines, prorating BasicPay for joiners and leavers
  4. GrossRemuneration   = all earning lines
@@ -425,9 +444,13 @@ Small types guard local invariants; `calculate` guards everything relational.
 
 ```text
 ytd_taxable   = YearToDateContext.PriorTaxableRemuneration + TaxableRemuneration
-ytd_tax_owed  = annual_bands(ytd_taxable, PeriodsElapsed + 1)
-paye_period   = ytd_tax_owed - YearToDateContext.PriorPAYE
+ytd_tax_owed  = bands_scaled_to(PeriodsElapsed + 1, of 12) applied to ytd_taxable
+paye_period   = round(ytd_tax_owed - YearToDateContext.PriorPAYE)
 ```
+
+It is the band **thresholds** that are scaled to `(PeriodsElapsed + 1) / 12`, never the income. `PeriodsElapsed` is position in the tax year — see §5.5.
+
+**This whole step is Salt policy, not conformance** (SC-OPEN-1). The band table is statutory; deriving one period's figure from it is not. The same band walk entered *without* scaling is the statutory seam, and that one takes `Money` and returns an exact unrounded value.
 
 Cumulative PAYE is self-correcting: a corrected earlier period is absorbed at the next calculation without touching the periods in between.
 
@@ -553,6 +576,8 @@ Audit is immutable rows plus an append-only action log, not event sourcing (ADR-
 | INV-012 | Unsupported cases fail visibly; Salt never guesses. |
 | INV-013 | Year-to-date is summed from live records, never stored as a running total. |
 | INV-014 | `CompensationTerms` begin on a pay period start date. |
+
+INV-012 is the one the conformance work leaned on hardest: an unsupported deduction, an unestablished prior-employment fact, and a recorded prior-employment figure whose treatment is unconfirmed are all **refusals**, never approximations. Absence of data is never read as absence of the condition.
 
 ---
 

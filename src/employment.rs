@@ -257,8 +257,9 @@ impl EmploymentSnapshot {
     /// numerator `calculate` uses to prorate `BasicPay` for a joiner or a
     /// leaver. `None` if the Employment does not overlap `period` at all,
     /// which is a genuine mismatch rather than an ordinary joiner or
-    /// leaver: those are not errors (§8.2), but an Employment wholly
-    /// before or after the period being calculated is.
+    /// leaver: those are not errors (`docs/domain/payroll-calculation.md`
+    /// §8.2), but an Employment wholly before or after the period being
+    /// calculated is.
     ///
     /// Callers get the dates, not just a count, because the same span
     /// answers a second question — which days the `CompensationTerms`

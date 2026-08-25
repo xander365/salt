@@ -6,14 +6,35 @@ use serde::{Deserialize, Serialize};
 use crate::money::Money;
 use crate::tax_year::TaxYear;
 
-/// How many periods of the TaxYear are already complete, 0 to 11.
+/// The Employment's **position in the TaxYear**, 0 to 11 — how many of
+/// the TaxYear's twelve periods are already behind this one.
+///
+/// **Not a count of periods the Employment has been paid, and not a count
+/// of days worked.** An Employment that starts in October is at position
+/// 7, not at position 0, even though Salt has never paid it before. This
+/// is Salt policy under an unprescribed per-period method (SC-OPEN-1,
+/// ADR-0001, `docs/domain/statutory-conformance.md` §5.2), and it is the
+/// single reading in this crate most likely to be "corrected" into a bug.
+///
+/// **The failure a misreading causes is over-withholding, every time.**
+/// The annual band thresholds are scaled to `period_number`/12. Reading
+/// this as periods *worked* would put an October joiner at position 0,
+/// scale October's thresholds to 1/12 instead of 8/12, and tax them
+/// immediately against a fraction of the tax-free threshold they are
+/// actually entitled to — withholding more than their true annual
+/// liability. Tax-year position does not under-tax them in exchange: by
+/// February the thresholds are whole and the correct annual amount has
+/// been collected. The method self-corrects; counting worked periods
+/// breaks it. Do not change this.
+///
+/// The genuine under-taxation risk is a different fact entirely, and
+/// [`PriorEmployment`] closes it by refusing.
 ///
 /// Keying the ruleset and the TaxYear on the PayPeriod end date guarantees
 /// exactly twelve periods per TaxYear (ADR-0005), and cumulative PAYE
-/// depends on that: the annual band thresholds are scaled to
-/// `elapsed + 1`/12. A thirteenth period would scale them past the full
-/// annual table and under-tax the employee, so 12 and above are not
-/// representable rather than merely wrong.
+/// depends on that. A thirteenth period would scale the thresholds past
+/// the full annual table and under-tax the employee, so 12 and above are
+/// not representable rather than merely wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
 pub struct PeriodsElapsed(u8);
@@ -52,7 +73,8 @@ impl PeriodsElapsed {
 
     /// Which period of the TaxYear is being calculated, counting the
     /// current one: 1 for the first, 12 for the last. This is the figure
-    /// the PAYE band thresholds are scaled by.
+    /// the PAYE band thresholds are scaled by (`period_number`/12) — what
+    /// ADR-0001 calls the periods elapsed *inclusive of this one*.
     pub(crate) fn period_number(self) -> u32 {
         self.0 as u32 + 1
     }
@@ -130,15 +152,40 @@ pub enum PriorEmployment {
 }
 
 /// The TaxYear, taxable remuneration, PAYE withheld, periods elapsed, and
-/// PriorEmployment fact so far for one Employment. Required, never
-/// optional (INV-013): the first period of adoption passes explicit
-/// zeros, not a missing value.
+/// PriorEmployment fact so far for one Employment.
+///
+/// Required, never optional (ADR-0001): the first period of adoption
+/// passes explicit zeros, not a missing value. There is therefore no
+/// "missing year-to-date context" refusal for `calculate` to return — the
+/// type does not allow the state. The figures are summed by the
+/// application layer from live, non-reversed `FinalizedPayroll` records
+/// plus the Employment's `OpeningBalance`, never stored as a running
+/// total (INV-013), and `calculate` never queries them.
+///
+/// **Two different facts live here, and they are never the same fact.**
+/// `prior_taxable_remuneration`, `prior_paye` and `periods_elapsed` are
+/// the **`OpeningBalance`** axis — this same Employment and Employer,
+/// carried in from whatever system Salt replaced. That is **supported**.
+/// `prior_employment` is the [`PriorEmployment`] axis — a *different*
+/// Employer earlier in the same TaxYear. That is **refused** while
+/// SC-OPEN-4 is open. Conflating them is how a mid-year joiner gets
+/// materially under-taxed
+/// (`docs/domain/statutory-conformance.md` §5.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct YearToDateContext {
     tax_year: TaxYear,
+    /// `OpeningBalance` axis: taxable remuneration already paid by **this
+    /// same** Employment and Employer this TaxYear. Never another
+    /// employer's figures — those are `prior_employment`, and they are
+    /// refused.
     prior_taxable_remuneration: Money,
+    /// `OpeningBalance` axis: PAYE already withheld by **this same**
+    /// Employment and Employer this TaxYear.
     prior_paye: Money,
+    /// Position in the TaxYear — see [`PeriodsElapsed`]. An `OpeningBalance`
+    /// supplies it on adoption; it is not a count of periods Salt has paid.
     periods_elapsed: PeriodsElapsed,
+    /// The separate, refused fact — see [`PriorEmployment`].
     prior_employment: PriorEmployment,
 }
 
