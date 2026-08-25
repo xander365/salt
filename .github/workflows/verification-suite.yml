@@ -1,0 +1,62 @@
+# The payroll verification suite, run on every push to main and every pull
+# request. This is the CI half of the ADR-0008 evidence gate: a shipped ruleset
+# that loses its provenance document or its statutory case fails `cargo test`
+# here, and the run with it.
+name: verification-suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A rustdoc warning fails the build. Public statutory documentation linking to
+  # a private item is exactly the rot this suite exists to catch.
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Install the pinned toolchain
+        # No arguments: rustup reads rust-toolchain.toml, so the pin lives in
+        # exactly one place.
+        run: rustup toolchain install
+
+      - name: Confirm the pinned toolchain is the active one
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          expected="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          actual="$(rustc --version | cut -d' ' -f2)"
+          if [ "$actual" != "$expected" ]; then
+            echo "rust-toolchain.toml pins $expected but rustc is $actual" >&2
+            exit 1
+          fi
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        # --no-fail-fast so every failing gate reports, rather than only the
+        # first. Test output is never quietened: the assertion naming the
+        # shipped rule id that lost its evidence is the point of the run.
+        run: cargo test --no-fail-fast
+
+      - name: cargo doc --no-deps
+        run: cargo doc --no-deps
