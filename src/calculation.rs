@@ -1041,8 +1041,8 @@ mod tests {
         assert_eq!(calc.employee_social_security.trace.clamp, SscClamp::None);
         assert_eq!(calc.employee_social_security.amount, money(dec!(108.00)));
         assert_eq!(calc.employer_social_security.amount, money(dec!(108.00)));
-        assert_eq!(calc.paye.amount, money(dec!(400.00)));
-        assert_eq!(calc.net_pay, money(dec!(11492.00)));
+        assert_eq!(calc.paye.amount, money(dec!(660.00)));
+        assert_eq!(calc.net_pay, money(dec!(11232.00)));
         assert_invariants(&calc);
     }
 
@@ -1072,8 +1072,8 @@ mod tests {
         assert_eq!(calc.employee_social_security.trace.clamp, SscClamp::Ceiling);
         assert_eq!(calc.employee_social_security.amount, money(dec!(99.00)));
         assert_eq!(calc.employer_social_security.amount, money(dec!(99.00)));
-        assert_eq!(calc.paye.amount, money(dec!(400.00)));
-        assert_eq!(calc.net_pay, money(dec!(11501.00)));
+        assert_eq!(calc.paye.amount, money(dec!(660.00)));
+        assert_eq!(calc.net_pay, money(dec!(11241.00)));
         assert_invariants(&calc);
     }
 

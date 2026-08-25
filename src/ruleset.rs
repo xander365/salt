@@ -22,36 +22,34 @@ fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("ruleset constants are real calendar dates")
 }
 
-/// The PAYE band table shared by every `PayeTable` Salt has shipped so
-/// far — no ticket has changed it yet. Kept as its own function so a
-/// future table does not have to duplicate this one.
-fn paye_bands() -> Vec<PayeBand> {
+/// Namibia's individual PAYE bands effective from 1 March 2024
+/// (`docs/conformance/paye-2024-03.md`).
+fn paye_2024_march_bands() -> Vec<PayeBand> {
     vec![
         PayeBand::new(money(0), Decimal::new(0, 2)).unwrap(),
-        PayeBand::new(money(12_000_000), Decimal::new(20, 2)).unwrap(),
-        PayeBand::new(money(24_000_000), Decimal::new(30, 2)).unwrap(),
-        PayeBand::new(money(48_000_000), Decimal::new(40, 2)).unwrap(),
+        PayeBand::new(money(10_000_000), Decimal::new(18, 2)).unwrap(),
+        PayeBand::new(money(15_000_000), Decimal::new(25, 2)).unwrap(),
+        PayeBand::new(money(35_000_000), Decimal::new(28, 2)).unwrap(),
+        PayeBand::new(money(55_000_000), Decimal::new(30, 2)).unwrap(),
+        PayeBand::new(money(85_000_000), Decimal::new(32, 2)).unwrap(),
+        PayeBand::new(money(155_000_000), Decimal::new(37, 2)).unwrap(),
     ]
 }
 
-/// The one `PayeTable` Salt has shipped so far — synthetic figures, not
-/// yet the real NamRA table (that is the next ticket on GitHub issue #7).
-/// Structural only: it resolves on its own axis via `paye_table_for`,
-/// entirely independent of `ssc_rules_for` (ADR-0007).
-fn namibia_synthetic() -> PayeTable {
+fn paye_2024_march() -> PayeTable {
     PayeTable::new(
-        PayeTableId::new("namibia-synthetic"),
-        paye_bands(),
-        date(2025, 3, 1),
-        EffectivePeriod::new(date(2025, 3, 1), None).unwrap(),
+        PayeTableId::new("paye-2024-03"),
+        paye_2024_march_bands(),
+        date(2024, 3, 1),
+        EffectivePeriod::new(date(2024, 3, 1), None).unwrap(),
     )
-    .expect("namibia-synthetic is a known-valid statutory constant")
+    .expect("paye-2024-03 is a known-valid statutory constant")
 }
 
 /// Every `PayeTable` Salt ships, as typed Rust constants (ADR-0003) —
 /// never rows loaded from anywhere. Adding a table means adding an entry
 /// here, which is a release.
-static KNOWN_PAYE_TABLES: LazyLock<[PayeTable; 1]> = LazyLock::new(|| [namibia_synthetic()]);
+static KNOWN_PAYE_TABLES: LazyLock<[PayeTable; 1]> = LazyLock::new(|| [paye_2024_march()]);
 
 /// SSC ceiling N$11,000/month from 1 March 2025 to 31 August 2026
 /// (`docs/conformance/ssc-2025-03.md`).
@@ -68,7 +66,8 @@ fn ssc_2025_march() -> SscRuleset {
     .expect("ssc-2025-03 is a known-valid statutory constant")
 }
 
-/// SSC ceiling N$12,500/month from the September 2026 payroll, open-ended
+/// SSC ceiling N$12,500/month from the September 2026 payroll through
+/// February 2027
 /// (`docs/conformance/ssc-2026-09.md`). Government Notice 236 states a
 /// legal effective date of 1 March 2026, but was gazetted 15 July 2026 —
 /// after that date — and the Social Security Commission confirmed
@@ -84,16 +83,68 @@ fn ssc_2026_september() -> SscRuleset {
         money(50_000),
         money(1_250_000),
         date(2026, 3, 1),
-        EffectivePeriod::new(date(2026, 9, 1), None).unwrap(),
+        EffectivePeriod::new(date(2026, 9, 1), Some(date(2027, 2, 28))).unwrap(),
     )
     .expect("ssc-2026-09 is a known-valid statutory constant")
+}
+
+/// SSC ceiling N$14,000/month from March 2027 through February 2028
+/// (`docs/conformance/ssc-2027-03.md`).
+fn ssc_2027_march() -> SscRuleset {
+    SscRuleset::new(
+        SscRulesId::new("ssc-2027-03"),
+        Decimal::new(9, 3),
+        Decimal::new(9, 3),
+        money(50_000),
+        money(1_400_000),
+        date(2027, 3, 1),
+        EffectivePeriod::new(date(2027, 3, 1), Some(date(2028, 2, 29))).unwrap(),
+    )
+    .expect("ssc-2027-03 is a known-valid statutory constant")
+}
+
+/// SSC ceiling N$15,000/month from March 2028 through February 2029
+/// (`docs/conformance/ssc-2028-03.md`).
+fn ssc_2028_march() -> SscRuleset {
+    SscRuleset::new(
+        SscRulesId::new("ssc-2028-03"),
+        Decimal::new(9, 3),
+        Decimal::new(9, 3),
+        money(50_000),
+        money(1_500_000),
+        date(2028, 3, 1),
+        EffectivePeriod::new(date(2028, 3, 1), Some(date(2029, 2, 28))).unwrap(),
+    )
+    .expect("ssc-2028-03 is a known-valid statutory constant")
+}
+
+/// SSC ceiling N$16,000/month from March 2029, open-ended
+/// (`docs/conformance/ssc-2029-03.md`).
+fn ssc_2029_march() -> SscRuleset {
+    SscRuleset::new(
+        SscRulesId::new("ssc-2029-03"),
+        Decimal::new(9, 3),
+        Decimal::new(9, 3),
+        money(50_000),
+        money(1_600_000),
+        date(2029, 3, 1),
+        EffectivePeriod::new(date(2029, 3, 1), None).unwrap(),
+    )
+    .expect("ssc-2029-03 is a known-valid statutory constant")
 }
 
 /// Every `SscRuleset` Salt ships, as typed Rust constants (ADR-0003) —
 /// never rows loaded from anywhere. Adding a ruleset means adding an entry
 /// here, which is a release.
-static KNOWN_SSC_RULESETS: LazyLock<[SscRuleset; 2]> =
-    LazyLock::new(|| [ssc_2025_march(), ssc_2026_september()]);
+static KNOWN_SSC_RULESETS: LazyLock<[SscRuleset; 5]> = LazyLock::new(|| {
+    [
+        ssc_2025_march(),
+        ssc_2026_september(),
+        ssc_2027_march(),
+        ssc_2028_march(),
+        ssc_2029_march(),
+    ]
+});
 
 /// A catalogue entry that resolves on its own `payroll_applicability`
 /// interval. Implemented once for `PayeTable` and once for `SscRuleset` so
@@ -212,6 +263,375 @@ pub fn ruleset_for(period_end: NaiveDate) -> Result<PayrollRules, PayrollError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::earning::{Earning, RemunerationBases};
+    use std::path::Path;
+
+    #[derive(Debug, Clone, Copy)]
+    struct StatutoryPayeCase {
+        id: &'static str,
+        rule_id: &'static str,
+        annual_taxable: Money,
+        expected_tax: Decimal,
+    }
+
+    fn statutory_paye_cases() -> [StatutoryPayeCase; 13] {
+        [
+            StatutoryPayeCase {
+                id: "SC-PAYE-001",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(10_000_000),
+                expected_tax: Decimal::new(0, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-002",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(15_000_000),
+                expected_tax: Decimal::new(9_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-003",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(35_000_000),
+                expected_tax: Decimal::new(59_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-004",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(55_000_000),
+                expected_tax: Decimal::new(115_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-005",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(85_000_000),
+                expected_tax: Decimal::new(205_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-006",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(155_000_000),
+                expected_tax: Decimal::new(429_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-007",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(165_000_000),
+                expected_tax: Decimal::new(466_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-008",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(12_000_000),
+                expected_tax: Decimal::new(3_600, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-009",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(25_000_000),
+                expected_tax: Decimal::new(34_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-010",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(45_000_000),
+                expected_tax: Decimal::new(87_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-011",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(70_000_000),
+                expected_tax: Decimal::new(160_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-012",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(100_000_000),
+                expected_tax: Decimal::new(253_000, 0),
+            },
+            StatutoryPayeCase {
+                id: "SC-PAYE-013",
+                rule_id: "paye-2024-03",
+                annual_taxable: money(200_000_000),
+                expected_tax: Decimal::new(595_500, 0),
+            },
+        ]
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct StatutorySscCase {
+        id: &'static str,
+        rule_id: &'static str,
+        period_end: NaiveDate,
+        basic_pay: Money,
+        taxable_allowance: Option<Money>,
+        expected_per_side: Money,
+    }
+
+    fn statutory_ssc_cases() -> [StatutorySscCase; 7] {
+        [
+            StatutorySscCase {
+                id: "SC-SSC-001",
+                rule_id: "ssc-2025-03",
+                period_end: date(2026, 8, 31),
+                basic_pay: money(10_000),
+                taxable_allowance: None,
+                expected_per_side: money(450),
+            },
+            StatutorySscCase {
+                id: "SC-SSC-002",
+                rule_id: "ssc-2025-03",
+                period_end: date(2026, 8, 31),
+                basic_pay: money(2_000_000),
+                taxable_allowance: None,
+                expected_per_side: money(9_900),
+            },
+            StatutorySscCase {
+                id: "SC-SSC-003",
+                rule_id: "ssc-2026-09",
+                period_end: date(2026, 9, 1),
+                basic_pay: money(2_000_000),
+                taxable_allowance: None,
+                expected_per_side: money(11_250),
+            },
+            StatutorySscCase {
+                id: "SC-SSC-004",
+                rule_id: "ssc-2027-03",
+                period_end: date(2027, 3, 1),
+                basic_pay: money(2_000_000),
+                taxable_allowance: None,
+                expected_per_side: money(12_600),
+            },
+            StatutorySscCase {
+                id: "SC-SSC-005",
+                rule_id: "ssc-2028-03",
+                period_end: date(2028, 3, 1),
+                basic_pay: money(2_000_000),
+                taxable_allowance: None,
+                expected_per_side: money(13_500),
+            },
+            StatutorySscCase {
+                id: "SC-SSC-006",
+                rule_id: "ssc-2029-03",
+                period_end: date(2029, 3, 1),
+                basic_pay: money(2_000_000),
+                taxable_allowance: None,
+                expected_per_side: money(14_400),
+            },
+            StatutorySscCase {
+                id: "SC-SSC-007",
+                rule_id: "ssc-2025-03",
+                period_end: date(2026, 8, 31),
+                basic_pay: money(1_000_000),
+                taxable_allowance: Some(money(2_000_000)),
+                expected_per_side: money(9_000),
+            },
+        ]
+    }
+
+    struct ConformanceEvidence {
+        rule_id: &'static str,
+        provenance_document: &'static str,
+        statutory_case_ids: &'static [&'static str],
+    }
+
+    const CONFORMANCE_EVIDENCE: &[ConformanceEvidence] = &[
+        ConformanceEvidence {
+            rule_id: "paye-2024-03",
+            provenance_document: "docs/conformance/paye-2024-03.md",
+            statutory_case_ids: &[
+                "SC-PAYE-001",
+                "SC-PAYE-002",
+                "SC-PAYE-003",
+                "SC-PAYE-004",
+                "SC-PAYE-005",
+                "SC-PAYE-006",
+                "SC-PAYE-007",
+                "SC-PAYE-008",
+                "SC-PAYE-009",
+                "SC-PAYE-010",
+                "SC-PAYE-011",
+                "SC-PAYE-012",
+                "SC-PAYE-013",
+            ],
+        },
+        ConformanceEvidence {
+            rule_id: "ssc-2025-03",
+            provenance_document: "docs/conformance/ssc-2025-03.md",
+            statutory_case_ids: &["SC-SSC-001", "SC-SSC-002", "SC-SSC-007"],
+        },
+        ConformanceEvidence {
+            rule_id: "ssc-2026-09",
+            provenance_document: "docs/conformance/ssc-2026-09.md",
+            statutory_case_ids: &["SC-SSC-003"],
+        },
+        ConformanceEvidence {
+            rule_id: "ssc-2027-03",
+            provenance_document: "docs/conformance/ssc-2027-03.md",
+            statutory_case_ids: &["SC-SSC-004"],
+        },
+        ConformanceEvidence {
+            rule_id: "ssc-2028-03",
+            provenance_document: "docs/conformance/ssc-2028-03.md",
+            statutory_case_ids: &["SC-SSC-005"],
+        },
+        ConformanceEvidence {
+            rule_id: "ssc-2029-03",
+            provenance_document: "docs/conformance/ssc-2029-03.md",
+            statutory_case_ids: &["SC-SSC-006"],
+        },
+    ];
+
+    #[test]
+    fn statutory_paye_cases_match_the_published_annual_table() {
+        for case in statutory_paye_cases() {
+            let table = paye_table_for(date(2024, 3, 1)).unwrap();
+            assert_eq!(table.id().as_str(), case.rule_id, "{}", case.id);
+            assert_eq!(
+                table.annual_tax(case.annual_taxable).unwrap(),
+                case.expected_tax,
+                "{}",
+                case.id
+            );
+        }
+    }
+
+    #[test]
+    fn statutory_ssc_cases_match_the_published_rates_bases_and_ceilings() {
+        for case in statutory_ssc_cases() {
+            let ruleset = ssc_rules_for(case.period_end).unwrap();
+            assert_eq!(ruleset.id().as_str(), case.rule_id, "{}", case.id);
+
+            let mut earnings = vec![Earning::BasicPay(case.basic_pay)];
+            if let Some(allowance) = case.taxable_allowance {
+                earnings.push(Earning::TaxableAllowance(allowance));
+            }
+            let basic_wage = RemunerationBases::accumulate(&earnings)
+                .unwrap()
+                .social_security();
+            let social_security = ruleset.social_security();
+            let (base, _) = social_security.base(basic_wage);
+            let employee = Money::from_decimal(
+                base.as_decimal()
+                    .checked_mul(social_security.employee_rate())
+                    .unwrap()
+                    .normalize(),
+            )
+            .unwrap();
+            let employer = Money::from_decimal(
+                base.as_decimal()
+                    .checked_mul(social_security.employer_rate())
+                    .unwrap()
+                    .normalize(),
+            )
+            .unwrap();
+
+            assert_eq!(employee, case.expected_per_side, "{} employee", case.id);
+            assert_eq!(employer, case.expected_per_side, "{} employer", case.id);
+        }
+    }
+
+    #[test]
+    fn every_shipped_rule_has_complete_conformance_evidence() {
+        let shipped_ids: Vec<&str> = KNOWN_PAYE_TABLES
+            .iter()
+            .map(|table| table.id().as_str())
+            .chain(
+                KNOWN_SSC_RULESETS
+                    .iter()
+                    .map(|ruleset| ruleset.id().as_str()),
+            )
+            .collect();
+        let paye_cases = statutory_paye_cases();
+        let ssc_cases = statutory_ssc_cases();
+
+        for shipped_id in &shipped_ids {
+            let matching: Vec<&ConformanceEvidence> = CONFORMANCE_EVIDENCE
+                .iter()
+                .filter(|evidence| evidence.rule_id == *shipped_id)
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "shipped rule {shipped_id} must have exactly one evidence entry"
+            );
+        }
+
+        for evidence in CONFORMANCE_EVIDENCE {
+            assert!(
+                shipped_ids.contains(&evidence.rule_id),
+                "evidence names unshipped rule {}",
+                evidence.rule_id
+            );
+            assert!(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(evidence.provenance_document)
+                    .is_file(),
+                "{} is missing its provenance document {}",
+                evidence.rule_id,
+                evidence.provenance_document
+            );
+            assert!(
+                !evidence.statutory_case_ids.is_empty(),
+                "{} has no statutory cases",
+                evidence.rule_id
+            );
+
+            for case_id in evidence.statutory_case_ids {
+                let matching_rule = paye_cases
+                    .iter()
+                    .find(|case| case.id == *case_id)
+                    .map(|case| case.rule_id)
+                    .or_else(|| {
+                        ssc_cases
+                            .iter()
+                            .find(|case| case.id == *case_id)
+                            .map(|case| case.rule_id)
+                    });
+                assert_eq!(
+                    matching_rule,
+                    Some(evidence.rule_id),
+                    "{} names missing or mismatched statutory case {case_id}",
+                    evidence.rule_id
+                );
+            }
+        }
+
+        for case_id in paye_cases
+            .iter()
+            .map(|case| case.id)
+            .chain(ssc_cases.iter().map(|case| case.id))
+        {
+            assert_eq!(
+                CONFORMANCE_EVIDENCE
+                    .iter()
+                    .filter(|evidence| evidence.statutory_case_ids.contains(&case_id))
+                    .count(),
+                1,
+                "statutory case {case_id} must prove exactly one shipped rule"
+            );
+        }
+    }
+
+    fn synthetic_paye_bands() -> Vec<PayeBand> {
+        vec![
+            PayeBand::new(money(0), Decimal::new(0, 2)).unwrap(),
+            PayeBand::new(money(12_000_000), Decimal::new(20, 2)).unwrap(),
+            PayeBand::new(money(24_000_000), Decimal::new(30, 2)).unwrap(),
+            PayeBand::new(money(48_000_000), Decimal::new(40, 2)).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn algorithm_synthetic_paye_bands_are_unreachable_through_production_resolvers() {
+        for table in &*KNOWN_PAYE_TABLES {
+            assert_ne!(table.bands(), synthetic_paye_bands());
+            assert_ne!(table.id().as_str(), "namibia-synthetic");
+        }
+        assert_eq!(
+            paye_table_for(date(2024, 3, 1)).unwrap().id().as_str(),
+            "paye-2024-03"
+        );
+    }
 
     #[test]
     fn resolves_the_ceiling_in_force_before_the_september_change() {
@@ -231,7 +651,7 @@ mod tests {
     // change, but `ssc_rules_for` is keyed on the period end alone — there
     // is structurally no way for it to split the period pro-rata.
     #[test]
-    fn a_period_straddling_the_change_uses_the_ruleset_of_its_end_date() {
+    fn salt_policy_a_period_straddling_the_change_uses_the_ruleset_of_its_end_date() {
         let period_end = date(2026, 9, 25);
         let rules = ruleset_for(period_end).unwrap();
         assert_eq!(rules.ssc_ruleset().id().as_str(), "ssc-2026-09");
@@ -274,7 +694,7 @@ mod tests {
     fn paye_table_fixture(id: &str, applicability: EffectivePeriod) -> PayeTable {
         PayeTable::new(
             PayeTableId::new(id),
-            paye_bands(),
+            synthetic_paye_bands(),
             applicability.from(),
             applicability,
         )
@@ -343,10 +763,10 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_day_before_the_earliest_known_entry_starts() {
+    fn refuses_the_day_before_the_earliest_ssc_ruleset_starts() {
         assert_eq!(
             ruleset_for(date(2025, 2, 28)),
-            Err(PayrollError::NoPayeTableCoversDate {
+            Err(PayrollError::NoSscRulesetCoversDate {
                 date: date(2025, 2, 28)
             })
         );
@@ -458,7 +878,7 @@ mod tests {
     #[test]
     fn ruleset_for_records_both_ids_it_resolved() {
         let rules = ruleset_for(date(2026, 9, 1)).unwrap();
-        assert_eq!(rules.paye_table().id().as_str(), "namibia-synthetic");
+        assert_eq!(rules.paye_table().id().as_str(), "paye-2024-03");
         assert_eq!(rules.ssc_ruleset().id().as_str(), "ssc-2026-09");
     }
 
