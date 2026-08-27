@@ -1,3 +1,22 @@
 [workspace]
 resolver = "3"
 members = ["crates/payroll", "crates/payroll-app"]
+
+# Edition and version live here so a second crate cannot drift onto a
+# different edition than the one the pure crate is written against.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# INV-001 (money is exact decimal, never `f32`/`f64`) is enforced for every
+# member, not only the crate that happens to remember the attribute.
+# `clippy.toml` beside this file names the banned types; these lines are what
+# turn that configuration, and float arithmetic on inferred types, into build
+# failures. Both halves are needed: `disallowed_types` catches an annotated
+# `f64`, `float_arithmetic` catches `let rate = 0.175;`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+disallowed_types = "warn"
+float_arithmetic = "warn"

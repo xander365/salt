@@ -23,10 +23,10 @@ The pure `PayrollRules` value carries the numbers and the two dates. It does not
 ## Notes
 ```
 
-The case ids are not decoration. A `ConformanceEvidence` entry in the code names this document and those ids, and the verification suite fails if the document is missing, if no id is named, or if a named id does not exist in the statutory case catalogue (ADR-0008). The cases themselves are listed in `docs/domain/statutory-conformance.md` §7.
+The case ids are not decoration. A `ConformanceEvidence` entry in the code names this document and those ids, and the verification suite fails if the document is missing, if no id is named, or if a named id does not exist in the statutory case catalogue (ADR-0008). The cases themselves are listed in the workspace root's `docs/domain/statutory-conformance.md` §7.
 
 `legal_effective_from` and `payroll_effective_from` are usually the same date. When they differ — a gazette published after its own stated effective date, a regulator deferring implementation — the Notes section must say why (ADR-0007).
 
-Open questions that no source answers do **not** live here. They live in `docs/domain/statutory-conformance.md` §4 with a `NEEDS ... CONFIRMATION` stamp.
+Open questions that no source answers do **not** live here. They live in the workspace root's `docs/domain/statutory-conformance.md` §4 with a `NEEDS ... CONFIRMATION` stamp.
 
 **What a provenance file does not cover.** These files trace a *value* and its *dates*. They say nothing about how Salt derives one period's figure from an annual table (SC-OPEN-1), how Salt rounds an output (SC-OPEN-2), how Salt treats a part-month joiner against a monthly floor or ceiling (SC-OPEN-3), or how `PeriodsElapsed` is interpreted. Those are Salt policy, tested `salt_policy_*`, and citing a file here as authority for any of them is exactly the confusion ADR-0008 exists to prevent.

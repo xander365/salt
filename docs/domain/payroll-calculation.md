@@ -16,7 +16,7 @@ Companion documents:
 - `CONTEXT.md` — the glossary. Every term below is defined there.
 - `docs/adr/0001`–`0008` — the decisions that were hard to reverse, with their rejected alternatives.
 - `docs/domain/statutory-conformance.md` — **amends this document.** It settles which of these rules are Namibian law, which are Salt's own policy, and what nobody has published an answer to.
-- `docs/conformance/` — one provenance file per shipped rule table.
+- `crates/payroll/docs/conformance/` — one provenance file per shipped rule table, inside the pure crate beside the code it proves (ADR-0009).
 
 > **Amended by the statutory conformance grill of 2026-08-24.** Where this document and `statutory-conformance.md` disagree, that one wins. Five changes reach into the model below: `NonTaxableAllowance` is removed (§5.3 there); `RulesetId` is replaced by a `PayeTableId` and an `SscRulesId` on separate effective-date axes, and `ruleset_for` returns an owned composed value (ADR-0007); `YearToDateContext` gains a three-valued `PriorEmployment` fact that refuses on both `Unknown` **and** `Some` while SC-OPEN-4 is open (ADR-0001); `PayrollInput` gains an `UnsupportedDeductionStatus` knowledge state that refuses on `Present` and `Unknown`; and statutory annual band arithmetic is exposed as an exact **unrounded** seam so no statutory claim depends on Salt's rounding policy. Sections below are marked where they are superseded.
 

@@ -50,13 +50,16 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy --all-targets -- -D warnings
-        run: cargo clippy --all-targets -- -D warnings
+        # --locked so CI compiles the dependency versions in the committed
+        # Cargo.lock. Without it a fresh resolve can turn this suite green on
+        # code the repository does not contain.
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test
         # --no-fail-fast so every failing gate reports, rather than only the
         # first. Test output is never quietened: the assertion naming the
         # shipped rule id that lost its evidence is the point of the run.
-        run: cargo test --no-fail-fast
+        run: cargo test --locked --no-fail-fast
 
       - name: cargo doc --no-deps
-        run: cargo doc --no-deps
+        run: cargo doc --locked --no-deps

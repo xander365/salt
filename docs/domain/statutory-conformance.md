@@ -32,7 +32,7 @@ Companion documents:
 
 - `CONTEXT.md` — the glossary.
 - `docs/adr/0001`–`0008` — the decisions, with their rejected alternatives.
-- `docs/conformance/` — one provenance file per shipped rule table.
+- `crates/payroll/docs/conformance/` — one provenance file per shipped rule table, inside the pure crate beside the code it proves (ADR-0009).
 
 ### The distinction this document exists to enforce
 
@@ -82,7 +82,7 @@ Effective **1 March 2024**, still the current table for the 2026/27 year of asse
 
 Verified internally consistent: each band's base amount equals the cumulative tax at the band below it (`9,000 = 18% × 50,000`; `59,000 = 9,000 + 25% × 200,000`; and so on through `429,000`).
 
-Sources: `docs/conformance/paye-2024-03.md`.
+Sources: `crates/payroll/docs/conformance/paye-2024-03.md`.
 
 **Note on the NamRA brochure.** The brochure's sixth row prints "Exceeds N$ 800 000". Every other source, and the table's own internal arithmetic, gives **N$ 850,000**. Salt implements N$850,000 and records the discrepancy here.
 
@@ -131,7 +131,7 @@ Ceiling schedule:
 
 **Legal date versus operational date.** Government Notice 236 (Gazette 8975) states an effective date of **1 March 2026** but was only gazetted on **15 July 2026**. The SSC confirmed the increase is implemented from the **September 2026** payroll, with no retrospective March–August adjustment. Salt stores both dates — see §5.4 and ADR-0007.
 
-Sources: `docs/conformance/ssc-2026-09.md` and the other SSC provenance files.
+Sources: `crates/payroll/docs/conformance/ssc-2026-09.md` and the other SSC provenance files.
 
 ### 3.5 Deductions Salt does not support
 
@@ -240,7 +240,7 @@ legal_effective_from       what the instrument says
 payroll_effective_from     what payroll actually applies
 ```
 
-For the September 2026 SSC ceiling these differ (1 March 2026 versus 1 September 2026), and the difference is a genuine calculation input, not a footnote. Source URLs and prose stay in `docs/conformance/`, not in the pure calculation value.
+For the September 2026 SSC ceiling these differ (1 March 2026 versus 1 September 2026), and the difference is a genuine calculation input, not a footnote. Source URLs and prose stay in `crates/payroll/docs/conformance/`, not in the pure calculation value.
 
 Recorded in ADR-0007.
 
@@ -424,7 +424,7 @@ They may also serve as the rules fixture underneath a `salt_policy_*` test, and 
 
 ### The conformance gate — explicit evidence
 
-A shipped `PayeTableId` or `SscRulesId` must have **both** a provenance document in `docs/conformance/` and at least one statutory golden case, or **the verification suite fails** — `cargo test`, and CI with it. Not `cargo build`.
+A shipped `PayeTableId` or `SscRulesId` must have **both** a provenance document in `crates/payroll/docs/conformance/` and at least one statutory golden case, or **the verification suite fails** — `cargo test`, and CI with it. Not `cargo build`.
 
 The mechanism is an explicit evidence catalogue, not a scan of source files or test names. Renaming a test must not be able to break or satisfy a compliance check:
 
