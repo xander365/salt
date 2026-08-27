@@ -124,9 +124,17 @@ _Avoid_: Request, payload, context
 The result of calculating one Employment for one PayPeriod. Provisional until finalized.
 _Avoid_: Payslip, result, output
 
+**WorkingCalculation**:
+The single latest PayrollCalculation held for one Employment in one PayrollRun before finalization. Replaceable by design — recalculating overwrites it, and it is never history.
+_Avoid_: Draft payslip, provisional calculation, pending payroll
+
 **PayrollRun**:
-The Employer's act of paying a set of Employments for one PayPeriod. Carries the pay date and moves through Draft, Calculated, Reviewed, Finalized.
+The Employer's act of paying a set of Employments for one PayPeriod. Carries the pay date and moves through Draft, Calculated, Finalized. There is no Reviewed state: finalizing is itself the deliberate approval.
 _Avoid_: Payroll, batch, cycle
+
+**CorrectionRun**:
+A PayrollRun that carries a Replacement for a PayPeriod already finalized. Distinct from the one Ordinary run a PayPeriod may have, and the reason an Employer may have more than one run for the same PayPeriod.
+_Avoid_: Adjustment run, re-run, supplementary payroll
 
 **FinalizedPayroll**:
 An immutable record of a PayrollCalculation the Employer has committed to, stored with the exact PayrollInput and PayrollRules that produced it.
@@ -135,6 +143,22 @@ _Avoid_: Closed payroll, posted payroll, history
 **Reversal**:
 An explicit record that cancels one FinalizedPayroll. A correction is a Reversal followed by a replacement calculation; a FinalizedPayroll is never edited.
 _Avoid_: Void, undo, rollback, amendment
+
+**Live**:
+Said of the one FinalizedPayroll that currently counts for an Employment and PayPeriod. A Reversal takes a record out of the live set; a Replacement puts one back. Only live records feed YearToDateContext.
+_Avoid_: Active, current, valid, unreversed
+
+**Replacement**:
+The FinalizedPayroll that takes a reversed one's place for the same Employment and PayPeriod. Optional — a Reversal on its own is complete. It names the record it replaces.
+_Avoid_: Correction, redo, amended payroll
+
+**SaltVersion**:
+The identifier of the Salt release that produced a FinalizedPayroll, recorded so a future maintainer can find the exact code behind a historical figure.
+_Avoid_: Build number, app version, release tag
+
+**ActionLog**:
+The append-only record of who did what and when. Separate from payroll history, which is the immutable records themselves.
+_Avoid_: Audit trail, event log, history
 
 **Payslip**:
 A statutory statement rendered from a FinalizedPayroll. A view, never a source of truth.
