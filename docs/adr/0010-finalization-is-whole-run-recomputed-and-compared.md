@@ -8,11 +8,18 @@ A `PayrollRun` moves through `Draft → Calculated → Finalized`. There is **no
 
 **Recomputing replaces every staleness mechanism.** The danger is ordinary: a user looks at a number, someone edits a salary or an opening balance, the user presses Finalize, and a figure nobody ever saw becomes permanent history. Recomputing under current facts and requiring equality with the approved calculation establishes the property directly — *the calculation that becomes history is exactly the one the user approved, under facts that are still current.* On mismatch, Salt refuses, names what changed, and requires a fresh calculation the user looks at again.
 
-That is why there is no fingerprint, no revision counter, and no dependency-version tracking on `WorkingCalculation`. Those exist to detect staleness; recomputing *is* the detection, and it cannot miss a dependency nobody thought to fingerprint. The comparison is one `==` — `PayrollCalculation` already derives `PartialEq`.
+That is why there is no fingerprint, no revision counter, and no dependency-version tracking on `WorkingCalculation`. Those exist to detect staleness; recomputing *is* the detection, and it cannot miss a dependency nobody thought to fingerprint.
+
+**Amended: the comparison is on all three frozen values, not the calculation alone.** Finalization reassembles the `PayrollInput` from current facts, re-resolves the `PayrollRules` via `ruleset_for(period.end)`, and recomputes the `PayrollCalculation` — and requires all three to equal what the `WorkingCalculation` stores.
+
+Comparing only the output is not enough, and the failure is specific. A `FinalizedPayroll` freezes the input and the rules as well as the result (ADR-0004), and all three are what a future reader is shown. A PAYE table corrected in a band this employee never reaches, or a `CompensationTerms` `effective_from` fixed without touching `BasicPay`, produces a monetary output identical to the cent. Under an output-only comparison Salt would write a `payroll_rules_json` or a `payroll_input_json` into permanent history that nobody approved and no screen ever showed: the result correct, the explanation a fabrication, and INV-005 broken on a row that looks perfect.
+
+It costs nothing. `PayrollInput`, `PayrollRules` and `PayrollCalculation` each already derive `PartialEq + Eq`. It is three `==`, not one.
 
 ## Consequences
 
 - `Calculated` means **every** member has a current successful calculation. A partially calculated run is still `Draft`.
 - `WorkingCalculation` needs no revision or fingerprint column, and recalculation may overwrite input, rules and result freely.
 - Finalization is the only place the calculator runs against a transaction, and it runs once per member inside it.
-- A run whose recompute disagrees is not an error to route around: it is the mechanism working. The refusal must name the changed fact, or users will learn to distrust it.
+- A run whose recompute disagrees is not an error to route around: it is the mechanism working. The refusal must name **which of the three** differed and what changed inside it, or users will learn to distrust it.
+- A rule or input change that coincidentally produces the same monetary output still invalidates the approved working calculation. That is intended, not an over-strictness to relax.

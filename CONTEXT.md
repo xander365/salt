@@ -21,7 +21,7 @@ _Avoid_: Employee, staff member, contract
 ### Compensation
 
 **CompensationTerms**:
-What an Employment agrees to pay, valid over a stated effective period. Never a mutable "current salary" field.
+What an Employment agrees to pay, valid over a stated effective period. Never a mutable "current salary" field. Master data, not history — correctable with a stated reason even after payroll has been paid against it, because a FinalizedPayroll explains itself and never looks back at these.
 _Avoid_: Salary, package, remuneration terms
 
 **BasicPay**:
@@ -99,8 +99,12 @@ Whether the Person had taxable employment with **another Employer** earlier in t
 _Avoid_: Previous employer, prior income, opening balance
 
 **OpeningBalance**:
-The TaxYear figures **this same Employment** carries into Salt when an Employer adopts Salt mid-year. A starting point for year-to-date, never a running total. Never the same thing as PriorEmployment.
+The TaxYear figures **this same Employment** carries into Salt when an Employer adopts Salt mid-year, together with the SaltCoverageStart they run up to. An affirmative statement someone makes, never a default Salt writes. A starting point for year-to-date, never a running total. Never the same thing as PriorEmployment.
 _Avoid_: Opening figures, migration balance, carry-forward
+
+**SaltCoverageStart**:
+The first PayPeriod Salt is responsible for, for one Employment in one TaxYear. Every earlier period of that TaxYear is pre-Salt and accounted for inside the OpeningBalance. Recorded once and frozen, which is what separates a legitimate mid-year adoption from a period an Employer simply forgot to process.
+_Avoid_: Go-live date, adoption date, migration cutoff
 
 **UnsupportedDeductionStatus**:
 What is known about statutory deductions Salt cannot calculate. Three-valued: confirmed none, present with named kinds, or unknown. Present and unknown are both refused. Distinct from a Deduction, which is an amount actually withheld.
@@ -133,11 +137,11 @@ The Employer's act of paying a set of Employments for one PayPeriod. Carries the
 _Avoid_: Payroll, batch, cycle
 
 **CorrectionRun**:
-A PayrollRun that carries a Replacement for a PayPeriod already finalized. Distinct from the one Ordinary run a PayPeriod may have, and the reason an Employer may have more than one run for the same PayPeriod.
+A PayrollRun that puts right one Employment's payroll for a PayPeriod already finalized. Distinct from the one Ordinary run a PayPeriod may have, and the reason an Employer may have more than one run for the same PayPeriod. Holds exactly one Employment, chosen deliberately — an Ordinary run proposes everyone and makes exclusion the deliberate act; a CorrectionRun proposes nobody and makes inclusion the deliberate act. Always carries a stated reason.
 _Avoid_: Adjustment run, re-run, supplementary payroll
 
 **FinalizedPayroll**:
-An immutable record of a PayrollCalculation the Employer has committed to, stored with the exact PayrollInput and PayrollRules that produced it.
+An immutable record of a PayrollCalculation the Employer has committed to, stored with the exact PayrollInput and PayrollRules that produced it. The **sole** explanation of that payroll — nothing about it is ever rebuilt from what the master records say today.
 _Avoid_: Closed payroll, posted payroll, history
 
 **Reversal**:
@@ -149,8 +153,12 @@ Said of the one FinalizedPayroll that currently counts for an Employment and Pay
 _Avoid_: Active, current, valid, unreversed
 
 **Replacement**:
-The FinalizedPayroll that takes a reversed one's place for the same Employment and PayPeriod. Optional — a Reversal on its own is complete. It names the record it replaces.
+The FinalizedPayroll that takes a reversed one's place for the same Employment and PayPeriod. Optional — a Reversal on its own is complete. It names the record it replaces, and each reversed record is replaced at most once, so repeated corrections read as a chain. A CorrectionRun that pays someone wrongly left out of a finalized run has nothing to name, and states its reason instead.
 _Avoid_: Correction, redo, amended payroll
+
+**Resolved**:
+Said of a PayPeriod for one Employment when Salt holds an affirmative account of it: the Employment did not yet exist, the period is before the SaltCoverageStart, a live FinalizedPayroll exists, or someone recorded with a reason that no payroll was owed. Absence of a record never resolves a period — that is the gap Salt refuses to let disappear quietly.
+_Avoid_: Closed, complete, done, processed
 
 **SaltVersion**:
 The identifier of the Salt release that produced a FinalizedPayroll, recorded so a future maintainer can find the exact code behind a historical figure.
