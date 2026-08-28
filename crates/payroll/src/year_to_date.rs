@@ -56,6 +56,9 @@ impl std::fmt::Display for InvalidPeriodsElapsed {
 
 impl std::error::Error for InvalidPeriodsElapsed {}
 
+/// The calendar month a `TaxYear` starts in (ADR-0005).
+const MARCH: u32 = 3;
+
 impl PeriodsElapsed {
     /// No period of this TaxYear is complete yet.
     pub const NONE: PeriodsElapsed = PeriodsElapsed(0);
@@ -73,20 +76,36 @@ impl PeriodsElapsed {
     }
 
     /// The position a `PayPeriod` occupies in its own `TaxYear`, derived
-    /// from the period's end date alone — see the warning on this type for
-    /// what that position is and is not.
+    /// from the period end date alone — see the warning on this type for
+    /// what that position is and is not. In particular this is the
+    /// position, so a period end date derives it identically whether the
+    /// Employment has been paid eight times before or never.
     ///
-    /// `TaxYear::for_period_end` places every period end date in exactly
-    /// one of the tax year's twelve calendar months, so the position is
-    /// always representable and this never fails.
+    /// This is the only derivation of `PeriodsElapsed` anything outside
+    /// this crate should need (ADR-0009). Counting stored payroll records
+    /// is the wrong reading, and it is wrong in the direction the warning
+    /// on this type describes.
+    ///
+    /// Infallible, in the sense ADR-0007 uses: the invariant is already
+    /// enforced by whoever built the date. `TaxYear::for_period_end`
+    /// assigns every date to the tax year whose March it falls on or
+    /// after, counting January and February back to the previous March
+    /// (ADR-0005), so a period end date is always 0 to 11 whole months
+    /// after its own tax year's start. There is consequently no date this
+    /// can refuse — and none it may quietly clamp or wrap either, which
+    /// is why the conversion below is checked rather than a cast.
     pub fn from_period_end(period_end: NaiveDate) -> Self {
         let tax_year = TaxYear::for_period_end(period_end);
-        let months_since_march =
-            (period_end.year() - tax_year.starting_year()) * 12 + period_end.month() as i32 - 3;
-        let elapsed = u8::try_from(months_since_march)
-            .expect("a PayPeriod end date's position in its own TaxYear is always 0..=11");
-        PeriodsElapsed::new(elapsed)
-            .expect("a PayPeriod end date's position in its own TaxYear is always 0..=11")
+
+        // 0 for a March-to-December date, 1 for the January or February
+        // that `for_period_end` assigned back to the previous March.
+        let years_after_start = period_end.year() - tax_year.starting_year();
+        let months_after_start = years_after_start * 12 + period_end.month() as i32 - MARCH as i32;
+
+        u8::try_from(months_after_start)
+            .ok()
+            .and_then(|months| PeriodsElapsed::new(months).ok())
+            .expect("TaxYear::for_period_end places a date 0..=11 months after its TaxYear's March")
     }
 
     /// Which period of the TaxYear is being calculated, counting the
@@ -262,6 +281,7 @@ impl YearToDateContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pay_schedule::{DayOfMonth, Month, PaySchedule, PeriodEndDay};
 
     #[test]
     fn periods_elapsed_accepts_0_to_11() {
@@ -290,6 +310,9 @@ mod tests {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
     }
 
+    // A 26 February to 25 March period ends in the new TaxYear
+    // (ADR-0005), so its position is that year's first and not the
+    // previous year's last.
     #[test]
     fn the_first_period_of_a_tax_year_has_position_zero() {
         assert_eq!(
@@ -319,14 +342,78 @@ mod tests {
 
     // The whole point of this constructor is that it reads position, never
     // a count of what has been paid. A September end date yields position 6
-    // even for an Employment that has never been paid before — an October
-    // joiner's very first payroll run is not position 0.
+    // even for an Employment that has never been paid before — a September
+    // joiner's very first payroll run is not position 0. Nothing about the
+    // Employment is even in scope: the date is the only argument there is.
     #[test]
     fn from_period_end_is_a_position_not_a_count_of_periods_paid() {
         let first_ever_run_for_a_september_joiner = date(2026, 9, 25);
         assert_eq!(
             PeriodsElapsed::from_period_end(first_ever_run_for_a_september_joiner),
             PeriodsElapsed::new(6).unwrap()
+        );
+    }
+
+    // The position is read off the period end date and nothing else. The
+    // day of the month a schedule happens to use must not move it, or two
+    // Employers running the same month would scale the PAYE bands
+    // differently.
+    #[test]
+    fn the_day_of_the_month_a_period_ends_on_does_not_change_its_position() {
+        for day in [1, 15, 25, 30] {
+            assert_eq!(
+                PeriodsElapsed::from_period_end(date(2026, 9, day)),
+                PeriodsElapsed::new(6).unwrap(),
+                "day {day}"
+            );
+        }
+    }
+
+    // The refusal this constructor owes is that no date may be clamped
+    // into range or wrapped around it. Asserting that on twelve chosen
+    // dates would only restate the arithmetic, so the schedule that
+    // actually generates period end dates is asked instead: its twelve
+    // periods must land on twelve distinct positions covering 0..=11
+    // exactly, with nothing over the end and nothing folded back onto a
+    // position already taken.
+    #[test]
+    fn a_tax_years_generated_periods_take_each_position_from_zero_to_eleven_once() {
+        assert_positions_cover_the_tax_year(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()));
+        assert_positions_cover_the_tax_year(PeriodEndDay::LastDayOfMonth);
+    }
+
+    fn assert_positions_cover_the_tax_year(end_day: PeriodEndDay) {
+        let schedule = PaySchedule::new(end_day);
+        // Three tax years are generated so that a period leaking across
+        // either boundary would show up as a missing or a duplicated
+        // position in the year under test rather than passing unseen.
+        let periods = schedule
+            .generate_periods(2025, Month::new(3).unwrap(), 36)
+            .unwrap();
+        let tax_year = TaxYear::starting(2026);
+
+        let mut positions: Vec<u8> = periods
+            .iter()
+            .filter(|period| TaxYear::for_period_end(period.end()) == tax_year)
+            .map(|period| PeriodsElapsed::from_period_end(period.end()).get())
+            .collect();
+        positions.sort_unstable();
+
+        assert_eq!(positions, (0..=11).collect::<Vec<u8>>(), "{end_day:?}");
+    }
+
+    // ADR-0001 scales the annual band thresholds by period_number/12, so
+    // a derived position must yield a period number in 1..=12 and reach
+    // the full annual table in February and not before.
+    #[test]
+    fn a_derived_position_yields_a_period_number_of_one_through_twelve() {
+        assert_eq!(
+            PeriodsElapsed::from_period_end(date(2026, 3, 25)).period_number(),
+            1
+        );
+        assert_eq!(
+            PeriodsElapsed::from_period_end(date(2027, 2, 25)).period_number(),
+            12
         );
     }
 
