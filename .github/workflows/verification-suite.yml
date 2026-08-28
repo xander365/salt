@@ -70,27 +70,65 @@ jobs:
         # uncommitted changes would record a SHA the code does not match, so
         # crates/payroll-app/build.rs must fail the build. Proved here rather
         # than claimed in a comment.
+        #
+        # Both dirty files are deliberate. Cargo caches a successful build
+        # script run, so the gate is only as good as what build.rs watches:
+        # a file under crates/ is the obvious case, and a file outside it is
+        # the one a narrower watch would wave through.
         run: |
-          # First cache a clean release build. The following source edit must
-          # still rerun build.rs rather than reuse its clean-tree result.
-          cargo build --release --locked -p payroll-app
-          echo "// dirtying the tree to prove the release-build gate" >> crates/payroll-app/src/lib.rs
-          if cargo build --release --locked -p payroll-app 2>build.log; then
-            echo "release build unexpectedly succeeded from a dirty working tree" >&2
-            cat build.log
-            exit 1
-          fi
-          grep -qi "dirty working tree" build.log || {
-            echo "the build failure did not name the dirty working tree as the cause" >&2
-            cat build.log
-            exit 1
+          set -euo pipefail
+          refuses_release_build() {
+            # First cache a clean release build. The source edit that follows
+            # must still rerun build.rs rather than reuse its clean-tree result.
+            git checkout -- .
+            cargo build --release --locked -p payroll-app
+            echo "$2" >> "$1"
+            if cargo build --release --locked -p payroll-app 2>build.log; then
+              echo "release build unexpectedly succeeded with $1 dirty" >&2
+              cat build.log
+              exit 1
+            fi
+            if ! grep -qi "dirty working tree" build.log; then
+              echo "the build failure did not name the dirty working tree as the cause" >&2
+              cat build.log
+              exit 1
+            fi
+            rm build.log
+            git checkout -- "$1"
           }
-          rm build.log
-          git checkout -- crates/payroll-app/src/lib.rs
+          refuses_release_build crates/payroll-app/src/lib.rs \
+            "// dirtying a watched crate source to prove the release-build gate"
+          refuses_release_build CONTEXT.md \
+            "<!-- dirtying a file outside crates/ to prove the same gate -->"
 
       - name: Prove a debug build tolerates a dirty working tree
         # Ordinary development must not be blocked by the same gate.
         run: |
+          set -euo pipefail
           echo "// dirtying the tree to prove the debug build is not blocked" >> crates/payroll-app/src/lib.rs
           cargo build --locked -p payroll-app
           git checkout -- crates/payroll-app/src/lib.rs
+
+      - name: Prove the stamped SaltVersion follows HEAD
+        # The other half of "the SHA is not a lie". A clean tree that gains a
+        # commit changes no source file, so a build script watching only source
+        # would keep stamping the previous commit — a release binary honestly
+        # built from a clean tree, naming the wrong code.
+        run: |
+          set -euo pipefail
+          before="$(cargo run --locked -q -p payroll-app --example salt_version)"
+          git -c user.name=verification-suite -c user.email=ci@example.invalid \
+            commit --allow-empty -q -m "prove SaltVersion tracks HEAD"
+          after="$(cargo run --locked -q -p payroll-app --example salt_version)"
+          # Reuse the semver half rather than hard-coding it, so a version
+          # bump does not silently turn this proof into a false failure.
+          expected="${before%%+*}+g$(git rev-parse --short=8 HEAD)"
+          git reset --hard -q HEAD~1
+          if [ "$after" = "$before" ]; then
+            echo "SaltVersion did not change across a commit: still $after" >&2
+            exit 1
+          fi
+          if [ "$after" != "$expected" ]; then
+            echo "SaltVersion is $after but HEAD says it should be $expected" >&2
+            exit 1
+          fi

@@ -26,24 +26,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn salt_version_is_semver_plus_a_short_git_sha() {
+    fn salt_version_is_the_crate_semver_plus_a_short_git_sha() {
         let (semver, sha_part) = SALT_VERSION
             .split_once('+')
             .expect("SaltVersion must carry a build-metadata segment introduced by '+'");
 
         assert_eq!(
-            semver.chars().filter(|&c| c == '.').count(),
-            2,
-            "expected a semver like 0.1.0, got {semver}"
+            semver,
+            env!("CARGO_PKG_VERSION"),
+            "the quoted half of a SaltVersion must be this crate's own version"
+        );
+        let mut parts = semver.split('.');
+        for field in ["major", "minor", "patch"] {
+            let value = parts
+                .next()
+                .unwrap_or_else(|| panic!("expected a semver like 0.1.0, got {semver}"));
+            assert!(
+                !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
+                "expected a numeric {field} in {semver}"
+            );
+        }
+        assert!(
+            parts.next().is_none(),
+            "expected exactly three semver fields, got {semver}"
+        );
+
+        let sha = sha_part.strip_prefix('g').unwrap_or_else(|| {
+            panic!("expected the git SHA segment to start with 'g', got {sha_part}")
+        });
+        // `git rev-parse --short=8` widens the abbreviation past eight
+        // characters only when eight would be ambiguous, so this is a floor.
+        assert!(
+            sha.len() >= 8,
+            "expected at least an 8-character short SHA, got {sha}"
         );
         assert!(
-            sha_part.starts_with('g'),
-            "expected the git SHA segment to start with 'g', got {sha_part}"
-        );
-        assert_eq!(
-            sha_part.len(),
-            9,
-            "expected 'g' plus an 8-character short SHA, got {sha_part}"
+            sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "expected the SHA segment to be hexadecimal, got {sha}"
         );
     }
 }
