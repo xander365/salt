@@ -71,6 +71,9 @@ jobs:
         # crates/payroll-app/build.rs must fail the build. Proved here rather
         # than claimed in a comment.
         run: |
+          # First cache a clean release build. The following source edit must
+          # still rerun build.rs rather than reuse its clean-tree result.
+          cargo build --release --locked -p payroll-app
           echo "// dirtying the tree to prove the release-build gate" >> crates/payroll-app/src/lib.rs
           if cargo build --release --locked -p payroll-app 2>build.log; then
             echo "release build unexpectedly succeeded from a dirty working tree" >&2

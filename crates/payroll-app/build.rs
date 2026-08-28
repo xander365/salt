@@ -11,6 +11,9 @@
 use std::process::Command;
 
 fn main() {
+    let workspace_root = git_output(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|| {
+        panic!("payroll-app must be built inside a git repository with at least one commit")
+    });
     let sha = git_output(&["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| {
         panic!("payroll-app must be built inside a git repository with at least one commit")
     });
@@ -31,13 +34,14 @@ fn main() {
     let version = env!("CARGO_PKG_VERSION");
     println!("cargo:rustc-env=SALT_VERSION={version}+g{sha}");
 
-    // Rebuild only when the commit or the dirty/clean state can have
-    // changed, not on every invocation. `--git-dir` finds the real `.git`
-    // even if this crate ever moves relative to the workspace root.
-    if let Some(git_dir) = git_output(&["rev-parse", "--git-dir"]) {
-        println!("cargo:rerun-if-changed={git_dir}/HEAD");
-        println!("cargo:rerun-if-changed={git_dir}/index");
-    }
+    // A changed source in either workspace crate changes the linked binary,
+    // but does not necessarily change `.git/HEAD` or `.git/index`: an
+    // unstaged edit must therefore invalidate this build script too. Watching
+    // the source directory avoids watching the workspace root, whose `target/`
+    // output would otherwise rerun this script on every Cargo invocation.
+    println!("cargo:rerun-if-changed={workspace_root}/crates");
+    println!("cargo:rerun-if-changed={workspace_root}/Cargo.toml");
+    println!("cargo:rerun-if-changed={workspace_root}/Cargo.lock");
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
