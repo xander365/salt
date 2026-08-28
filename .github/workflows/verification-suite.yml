@@ -63,3 +63,31 @@ jobs:
 
       - name: cargo doc --no-deps
         run: cargo doc --locked --no-deps
+
+      - name: Prove a release build refuses a dirty working tree
+        # payroll-app's SaltVersion (issue #24) names the exact commit a
+        # historical figure was calculated by. A release binary built from
+        # uncommitted changes would record a SHA the code does not match, so
+        # crates/payroll-app/build.rs must fail the build. Proved here rather
+        # than claimed in a comment.
+        run: |
+          echo "// dirtying the tree to prove the release-build gate" >> crates/payroll-app/src/lib.rs
+          if cargo build --release --locked -p payroll-app 2>build.log; then
+            echo "release build unexpectedly succeeded from a dirty working tree" >&2
+            cat build.log
+            exit 1
+          fi
+          grep -qi "dirty working tree" build.log || {
+            echo "the build failure did not name the dirty working tree as the cause" >&2
+            cat build.log
+            exit 1
+          }
+          rm build.log
+          git checkout -- crates/payroll-app/src/lib.rs
+
+      - name: Prove a debug build tolerates a dirty working tree
+        # Ordinary development must not be blocked by the same gate.
+        run: |
+          echo "// dirtying the tree to prove the debug build is not blocked" >> crates/payroll-app/src/lib.rs
+          cargo build --locked -p payroll-app
+          git checkout -- crates/payroll-app/src/lib.rs
