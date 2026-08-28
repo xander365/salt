@@ -1,6 +1,7 @@
 //! `YearToDateContext`: what has happened so far this TaxYear for one
 //! Employment, supplied to the calculator rather than queried by it.
 
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::money::Money;
@@ -69,6 +70,23 @@ impl PeriodsElapsed {
 
     pub fn get(self) -> u8 {
         self.0
+    }
+
+    /// The position a `PayPeriod` occupies in its own `TaxYear`, derived
+    /// from the period's end date alone — see the warning on this type for
+    /// what that position is and is not.
+    ///
+    /// `TaxYear::for_period_end` places every period end date in exactly
+    /// one of the tax year's twelve calendar months, so the position is
+    /// always representable and this never fails.
+    pub fn from_period_end(period_end: NaiveDate) -> Self {
+        let tax_year = TaxYear::for_period_end(period_end);
+        let months_since_march =
+            (period_end.year() - tax_year.starting_year()) * 12 + period_end.month() as i32 - 3;
+        let elapsed = u8::try_from(months_since_march)
+            .expect("a PayPeriod end date's position in its own TaxYear is always 0..=11");
+        PeriodsElapsed::new(elapsed)
+            .expect("a PayPeriod end date's position in its own TaxYear is always 0..=11")
     }
 
     /// Which period of the TaxYear is being calculated, counting the
@@ -266,6 +284,50 @@ mod tests {
     #[test]
     fn periods_elapsed_deserialize_rejects_out_of_range() {
         assert!(serde_json::from_str::<PeriodsElapsed>("12").is_err());
+    }
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    #[test]
+    fn the_first_period_of_a_tax_year_has_position_zero() {
+        assert_eq!(
+            PeriodsElapsed::from_period_end(date(2026, 3, 25)),
+            PeriodsElapsed::new(0).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_middle_period_of_a_tax_year_has_its_month_offset_from_march_as_position() {
+        // September: six full months after the tax year's March start.
+        assert_eq!(
+            PeriodsElapsed::from_period_end(date(2026, 9, 25)),
+            PeriodsElapsed::new(6).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_last_period_of_a_tax_year_has_position_eleven() {
+        // February belongs to the tax year that started the previous
+        // March (ADR-0005), and is that tax year's twelfth period.
+        assert_eq!(
+            PeriodsElapsed::from_period_end(date(2027, 2, 25)),
+            PeriodsElapsed::new(11).unwrap()
+        );
+    }
+
+    // The whole point of this constructor is that it reads position, never
+    // a count of what has been paid. A September end date yields position 6
+    // even for an Employment that has never been paid before — an October
+    // joiner's very first payroll run is not position 0.
+    #[test]
+    fn from_period_end_is_a_position_not_a_count_of_periods_paid() {
+        let first_ever_run_for_a_september_joiner = date(2026, 9, 25);
+        assert_eq!(
+            PeriodsElapsed::from_period_end(first_ever_run_for_a_september_joiner),
+            PeriodsElapsed::new(6).unwrap()
+        );
     }
 
     #[test]
