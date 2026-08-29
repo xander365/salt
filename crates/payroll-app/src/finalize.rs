@@ -146,6 +146,18 @@ pub async fn finalize_payroll_run(
 
     let member_ids = active_member_ids(&mut tx, payroll_run_id).await?;
 
+    // Every member's `employment` row is locked *before* any master data is
+    // read (ADR-0013): `record_opening_balance` and `declare_prior_employment`
+    // take `FOR UPDATE` on the same row, and `FOR SHARE` conflicts with it,
+    // so an edit of a frozen fact and this finalization can never interleave.
+    // Whichever arrives second waits: an edit that loses the race sees this
+    // transaction's `FinalizedPayroll` and refuses; a finalization that loses
+    // re-reads the edited fact below and refuses with a mismatch rather than
+    // finalizing figures nobody approved. `ORDER BY id` fixes one acquisition
+    // order for every finalizer, so two overlapping runs queue rather than
+    // deadlock.
+    lock_member_employments(&mut tx, &member_ids).await?;
+
     let mut earnings_by_member = run_earnings_by_member(&mut tx, payroll_run_id).await?;
 
     // Every member is reassembled and compared before anything is written
@@ -249,6 +261,30 @@ pub async fn finalize_payroll_run(
 
     tx.commit().await?;
     Ok(finalized_ids)
+}
+
+/// Takes `FOR SHARE` on each member's `employment` row, in one statement and
+/// in a fixed order. Reading the ids back is what proves the lock was taken:
+/// a member whose Employment vanished between the membership read and this
+/// one is impossible — `employment` is never physically deleted (§4.3) — so
+/// a short result would mean the schema no longer matches this code.
+async fn lock_member_employments(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    member_ids: &[String],
+) -> Result<(), PayrollAppError> {
+    let locked: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM employment WHERE id = ANY($1) ORDER BY id FOR SHARE")
+            .bind(member_ids)
+            .fetch_all(&mut **tx)
+            .await?;
+
+    assert_eq!(
+        locked.len(),
+        member_ids.len(),
+        "an Employment is never physically deleted (§4.3), so every active \
+         member of a run still has a row to lock"
+    );
+    Ok(())
 }
 
 /// Reads back one member's approved `WorkingPayrollCalculation`. A missing

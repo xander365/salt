@@ -198,7 +198,7 @@ pub enum PayrollAppError {
     /// `DeclarePriorEmployment` was asked to write or replace a row for an
     /// (Employment, TaxYear) that already has a `FinalizedPayroll` — Live or
     /// reversed (ADR-0013, §4.5b). The same reason as
-    /// [`OpeningBalanceFrozenByFinalization`]: this fact is re-read into
+    /// [`Self::OpeningBalanceFrozenByFinalization`]: this fact is re-read into
     /// every later period's `YearToDateContext`.
     PriorEmploymentFrozenByFinalization {
         employment_id: EmploymentId,
@@ -211,6 +211,27 @@ pub enum PayrollAppError {
     PayScheduleFrozenByFinalization {
         employer_id: EmployerId,
         tax_year: TaxYear,
+    },
+    /// `ChangePaySchedule` was asked to change an Employer who still has an
+    /// unfinalized `PayrollRun` in the given TaxYear (§4.2). That run's
+    /// period was cut by the schedule in force when it was created, and
+    /// finalization re-derives everything from the current one (§5.1), so
+    /// the change is refused here rather than surfacing later as a
+    /// `FinalizationInputMismatch` nobody can act on.
+    PayScheduleChangeBlockedByAnOpenRun {
+        employer_id: EmployerId,
+        period_end: NaiveDate,
+    },
+    /// `CreateOrdinaryPayrollRun` was asked for a run in a TaxYear holding a
+    /// `FinalizedPayroll` whose period end the Employer's current
+    /// `PaySchedule` does not generate (§4.2, ADR-0005) — the Employer's
+    /// schedule moved inside a part-finalized TaxYear. The guard that holds
+    /// "a TaxYear never contains other than twelve periods" without having
+    /// to trust `change_pay_schedule`'s caller about what year it is.
+    PayScheduleMovedWithinTaxYear {
+        employer_id: EmployerId,
+        tax_year: TaxYear,
+        finalized_period_end: NaiveDate,
     },
 }
 
@@ -382,7 +403,26 @@ impl std::fmt::Display for PayrollAppError {
             } => write!(
                 f,
                 "Employer {employer_id}'s PaySchedule is frozen for TaxYear {}: a payroll has \
-                 already been finalized in that TaxYear",
+                 already been finalized in that TaxYear or a later one",
+                tax_year.starting_year()
+            ),
+            Self::PayScheduleChangeBlockedByAnOpenRun {
+                employer_id,
+                period_end,
+            } => write!(
+                f,
+                "Employer {employer_id}'s PaySchedule cannot change while the payroll run for \
+                 the period ending {period_end} is not finalized"
+            ),
+            Self::PayScheduleMovedWithinTaxYear {
+                employer_id,
+                tax_year,
+                finalized_period_end,
+            } => write!(
+                f,
+                "Employer {employer_id}'s PaySchedule does not generate the period ending \
+                 {finalized_period_end}, which is already finalized in TaxYear {}: the schedule \
+                 moved inside a TaxYear that had already finalized payroll",
                 tax_year.starting_year()
             ),
         }
@@ -434,7 +474,9 @@ impl std::error::Error for PayrollAppError {
             | Self::ReversalReasonCannotBeEmpty
             | Self::OpeningBalanceFrozenByFinalization { .. }
             | Self::PriorEmploymentFrozenByFinalization { .. }
-            | Self::PayScheduleFrozenByFinalization { .. } => None,
+            | Self::PayScheduleFrozenByFinalization { .. }
+            | Self::PayScheduleChangeBlockedByAnOpenRun { .. }
+            | Self::PayScheduleMovedWithinTaxYear { .. } => None,
         }
     }
 }

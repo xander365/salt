@@ -47,10 +47,18 @@ pub async fn record_opening_balance(
 ) -> Result<(), PayrollAppError> {
     let mut tx = pool.begin().await?;
 
-    // `FOR SHARE OF employment` holds the row against a concurrent
+    // `FOR UPDATE OF employment` holds the row against a concurrent
     // `void_employment`, so a void committing between this read and the
     // insert cannot leave an OpeningBalance recorded against a now-voided
     // Employment.
+    //
+    // `FOR UPDATE` rather than `FOR SHARE` because this use case writes a
+    // *frozen* fact: `finalize_payroll_run` takes `FOR SHARE` on its
+    // members' `employment` rows before it reads any master data, and two
+    // `FOR SHARE` locks do not conflict. Only the stronger lock makes the
+    // freeze check below hold — otherwise a finalization committing between
+    // the check and the upsert would leave an `OpeningBalance` edited after
+    // the finalization that re-reads it.
     let employment: Option<(String, bool, NaiveDate, String, Option<i16>)> = sqlx::query_as(
         "SELECT employment.employer_id,
                 employment.is_void,
@@ -60,7 +68,7 @@ pub async fn record_opening_balance(
          FROM employment
          JOIN employer ON employer.id = employment.employer_id
          WHERE employment.id = $1
-         FOR SHARE OF employment",
+         FOR UPDATE OF employment",
     )
     .bind(employment_id.as_str())
     .fetch_optional(&mut *tx)

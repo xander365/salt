@@ -6,12 +6,13 @@
 //! first line and share nothing after it.
 
 use chrono::NaiveDate;
-use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError};
+use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, TaxYear};
 use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::pay_schedule_from_columns;
 use crate::error::PayrollAppError;
+use crate::freeze::finalized_period_ends_in;
 use crate::ids::app_id;
 
 app_id! {
@@ -50,6 +51,15 @@ app_id! {
 /// the unique index `one_ordinary_payroll_run_per_employer_and_period`
 /// (migration 0007) — a PostgreSQL refusal, not a domain one, the same as
 /// every other uniqueness violation in this crate.
+///
+/// The run's TaxYear must also still be one the current `PaySchedule`
+/// describes: every period already finalized in it has to be a period end
+/// that schedule generates (§4.2, ADR-0005). `change_pay_schedule` refuses a
+/// mid-year change, but it can only check the TaxYear the caller *claims* to
+/// be in; this check needs no such claim, so a schedule moved under a
+/// part-finalized TaxYear is caught here even if the change itself slipped
+/// through. It is what actually holds "a TaxYear never contains other than
+/// twelve periods": no further period of that year can be run.
 pub async fn create_ordinary_payroll_run(
     pool: &PgPool,
     employer_id: &EmployerId,
@@ -80,7 +90,15 @@ pub async fn create_ordinary_payroll_run(
         return Err(PayrollAppError::EmployerNotFound(employer_id.clone()));
     };
 
-    validate_period_is_one_the_schedule_generates(pay_schedule_from_columns(&kind, value), period)?;
+    let schedule = pay_schedule_from_columns(&kind, value);
+    validate_period_is_one_the_schedule_generates(schedule, period)?;
+    validate_the_schedule_still_describes_the_tax_year(
+        &mut tx,
+        employer_id,
+        schedule,
+        TaxYear::for_period_end(period.end()),
+    )
+    .await?;
 
     let id: String = sqlx::query_scalar(
         "INSERT INTO payroll_run
@@ -135,6 +153,33 @@ pub async fn create_ordinary_payroll_run(
 
     tx.commit().await?;
     Ok(run_id)
+}
+
+/// Refuses a run in a TaxYear whose already finalized periods `schedule` no
+/// longer generates — proof the Employer's `PaySchedule` moved inside a
+/// TaxYear that had already finalized payroll. Only the finalized periods
+/// count, for the same reason the freeze itself counts them: they are the
+/// ones a later period's cumulative PAYE is built on (ADR-0001), and they
+/// cannot be re-cut.
+async fn validate_the_schedule_still_describes_the_tax_year(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    employer_id: &EmployerId,
+    schedule: PaySchedule,
+    tax_year: TaxYear,
+) -> Result<(), PayrollAppError> {
+    for finalized_period_end in finalized_period_ends_in(tx, employer_id, tax_year).await? {
+        let generated = schedule
+            .period_containing(finalized_period_end)
+            .is_some_and(|period| period.end() == finalized_period_end);
+        if !generated {
+            return Err(PayrollAppError::PayScheduleMovedWithinTaxYear {
+                employer_id: employer_id.clone(),
+                tax_year,
+                finalized_period_end,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Validates that `period` is a `PayPeriod` `schedule` itself generates —

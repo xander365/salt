@@ -2,7 +2,9 @@
 //! freeze at that Employment's first finalization in that TaxYear (Live or
 //! reversed alike), `CompensationTerms` and `UnsupportedDeductionStatus`
 //! stay editable, and `change_pay_schedule` refuses once any payroll is
-//! finalized in the given TaxYear. Every fixture reaches a real
+//! finalized in the given TaxYear or a later one — and, since that TaxYear
+//! is only the caller's claim, that a schedule moved under a part-finalized
+//! TaxYear stops any further run of that year regardless. Every fixture reaches a real
 //! `FinalizedPayroll` through the public API, exactly as
 //! `tests/finalize_payroll_run.rs` and `tests/reverse_finalized_payroll.rs`
 //! do.
@@ -19,7 +21,8 @@ use payroll_app::{
     declare_unsupported_deduction_status, finalize_payroll_run, record_compensation_terms,
     record_opening_balance, reverse_finalized_payroll,
 };
-use sqlx::{PgPool, Row};
+use sqlx::{Acquire, PgPool, Row};
+use tokio::sync::oneshot;
 
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).unwrap()
@@ -558,6 +561,184 @@ async fn a_refused_pay_schedule_change_writes_no_action_log_entry(pool: PgPool) 
     assert_eq!(count, 0);
 }
 
+/// The TaxYear the caller names is a claim, not a fact. Naming an *earlier*
+/// one is disprovable from the database alone, so it is refused: the check
+/// reads "in that TaxYear or later" (§4.2).
+#[sqlx::test]
+async fn a_pay_schedule_change_claiming_an_earlier_tax_year_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    finalize_march(&pool, &employer_id, &employment_id).await;
+
+    let result = change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2025),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayScheduleFrozenByFinalization {
+            employer_id: employer_id.clone(),
+            tax_year: TaxYear::starting(2025),
+        })
+    );
+}
+
+/// Naming a *later* TaxYear cannot be disproved without a clock, so the
+/// twelve-period invariant is held where the harm would land instead: the
+/// next run of the part-finalized TaxYear is refused, whatever the schedule
+/// change claimed (§4.2, ADR-0005).
+#[sqlx::test]
+async fn a_schedule_moved_under_a_part_finalized_tax_year_stops_the_next_run(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    finalize_march(&pool, &employer_id, &employment_id).await;
+
+    // The forward claim the freeze check cannot disprove: it is April 2026,
+    // but the caller names the next TaxYear and the change goes through.
+    change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2027),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // April 2026 under the moved schedule would make TaxYear 2026 hold a
+    // period ending 31 March and one ending 25 April — thirteen periods, and
+    // cumulative PAYE built on a boundary that no longer exists.
+    let result = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        PayPeriod::new(date(2026, 3, 26), date(2026, 4, 25)).unwrap(),
+        date(2026, 5, 5),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayScheduleMovedWithinTaxYear {
+            employer_id: employer_id.clone(),
+            tax_year: TaxYear::starting(2026),
+            finalized_period_end: date(2026, 3, 31),
+        })
+    );
+}
+
+/// A TaxYear the moved schedule still describes is unaffected: the guard
+/// names the finalized periods, not the change.
+#[sqlx::test]
+async fn a_run_in_the_next_tax_year_is_unaffected_by_the_change(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    finalize_march(&pool, &employer_id, &employment_id).await;
+
+    change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2027),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        PayPeriod::new(date(2027, 3, 26), date(2027, 4, 25)).unwrap(),
+        date(2027, 5, 5),
+        "actor",
+    )
+    .await
+    .unwrap();
+}
+
+/// An unfinalized run in that TaxYear refuses the change: its period was cut
+/// by the old schedule, and finalization re-derives from the current one.
+#[sqlx::test]
+async fn a_pay_schedule_change_is_refused_while_a_run_in_that_tax_year_is_open(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        .await
+        .unwrap();
+
+    let result = change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayScheduleChangeBlockedByAnOpenRun {
+            employer_id: employer_id.clone(),
+            period_end: period().end(),
+        })
+    );
+}
+
+/// An open run in a *different* TaxYear does not block the change.
+#[sqlx::test]
+async fn an_open_run_in_another_tax_year_does_not_block_the_change(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        .await
+        .unwrap();
+
+    change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2027),
+        "actor",
+    )
+    .await
+    .unwrap();
+}
+
 #[sqlx::test]
 async fn changing_the_pay_schedule_of_a_missing_employer_is_refused(pool: PgPool) {
     let missing = EmployerId::new("does-not-exist");
@@ -572,4 +753,166 @@ async fn changing_the_pay_schedule_of_a_missing_employer_is_refused(pool: PgPool
     .await;
 
     assert_eq!(result, Err(PayrollAppError::EmployerNotFound(missing)));
+}
+
+// ---- Concurrency: a freeze check and a finalization never interleave ----
+//
+// The freeze check is a read followed by a write, so on its own it is open to
+// a finalization committing in between. What closes that is the row lock the
+// two use cases take on the *same* `employment` row:
+// `declare_prior_employment` and `record_opening_balance` take `FOR UPDATE`,
+// and `finalize_payroll_run` takes `FOR SHARE` before it reads any master
+// data. The two conflict, so one of them always waits for the other.
+//
+// Proved in the two steps `tests/finalize_payroll_run.rs` uses for the run
+// lock: raw SQL on two real connections proves the lock genuinely blocks,
+// then two real use cases in flight at once prove the outcome.
+#[sqlx::test]
+async fn a_frozen_fact_edit_and_a_finalization_never_both_succeed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+
+    // Phase 1: the `FOR SHARE` a finalization holds must block the
+    // `FOR UPDATE` an edit of a frozen fact takes.
+    let mut holder = pool
+        .acquire()
+        .await
+        .expect("acquire the holding connection");
+    let mut holder_tx = holder.begin().await.expect("begin the holding transaction");
+    sqlx::query_scalar::<_, String>("SELECT id FROM employment WHERE id = $1 FOR SHARE")
+        .bind(employment_id.as_str())
+        .fetch_one(&mut *holder_tx)
+        .await
+        .expect("take the finalizer's row lock");
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let racing_pool = pool.clone();
+    let racing_employment_id = employment_id.clone();
+    let racing_task = tokio::spawn(async move {
+        let mut conn = racing_pool
+            .acquire()
+            .await
+            .expect("acquire racing connection");
+        let mut tx = conn.begin().await.expect("begin racing transaction");
+        started_sender.send(()).expect("notify the lock holder");
+        sqlx::query_scalar::<_, String>("SELECT id FROM employment WHERE id = $1 FOR UPDATE")
+            .bind(racing_employment_id.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .expect("the row lock, once released, is granted here")
+    });
+
+    started_receiver.await.expect("racing transaction started");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !racing_task.is_finished(),
+        "an edit of a frozen fact must wait for the lock a finalization holds"
+    );
+    holder_tx
+        .rollback()
+        .await
+        .expect("release the lock without changing anything");
+    racing_task.await.expect("join racing task");
+
+    // Phase 2: a real edit and a real finalization, both in flight. Whichever
+    // wins the row lock, the loser refuses — the edit because it now sees the
+    // FinalizedPayroll, or the finalization because the fact it re-reads no
+    // longer matches the one the run was calculated from (§5.1). Both
+    // succeeding is the state ADR-0013 forbids: a frozen fact edited after
+    // the finalization that re-reads it.
+    let run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+    assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
+
+    // The finalization is polled first, so it holds the row lock while the
+    // edit tries to take it. That is the dangerous order: without the lock
+    // the finalization would read the *committed* declaration — still the old
+    // one, since the edit has not committed — pass its three-way comparison,
+    // and then write a FinalizedPayroll on top of a fact that changed under
+    // it, with both calls reporting success.
+    let (finalization, edit) = tokio::join!(
+        finalize_payroll_run(&pool, &run_id, "finalizer"),
+        declare_prior_employment(
+            &pool,
+            &employment_id,
+            TaxYear::starting(2026),
+            PriorEmployment::Some(PriorEmploymentFigures::new(
+                Money::from_cents(500_000).unwrap(),
+                Money::from_cents(50_000).unwrap(),
+            )),
+            "actor",
+        ),
+    );
+
+    assert!(
+        edit.is_ok() != finalization.is_ok(),
+        "exactly one must succeed: the loser of the row lock refuses, either \
+         because it now sees the FinalizedPayroll or because the fact it \
+         re-reads no longer matches the approved one — got {edit:?} and \
+         {finalization:?}"
+    );
+}
+
+/// The same conflict one level up: `change_pay_schedule` takes `FOR UPDATE`
+/// on the `employer` row, and every use case that reads the schedule to
+/// calculate against it takes `FOR SHARE` on the same row.
+#[sqlx::test]
+async fn a_pay_schedule_change_waits_for_a_reader_of_that_schedule(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+
+    let mut holder = pool
+        .acquire()
+        .await
+        .expect("acquire the holding connection");
+    let mut holder_tx = holder.begin().await.expect("begin the holding transaction");
+    sqlx::query_scalar::<_, String>(
+        "SELECT period_end_day_kind FROM employer WHERE id = $1 FOR SHARE",
+    )
+    .bind(employer_id.as_str())
+    .fetch_one(&mut *holder_tx)
+    .await
+    .expect("take the reader's row lock");
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let racing_pool = pool.clone();
+    let racing_employer_id = employer_id.clone();
+    let racing_task = tokio::spawn(async move {
+        let mut conn = racing_pool
+            .acquire()
+            .await
+            .expect("acquire racing connection");
+        let mut tx = conn.begin().await.expect("begin racing transaction");
+        started_sender.send(()).expect("notify the lock holder");
+        sqlx::query_scalar::<_, String>(
+            "SELECT period_end_day_kind FROM employer WHERE id = $1 FOR UPDATE",
+        )
+        .bind(racing_employer_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the row lock, once released, is granted here")
+    });
+
+    started_receiver.await.expect("racing transaction started");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !racing_task.is_finished(),
+        "a PaySchedule change must wait for a transaction already calculating \
+         against that schedule"
+    );
+    holder_tx
+        .rollback()
+        .await
+        .expect("release the lock without changing anything");
+    racing_task.await.expect("join racing task");
 }

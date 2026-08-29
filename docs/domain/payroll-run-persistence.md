@@ -194,6 +194,24 @@ makes a full effective-dated `PaySchedule` history a third effective-dating axis
 built for something that changes once a decade. History is safe either way,
 because `PayrollInput` freezes the schedule that was used.
 
+**"The current TaxYear" is the caller's claim, so it is not the only guard.**
+`change_pay_schedule` has no clock — it takes the TaxYear as a parameter, like
+every other use case here — so the refusal is stated twice, from two directions:
+
+- The refusal reads "finalized in that TaxYear **or any later one**", which
+  disproves a claim naming a TaxYear earlier than one already finalized.
+- A claim naming a *later* TaxYear cannot be disproved without a clock, so the
+  invariant is held where the harm would land instead:
+  `CreateOrdinaryPayrollRun` refuses a run whose TaxYear holds a
+  `FinalizedPayroll` at a period end the current schedule does not generate. A
+  schedule moved under a part-finalized TaxYear therefore buys nothing — no
+  further period of that year can be run at all.
+
+An **unfinalized `PayrollRun`** in that TaxYear also refuses the change. Its
+period was cut by the schedule in force when it was created, and finalization
+re-derives everything from the current one (§5.1), so the alternative is a
+`FinalizationInputMismatch` later that names no cause.
+
 ### 4.3 Employment
 
 `Employment` is **never physically deleted**. Ending an Employment is an

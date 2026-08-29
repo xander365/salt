@@ -44,11 +44,14 @@ pub async fn declare_prior_employment(
 
     let mut tx = pool.begin().await?;
 
-    // `FOR SHARE` holds the row against a concurrent `void_employment`, so a
-    // void committing between this read and the insert cannot leave a
-    // declaration recorded against a now-voided Employment.
+    // `FOR UPDATE` holds the row against a concurrent `void_employment`, so
+    // a void committing between this read and the insert cannot leave a
+    // declaration recorded against a now-voided Employment. It is the
+    // stronger lock for the same reason `record_opening_balance` takes it:
+    // this is a frozen fact, and `FOR SHARE` would not conflict with the
+    // `FOR SHARE` `finalize_payroll_run` holds while it works.
     let employment: Option<(String, bool)> =
-        sqlx::query_as("SELECT employer_id, is_void FROM employment WHERE id = $1 FOR SHARE")
+        sqlx::query_as("SELECT employer_id, is_void FROM employment WHERE id = $1 FOR UPDATE")
             .bind(employment_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
