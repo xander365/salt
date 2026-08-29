@@ -58,6 +58,30 @@ use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lo
 /// and are still read by the version-1 reader.
 pub const SNAPSHOT_SCHEMA_VERSION: i32 = 1;
 
+/// `payroll-app`'s own id for a `FinalizedPayroll` row (§4.1): a native
+/// `uuid`, minted only here, where the row itself is inserted. There is no
+/// public constructor from a bare string — the only way a caller ever holds
+/// one is by receiving it back from [`finalize_payroll_run`], the same
+/// discipline [`crate::PayrollRunId`] follows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FinalizedPayrollId(String);
+
+impl FinalizedPayrollId {
+    fn new(id: impl Into<String>) -> Self {
+        FinalizedPayrollId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for FinalizedPayrollId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One member's approved `WorkingPayrollCalculation`, read back so its three
 /// values can be compared against a fresh reassembly/re-resolution/recompute
 /// of the same three (§5.2).
@@ -81,11 +105,15 @@ struct WorkingCalculation {
 /// `calculate_payroll_run` lets one become `Calculated`: §4.7 defines the
 /// state as a property of the members, and an Employer who removed everyone
 /// with a stated reason has said something complete about the period.
+///
+/// Returns every member's newly-minted [`FinalizedPayrollId`] alongside its
+/// `EmploymentId`, empty for a vacuous run — the one place a caller can learn
+/// the id a later `reverse_finalized_payroll` needs.
 pub async fn finalize_payroll_run(
     pool: &PgPool,
     payroll_run_id: &PayrollRunId,
     finalized_by: &str,
-) -> Result<(), PayrollAppError> {
+) -> Result<Vec<(EmploymentId, FinalizedPayrollId)>, PayrollAppError> {
     let mut tx = pool.begin().await?;
 
     // The `FOR UPDATE` lock taken here is what serialises two finalizers of
@@ -183,6 +211,7 @@ pub async fn finalize_payroll_run(
         ready.push((employment_id, current_input, current_calculation));
     }
 
+    let mut finalized_ids = Vec::with_capacity(ready.len());
     for (employment_id, input, calculation) in ready {
         let finalized_payroll_id = insert_finalized_payroll(
             &mut tx,
@@ -207,9 +236,11 @@ pub async fn finalize_payroll_run(
         )
         .bind(employment_id.as_str())
         .bind(period.end())
-        .bind(&finalized_payroll_id)
+        .bind(finalized_payroll_id.as_str())
         .execute(&mut *tx)
         .await?;
+
+        finalized_ids.push((employment_id, finalized_payroll_id));
     }
 
     write_action_log_entry(
@@ -231,7 +262,7 @@ pub async fn finalize_payroll_run(
         .await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(finalized_ids)
 }
 
 /// Reads back one member's approved `WorkingPayrollCalculation`. A missing
@@ -296,7 +327,7 @@ async fn insert_finalized_payroll(
     rules: &PayrollRules,
     calculation: &PayrollCalculation,
     finalized_by: &str,
-) -> Result<String, PayrollAppError> {
+) -> Result<FinalizedPayrollId, PayrollAppError> {
     let input_json = serde_json::to_value(input).expect("PayrollInput always serializes");
     let rules_json = serde_json::to_value(rules).expect("PayrollRules always serializes");
     let calculation_json =
@@ -329,5 +360,5 @@ async fn insert_finalized_payroll(
     .bind(finalized_by)
     .fetch_one(&mut **tx)
     .await?;
-    Ok(id)
+    Ok(FinalizedPayrollId::new(id))
 }

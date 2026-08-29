@@ -871,11 +871,15 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
     );
 
     let (winner, loser) = match (&first, &second) {
-        (Ok(()), Err(_)) => (&first, &second),
-        (Err(_), Ok(())) => (&second, &first),
+        (Ok(_), Err(_)) => (&first, &second),
+        (Err(_), Ok(_)) => (&second, &first),
         _ => panic!("exactly one finalization must succeed, got {first:?} and {second:?}"),
     };
-    assert_eq!(winner.as_ref().ok(), Some(&()));
+    assert_eq!(
+        winner.as_ref().ok().map(Vec::len),
+        Some(1),
+        "the winner finalizes the run's one member"
+    );
     // The loser is refused by re-reading the status the winner committed —
     // the lock releasing is what lets it read at all — not by an
     // application-side check made before the race.

@@ -4,6 +4,7 @@ use payroll::{
     PayrollRules, TaxYear,
 };
 
+use crate::finalize::FinalizedPayrollId;
 use crate::payroll_run::PayrollRunId;
 
 /// `payroll-app`'s own error type. It wraps [`PayrollError`] rather than
@@ -173,6 +174,17 @@ pub enum PayrollAppError {
         approved: Box<PayrollCalculation>,
         current: Box<PayrollCalculation>,
     },
+    /// No `FinalizedPayroll` exists with this id.
+    FinalizedPayrollNotFound(FinalizedPayrollId),
+    /// `ReverseFinalizedPayroll` was asked for a `FinalizedPayroll` that
+    /// already has a `Reversal` (§6.1) — `reversal.finalized_payroll_id` is
+    /// UNIQUE (migration 0011), and there is no unreversal record type to
+    /// undo one with (ADR-0002's rejection, restated in §6.1).
+    FinalizedPayrollAlreadyReversed(FinalizedPayrollId),
+    /// `ReverseFinalizedPayroll` was given a reason that is empty or only
+    /// whitespace. A reversal is a deliberate, attributed act (§6.1), the
+    /// same demand `RemovalReasonCannotBeEmpty` makes of a run removal.
+    ReversalReasonCannotBeEmpty,
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -310,6 +322,15 @@ impl std::fmt::Display for PayrollAppError {
                     serde_json::to_value(current).ok(),
                 )
             ),
+            Self::FinalizedPayrollNotFound(id) => {
+                write!(f, "no FinalizedPayroll exists with id {id}")
+            }
+            Self::FinalizedPayrollAlreadyReversed(id) => {
+                write!(f, "FinalizedPayroll {id} has already been reversed")
+            }
+            Self::ReversalReasonCannotBeEmpty => {
+                write!(f, "a reversal reason must not be empty")
+            }
         }
     }
 }
@@ -353,7 +374,10 @@ impl std::error::Error for PayrollAppError {
             | Self::PayrollRunNotCalculated(_)
             | Self::FinalizationInputMismatch { .. }
             | Self::FinalizationRulesMismatch { .. }
-            | Self::FinalizationCalculationMismatch { .. } => None,
+            | Self::FinalizationCalculationMismatch { .. }
+            | Self::FinalizedPayrollNotFound(_)
+            | Self::FinalizedPayrollAlreadyReversed(_)
+            | Self::ReversalReasonCannotBeEmpty => None,
         }
     }
 }

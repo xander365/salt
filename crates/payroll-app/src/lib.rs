@@ -18,6 +18,7 @@ mod ids;
 mod opening_balance;
 mod payroll_run;
 mod prior_employment;
+mod reversal;
 mod unsupported_deduction_status;
 mod year_to_date;
 
@@ -27,12 +28,13 @@ pub use compensation_terms::record_compensation_terms;
 pub use employer::create_employer;
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::PayrollAppError;
-pub use finalize::{SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run};
+pub use finalize::{FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run};
 pub use opening_balance::record_opening_balance;
 pub use payroll_run::{
     PayrollRunId, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
 };
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
+pub use reversal::reverse_finalized_payroll;
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,
 };
