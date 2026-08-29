@@ -279,6 +279,11 @@ async fn lock_and_reopen_run(
 /// predicate does: a member already removed, or an Employment that was
 /// never a member of this run at all, is refused rather than silently
 /// overwriting who removed it and why.
+///
+/// The removed member's `WorkingPayrollCalculation`, if it had one, goes
+/// with it — a member the Employer has taken out of the run has no current
+/// calculation, and the next recalculation can make the run `Calculated`
+/// again from the members that remain (§4.7, §4.9).
 pub async fn remove_employment_from_run(
     pool: &PgPool,
     payroll_run_id: &PayrollRunId,
@@ -325,6 +330,24 @@ pub async fn remove_employment_from_run(
         });
     };
     let employer_id = EmployerId::new(employer_id);
+
+    // A removed member has no calculation, so it must not leave one behind.
+    // `lock_and_reopen_run` has already put the run back to `Draft`, but the
+    // very next recalculation can make it `Calculated` again from the
+    // remaining members alone -- and a `Calculated` run holding a
+    // `WorkingPayrollCalculation` for someone the Employer deliberately,
+    // reasonedly took out of it is a row that looks current and is not
+    // (§4.7, §4.9). `calculate_payroll_run` clears a refused member's row
+    // for the same reason; this is the other way a member stops having a
+    // current calculation.
+    sqlx::query(
+        "DELETE FROM working_payroll_calculation
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&mut *tx)
+    .await?;
 
     write_action_log_entry(
         &mut tx,

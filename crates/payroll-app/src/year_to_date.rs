@@ -367,6 +367,7 @@ mod tests {
             2025,
             1500000,
             100000,
+            date(2025, 10, 25),
         )
         .await;
         sqlx::query(
@@ -386,6 +387,101 @@ mod tests {
 
         assert_eq!(ytd.prior_taxable_remuneration(), Money::ZERO);
         assert_eq!(ytd.prior_paye(), Money::ZERO);
+    }
+
+    /// §8: history is ordered by `PayPeriod` end date and never by when a
+    /// record was finalized. A March payroll finalized in October is still
+    /// March — so an earlier period finalized late is summed in, and a later
+    /// period finalized early is left out, even though a `finalized_at`
+    /// ordering would swap both answers.
+    #[sqlx::test]
+    async fn history_is_ordered_by_period_end_and_never_by_when_it_was_finalized(pool: PgPool) {
+        let employment_id = an_employment(&pool).await;
+        declare_prior_employment(
+            &pool,
+            &employment_id,
+            TaxYear::starting(2025),
+            PriorEmployment::None,
+            "actor",
+        )
+        .await
+        .unwrap();
+        // An earlier period, finalized months after the one being built.
+        insert_live_finalized_payroll_finalized_on(
+            &pool,
+            &employment_id,
+            date(2025, 9, 26),
+            date(2025, 10, 25),
+            2025,
+            1500000,
+            100000,
+            date(2026, 2, 20),
+        )
+        .await;
+        // A later period, finalized long before it.
+        insert_live_finalized_payroll_finalized_on(
+            &pool,
+            &employment_id,
+            date(2025, 11, 26),
+            date(2025, 12, 25),
+            2025,
+            9900000,
+            880000,
+            date(2025, 9, 1),
+        )
+        .await;
+
+        let ytd = build_year_to_date_context(&pool, &employment_id, date(2025, 11, 25))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ytd.prior_taxable_remuneration(),
+            Money::from_cents(1500000).unwrap()
+        );
+        assert_eq!(ytd.prior_paye(), Money::from_cents(100000).unwrap());
+    }
+
+    /// §8: `PeriodsElapsed` is the `PayPeriod`'s position in its TaxYear, and
+    /// is never derived by counting finalized rows — counting is the single
+    /// most tempting wrong reading, and it over-withholds from every mid-year
+    /// joiner. Two live rows against a period seven months into the year
+    /// tell the two readings apart.
+    #[sqlx::test]
+    async fn periods_elapsed_is_the_periods_position_and_never_a_count_of_history(pool: PgPool) {
+        let employment_id = an_employment(&pool).await;
+        declare_prior_employment(
+            &pool,
+            &employment_id,
+            TaxYear::starting(2026),
+            PriorEmployment::None,
+            "actor",
+        )
+        .await
+        .unwrap();
+        for (period_start, period_end) in [
+            (date(2026, 7, 26), date(2026, 8, 25)),
+            (date(2026, 8, 26), date(2026, 9, 25)),
+        ] {
+            insert_live_finalized_payroll(
+                &pool,
+                &employment_id,
+                period_start,
+                period_end,
+                2026,
+                1500000,
+                100000,
+            )
+            .await;
+        }
+
+        // 25 October 2026 sits seven full months after the TaxYear's March
+        // start, whatever Salt happens to hold history for.
+        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 10, 25))
+            .await
+            .unwrap();
+
+        assert_eq!(ytd.periods_elapsed(), PeriodsElapsed::new(7).unwrap());
     }
 
     #[sqlx::test]
@@ -454,6 +550,35 @@ mod tests {
         taxable_remuneration_cents: i64,
         paye_cents: i64,
     ) {
+        insert_live_finalized_payroll_finalized_on(
+            pool,
+            employment_id,
+            period_start,
+            period_end,
+            tax_year,
+            taxable_remuneration_cents,
+            paye_cents,
+            // The ordinary case: finalized the day the period ended, so the
+            // two dates agree and nothing rides on which one is read.
+            period_end,
+        )
+        .await;
+    }
+
+    /// As above, but pins `finalized_at` separately from `period_end` — the
+    /// one fixture that can tell §8's ordering rule apart from the timestamp
+    /// it must never use.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_live_finalized_payroll_finalized_on(
+        pool: &PgPool,
+        employment_id: &EmploymentId,
+        period_start: NaiveDate,
+        period_end: NaiveDate,
+        tax_year: i32,
+        taxable_remuneration_cents: i64,
+        paye_cents: i64,
+        finalized_at: NaiveDate,
+    ) {
         let finalized_payroll_id = insert_finalized_payroll(
             pool,
             employment_id,
@@ -462,6 +587,7 @@ mod tests {
             tax_year,
             taxable_remuneration_cents,
             paye_cents,
+            finalized_at,
         )
         .await;
         sqlx::query(
@@ -481,6 +607,7 @@ mod tests {
     /// inventing a run id — that keeps the fixture honest about what a
     /// `finalized_payroll` row always has behind it, even though nothing in
     /// this ticket calculates or finalizes that run.
+    #[allow(clippy::too_many_arguments)]
     async fn insert_finalized_payroll(
         pool: &PgPool,
         employment_id: &EmploymentId,
@@ -489,6 +616,7 @@ mod tests {
         tax_year: i32,
         taxable_remuneration_cents: i64,
         paye_cents: i64,
+        finalized_at: NaiveDate,
     ) -> String {
         let employer_id: String =
             sqlx::query_scalar("SELECT employer_id FROM employment WHERE id = $1")
@@ -512,9 +640,9 @@ mod tests {
                 (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
                  payroll_input_json, payroll_rules_json, payroll_calculation_json,
                  taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version,
-                 finalized_by)
+                 finalized_at, finalized_by)
              VALUES ($1::uuid, $2, $3, $4, $5, $6, '{}', '{}', '{}', $7, $8, 'x', 'x', 'x',
-                     'actor')
+                     $9::date, 'actor')
              RETURNING id::text",
         )
         .bind(run_id.as_str())
@@ -525,6 +653,7 @@ mod tests {
         .bind(tax_year)
         .bind(taxable_remuneration_cents)
         .bind(paye_cents)
+        .bind(finalized_at)
         .fetch_one(pool)
         .await
         .unwrap()

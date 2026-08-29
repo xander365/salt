@@ -1008,6 +1008,94 @@ async fn a_finalized_payroll_holds_whole_non_negative_cents(pool: PgPool) {
         .expect("whole, non-negative cents are the supported shape");
 }
 
+/// §8's year-to-date read cuts history by `period_end` and filters it by
+/// `tax_year`, so the two columns answer one question together. A permanent
+/// history row whose `tax_year` disagreed with its own `period_end` would be
+/// summed into a year it does not belong to, or dropped from the one it does,
+/// and `finalized_payroll` has no UPDATE grant to repair it with. ADR-0005
+/// keys a PayPeriod's TaxYear on its end date alone, so January and February
+/// belong to the year that started the previous March.
+#[sqlx::test]
+async fn a_finalized_payroll_belongs_to_its_own_tax_year(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    // A period ending 31 January 2027 belongs to the TaxYear starting March
+    // 2026 -- the reading a bare calendar year gets wrong.
+    let a_run = |period_start: &str, period_end: &str| {
+        format!(
+            "INSERT INTO payroll_run
+                (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+             VALUES
+                ('employer-1', '{period_start}', '{period_end}', '{period_end}', 'ordinary',
+                 'finalized', 'actor')
+             RETURNING id::text"
+        )
+    };
+    let a_finalized_payroll =
+        |run_id: &str, period_start: &str, period_end: &str, tax_year: i32| {
+            format!(
+                "INSERT INTO finalized_payroll
+                (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
+                 payroll_input_json, payroll_rules_json, payroll_calculation_json,
+                 taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version,
+                 finalized_by)
+             VALUES
+                ('{run_id}'::uuid, 'emp-1', 'employer-1', '{period_start}', '{period_end}',
+                 {tax_year}, '{{}}', '{{}}', '{{}}', 15000, 1200, 'paye-1', 'ssc-1',
+                 '0.1.0+gdeadbeef', 'actor')"
+            )
+        };
+
+    for (case, period_start, period_end, tax_year, is_accepted) in [
+        (
+            "a January period read as the TaxYear that started the previous March",
+            "2027-01-01",
+            "2027-01-31",
+            2026,
+            true,
+        ),
+        (
+            "a January period read as its own calendar year",
+            "2026-12-26",
+            "2027-01-25",
+            2027,
+            false,
+        ),
+        (
+            "an October period a whole year after its TaxYear",
+            "2026-10-01",
+            "2026-10-31",
+            2025,
+            false,
+        ),
+    ] {
+        let run_id: String = sqlx::query_scalar(&a_run(period_start, period_end))
+            .fetch_one(&mut *conn)
+            .await
+            .expect("insert the run the history came from");
+        sqlx::query(
+            "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+             VALUES ($1::uuid, 'emp-1')",
+        )
+        .bind(&run_id)
+        .execute(&mut *conn)
+        .await
+        .expect("emp-1 is a member of the run");
+
+        let result = sqlx::query(&a_finalized_payroll(
+            &run_id,
+            period_start,
+            period_end,
+            tax_year,
+        ))
+        .execute(&mut *conn)
+        .await;
+
+        assert_eq!(result.is_ok(), is_accepted, "{case} -- got {result:?}");
+    }
+}
+
 /// §4.4 is explicit that CompensationTerms carries `effective_from` only: a row
 /// is in force until the next row's `effective_from`. A second column stating
 /// the same boundary could disagree with the first, making a gap or an overlap

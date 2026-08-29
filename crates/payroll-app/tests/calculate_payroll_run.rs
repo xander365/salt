@@ -586,6 +586,79 @@ async fn a_removed_member_is_never_calculated(pool: PgPool) {
     );
 }
 
+/// A member removed *after* it calculated must not leave its
+/// `WorkingPayrollCalculation` behind. The run reopens as `Draft` the moment
+/// the member goes, but the next recalculation can make it `Calculated`
+/// again from the members that remain — and a `Calculated` run holding a row
+/// for someone the Employer deliberately, reasonedly took out of it is a
+/// calculation that looks current and is not (§4.7, §4.9).
+#[sqlx::test]
+async fn removing_a_member_that_had_calculated_takes_its_working_calculation_with_it(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let stays = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let goes = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-2",
+        Money::from_cents(900000).unwrap(),
+    )
+    .await;
+    let run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+    calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+    assert!(
+        working_calculation_row(&pool, &run_id, &goes)
+            .await
+            .is_some(),
+        "the member must have calculated before it is removed"
+    );
+
+    remove_employment_from_run(
+        &pool,
+        &run_id,
+        &goes,
+        "resigned before the pay date",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        working_calculation_row(&pool, &run_id, &goes)
+            .await
+            .is_none(),
+        "a removed member keeps no working calculation"
+    );
+
+    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    assert_eq!(refusals, Vec::new());
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
+    assert!(
+        working_calculation_row(&pool, &run_id, &goes)
+            .await
+            .is_none(),
+        "and a Calculated run never grows one back for it"
+    );
+    assert!(
+        working_calculation_row(&pool, &run_id, &stays)
+            .await
+            .is_some()
+    );
+}
+
 #[sqlx::test]
 async fn recalculation_writes_no_action_log_entry(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
