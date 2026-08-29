@@ -124,6 +124,11 @@ pub enum PayrollAppError {
     /// also the social security base — so a second one supplied as a run
     /// Earning would silently double it (§4.5d).
     BasicPayCannotBeSetAsAnEarning,
+    /// `CalculatePayrollRun` was asked to recalculate a run that is already
+    /// `Finalized`: working state can no longer change once history has
+    /// been written (§4.7), so there is nothing left for a recalculation to
+    /// overwrite.
+    PayrollRunAlreadyFinalized(PayrollRunId),
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -210,6 +215,9 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "BasicPay is derived by calculate() from the compensation terms and cannot be supplied as a run Earning"
             ),
+            Self::PayrollRunAlreadyFinalized(id) => {
+                write!(f, "PayrollRun {id} is already Finalized")
+            }
         }
     }
 }
@@ -244,7 +252,8 @@ impl std::error::Error for PayrollAppError {
             | Self::PayrollRunIsNotOrdinary(_)
             | Self::RemovalReasonCannotBeEmpty
             | Self::EmploymentNotAnActiveRunMember { .. }
-            | Self::BasicPayCannotBeSetAsAnEarning => None,
+            | Self::BasicPayCannotBeSetAsAnEarning
+            | Self::PayrollRunAlreadyFinalized(_) => None,
         }
     }
 }
