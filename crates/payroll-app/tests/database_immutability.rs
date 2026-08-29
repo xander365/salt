@@ -82,6 +82,15 @@ async fn a_finalized_payroll(conn: &mut sqlx::PgConnection) -> String {
     .get(0);
 
     sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'employment-1')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("insert run membership");
+
+    sqlx::query(
         "INSERT INTO finalized_payroll
             (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
              payroll_input_json, payroll_rules_json, payroll_calculation_json,
@@ -226,4 +235,107 @@ async fn the_restricted_role_cannot_mutate_reversals_or_action_log_entries(pool:
             "expected an insufficient_privilege refusal while attempting to {action}, got {err:?}"
         );
     }
+}
+
+/// The whole grant matrix, asserted table by table. `GRANT ... ON ALL TABLES`
+/// covers exactly the tables that exist when it runs, so a table added by a
+/// later migration reaches the restricted role with no grant at all — the
+/// application would fail at run time on a table nobody thought about. Naming
+/// every table here turns that omission into a failing build instead.
+#[sqlx::test]
+async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(pool: PgPool) {
+    // Immutable history and the append-only audit trail. INV-004 (§6.2) is a
+    // permission on the first; the other two record acts that happened and so
+    // can never be revised or erased either.
+    let append_only = ["finalized_payroll", "reversal", "action_log_entry"];
+    // Master data, working run state, and liveness. Liveness needs DELETE
+    // because a reversal deletes the row (§6.2).
+    let mutable = [
+        "employer",
+        "employment",
+        "compensation_terms",
+        "opening_balance",
+        "prior_employment_declaration",
+        "unsupported_deduction_declaration",
+        "payroll_run",
+        "payroll_run_employment",
+        "payroll_run_earning",
+        "working_payroll_calculation",
+        "live_finalized_payroll",
+    ];
+
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("list tables");
+
+    for table in &tables {
+        // `_sqlx_migrations` is sqlx's own bookkeeping, not part of this design.
+        if table == "_sqlx_migrations" {
+            continue;
+        }
+        let expected: Vec<&str> = if append_only.contains(&table.as_str()) {
+            vec!["INSERT", "SELECT"]
+        } else if mutable.contains(&table.as_str()) {
+            vec!["DELETE", "INSERT", "SELECT", "UPDATE"]
+        } else {
+            panic!(
+                "table {table} is not named by this test, so nobody has decided what the \
+                 restricted role may do to it"
+            );
+        };
+
+        let granted: Vec<String> = sqlx::query_scalar(
+            "SELECT privilege_type FROM information_schema.role_table_grants
+             WHERE grantee = 'payroll_app' AND table_schema = 'public' AND table_name = $1
+             ORDER BY privilege_type",
+        )
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .expect("read grants");
+
+        assert_eq!(
+            granted, expected,
+            "the restricted role's permissions on {table} are not what the design intends"
+        );
+    }
+
+    for table in append_only.iter().chain(mutable.iter()) {
+        assert!(
+            tables.iter().any(|t| t == table),
+            "this test names {table}, but the migrations do not create it"
+        );
+    }
+}
+
+/// The schema's central table has no `UPDATE` grant, so an in-place JSON
+/// migration is not merely discouraged but impossible (§9). A down migration
+/// would be a promise to undo what the database will not let anyone undo, so
+/// migrations here are forward-only and the directory must contain no reverse
+/// half.
+#[test]
+fn there_are_no_down_migrations() {
+    let migrations = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+
+    let mut forward = Vec::new();
+    for entry in std::fs::read_dir(&migrations).expect("read the migrations directory") {
+        let name = entry.expect("read a migration entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".down.sql"),
+            "migrations are forward-only, but {name} is a down migration"
+        );
+        if name.ends_with(".sql") {
+            forward.push(name);
+        }
+    }
+
+    assert!(
+        !forward.is_empty(),
+        "expected the migrations directory to hold the schema, found nothing in {}",
+        migrations.display()
+    );
 }
