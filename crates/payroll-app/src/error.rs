@@ -1,5 +1,8 @@
 use chrono::NaiveDate;
-use payroll::{EmployerId, EmploymentId, PayPeriod, PayrollError, TaxYear};
+use payroll::{
+    EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollError, PayrollInput,
+    PayrollRules, TaxYear,
+};
 
 use crate::payroll_run::PayrollRunId;
 
@@ -126,6 +129,35 @@ pub enum PayrollAppError {
     /// has been written there is nothing left to overwrite (§4.7). A
     /// `Calculated` run is not refused: editing it reopens it as `Draft`.
     PayrollRunAlreadyFinalized(PayrollRunId),
+    /// `FinalizePayrollRun` was asked for a run that is not yet `Calculated`
+    /// — still `Draft`, with at least one member unresolved. `Finalized` is
+    /// the separate, absolute refusal above.
+    PayrollRunNotCalculated(PayrollRunId),
+    /// Finalization's reassembled `PayrollInput` no longer equals what the
+    /// working calculation approved (§5.2). Carries both so the mismatch is
+    /// explainable rather than merely declared — the whole point of
+    /// comparing all three rather than the `PayrollCalculation` alone.
+    FinalizationInputMismatch {
+        employment_id: EmploymentId,
+        approved: Box<PayrollInput>,
+        current: Box<PayrollInput>,
+    },
+    /// Finalization's re-resolved `PayrollRules` no longer equal what the
+    /// working calculation approved (§5.2) — e.g. a PAYE band corrected
+    /// outside the range this Employee reaches, which leaves the money
+    /// identical while the frozen rules would differ.
+    FinalizationRulesMismatch {
+        employment_id: EmploymentId,
+        approved: Box<PayrollRules>,
+        current: Box<PayrollRules>,
+    },
+    /// Finalization's recomputed `PayrollCalculation` no longer equals what
+    /// the working calculation approved (§5.2).
+    FinalizationCalculationMismatch {
+        employment_id: EmploymentId,
+        approved: Box<PayrollCalculation>,
+        current: Box<PayrollCalculation>,
+    },
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -214,6 +246,37 @@ impl std::fmt::Display for PayrollAppError {
             Self::PayrollRunAlreadyFinalized(id) => {
                 write!(f, "PayrollRun {id} is already Finalized")
             }
+            Self::PayrollRunNotCalculated(id) => {
+                write!(f, "PayrollRun {id} is not Calculated")
+            }
+            Self::FinalizationInputMismatch {
+                employment_id,
+                approved,
+                current,
+            } => write!(
+                f,
+                "finalizing Employment {employment_id} refused: the reassembled PayrollInput no \
+                 longer equals what was approved (approved: {approved:?}, current: {current:?})"
+            ),
+            Self::FinalizationRulesMismatch {
+                employment_id,
+                approved,
+                current,
+            } => write!(
+                f,
+                "finalizing Employment {employment_id} refused: the re-resolved PayrollRules no \
+                 longer equal what was approved (approved: {approved:?}, current: {current:?})"
+            ),
+            Self::FinalizationCalculationMismatch {
+                employment_id,
+                approved,
+                current,
+            } => write!(
+                f,
+                "finalizing Employment {employment_id} refused: the recomputed \
+                 PayrollCalculation no longer equals what was approved (approved: {approved:?}, \
+                 current: {current:?})"
+            ),
         }
     }
 }
@@ -248,7 +311,11 @@ impl std::error::Error for PayrollAppError {
             | Self::RemovalReasonCannotBeEmpty
             | Self::EmploymentNotAnActiveRunMember { .. }
             | Self::BasicPayCannotBeSetAsAnEarning
-            | Self::PayrollRunAlreadyFinalized(_) => None,
+            | Self::PayrollRunAlreadyFinalized(_)
+            | Self::PayrollRunNotCalculated(_)
+            | Self::FinalizationInputMismatch { .. }
+            | Self::FinalizationRulesMismatch { .. }
+            | Self::FinalizationCalculationMismatch { .. } => None,
         }
     }
 }

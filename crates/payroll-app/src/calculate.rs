@@ -164,7 +164,7 @@ pub async fn calculate_payroll_run(
 /// Every `payroll_run_earning` row for `payroll_run_id`, in line order,
 /// bucketed by `employment_id`. One query rather than one per member: the
 /// table is already keyed and ordered for exactly this read.
-async fn run_earnings_by_member(
+pub(crate) async fn run_earnings_by_member(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<HashMap<String, Vec<Earning>>, PayrollAppError> {
@@ -195,7 +195,7 @@ async fn run_earnings_by_member(
 /// calculated against different facts; and holding one pooled connection
 /// while asking for another is how a pool of N deadlocks under N concurrent
 /// callers.
-async fn assemble_and_calculate(
+pub(crate) async fn assemble_and_calculate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     employment_id: &EmploymentId,
     period: PayPeriod,

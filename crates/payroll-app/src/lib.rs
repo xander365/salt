@@ -13,6 +13,7 @@ mod compensation_terms;
 mod employer;
 mod employment;
 mod error;
+mod finalize;
 mod ids;
 mod opening_balance;
 mod payroll_run;
@@ -26,6 +27,7 @@ pub use compensation_terms::record_compensation_terms;
 pub use employer::create_employer;
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::PayrollAppError;
+pub use finalize::finalize_payroll_run;
 pub use opening_balance::record_opening_balance;
 pub use payroll_run::{
     PayrollRunId, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
