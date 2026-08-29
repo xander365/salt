@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use payroll::{EmployerId, EmploymentId, PayrollError};
+use payroll::{EmployerId, EmploymentId, PayrollError, TaxYear};
 
 /// `payroll-app`'s own error type. It wraps [`PayrollError`] rather than
 /// re-exporting it, because "PostgreSQL unavailable" and "run already
@@ -50,6 +50,28 @@ pub enum PayrollAppError {
     /// for the same reason: `Unknown` is what no row in force means (§4.5c),
     /// not a fact a declaration can state.
     UnsupportedDeductionDeclarationCannotBeUnknown,
+    /// An `OpeningBalance`'s `SaltCoverageStart` is not a `PayPeriod` end
+    /// date the Employer's `PaySchedule` generates (§4.5 guard 1).
+    SaltCoverageStartNotAPeriodEnd { salt_coverage_start: NaiveDate },
+    /// An `OpeningBalance`'s `SaltCoverageStart` does not fall inside the
+    /// row's own `TaxYear` (§4.5 guard 2).
+    SaltCoverageStartOutsideTaxYear {
+        salt_coverage_start: NaiveDate,
+        tax_year: TaxYear,
+    },
+    /// An `OpeningBalance`'s `SaltCoverageStart` falls before the
+    /// Employment's first payable `PayPeriod` end in that `TaxYear` (§4.5
+    /// guard 3): Salt cannot claim to have replaced a system for periods in
+    /// which the Employment did not exist.
+    SaltCoverageStartBeforeEmploymentIsPayable {
+        salt_coverage_start: NaiveDate,
+        first_payable_period_end: NaiveDate,
+    },
+    /// Non-zero `OpeningBalance` figures were given over an empty covered
+    /// span — `SaltCoverageStart` equal to the Employment's first payable
+    /// period end, so there is no pre-Salt period left for the figures to
+    /// describe (§4.5 guard 4).
+    OpeningBalanceFiguresOverAnEmptyCoveredSpan,
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -78,6 +100,31 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "an UnsupportedDeductionStatus declaration cannot itself be Unknown; omit the declaration instead"
             ),
+            Self::SaltCoverageStartNotAPeriodEnd {
+                salt_coverage_start,
+            } => write!(
+                f,
+                "SaltCoverageStart {salt_coverage_start} is not a PayPeriod end date the Employer's PaySchedule generates"
+            ),
+            Self::SaltCoverageStartOutsideTaxYear {
+                salt_coverage_start,
+                tax_year,
+            } => write!(
+                f,
+                "SaltCoverageStart {salt_coverage_start} falls outside TaxYear {}",
+                tax_year.starting_year()
+            ),
+            Self::SaltCoverageStartBeforeEmploymentIsPayable {
+                salt_coverage_start,
+                first_payable_period_end,
+            } => write!(
+                f,
+                "SaltCoverageStart {salt_coverage_start} falls before the Employment's first payable PayPeriod end {first_payable_period_end} in that TaxYear"
+            ),
+            Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan => write!(
+                f,
+                "non-zero OpeningBalance figures were given over an empty covered span"
+            ),
         }
     }
 }
@@ -101,7 +148,11 @@ impl std::error::Error for PayrollAppError {
             | Self::EmploymentEndsBeforeItStarts { .. }
             | Self::NoCompensationTermsInForce(_)
             | Self::PriorEmploymentDeclarationCannotBeUnknown
-            | Self::UnsupportedDeductionDeclarationCannotBeUnknown => None,
+            | Self::UnsupportedDeductionDeclarationCannotBeUnknown
+            | Self::SaltCoverageStartNotAPeriodEnd { .. }
+            | Self::SaltCoverageStartOutsideTaxYear { .. }
+            | Self::SaltCoverageStartBeforeEmploymentIsPayable { .. }
+            | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan => None,
         }
     }
 }

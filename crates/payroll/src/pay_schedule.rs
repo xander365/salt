@@ -201,7 +201,12 @@ impl PaySchedule {
     /// fall out of it. `None` only at the extreme edge of the
     /// representable calendar, where the surrounding period cannot be
     /// named.
-    pub(crate) fn period_containing(self, date: NaiveDate) -> Option<PayPeriod> {
+    ///
+    /// Public so a caller recording a boundary pinned to a `PayPeriod`
+    /// *end* date (`OpeningBalance`'s `SaltCoverageStart`, §4.5) can check
+    /// it against the schedule the same way `calculate` and
+    /// `validate_effective_from_is_a_period_start` check a period *start*.
+    pub fn period_containing(self, date: NaiveDate) -> Option<PayPeriod> {
         let (mut year, mut month) = (date.year(), date.month());
         for _ in 0..3 {
             if let Some(end) = self.end_date(year, month)

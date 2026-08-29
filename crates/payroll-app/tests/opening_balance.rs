@@ -1,0 +1,486 @@
+//! Proves `record_opening_balance` (issue #28): the seam
+//! `docs/domain/payroll-run-persistence.md` §4.5 and ADR-0014 describe,
+//! reached through the public API rather than raw SQL.
+
+use chrono::NaiveDate;
+use payroll::{DayOfMonth, EmployerId, EmploymentId, Money, PeriodEndDay, PersonId, TaxYear};
+use payroll_app::{
+    PayrollAppError, create_employer, create_employment, record_opening_balance, void_employment,
+};
+use sqlx::{PgPool, Row};
+
+fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+fn calendar_month_schedule() -> payroll::PaySchedule {
+    payroll::PaySchedule::new(PeriodEndDay::LastDayOfMonth)
+}
+
+fn twenty_sixth_schedule() -> payroll::PaySchedule {
+    payroll::PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()))
+}
+
+async fn an_employer_and_employment(
+    pool: &PgPool,
+    schedule: payroll::PaySchedule,
+    start_date: NaiveDate,
+) -> (EmployerId, EmploymentId) {
+    let employer_id = create_employer(pool, schedule, "actor").await.unwrap();
+    let employment_id = create_employment(
+        pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        start_date,
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    (employer_id, employment_id)
+}
+
+// ---- The legitimate mid-year adoption case (§4.5, ADR-0014 case A) ----
+
+#[sqlx::test]
+async fn a_mid_year_adoption_boundary_with_non_zero_prior_figures_is_recorded(pool: PgPool) {
+    // Employer E adopts Salt in October: the Employment existed all TaxYear
+    // (started at the TaxYear's own first period, 1 March), and
+    // March-September is pre-Salt.
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 30),
+        Money::from_cents(700_000).unwrap(),
+        Money::from_cents(140_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT tax_year, first_salt_period_end, prior_taxable_remuneration, prior_paye
+         FROM opening_balance WHERE employment_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i32, _>(0), 2026);
+    assert_eq!(row.get::<NaiveDate, _>(1), date(2026, 9, 30));
+    assert_eq!(row.get::<i64, _>(2), 700_000);
+    assert_eq!(row.get::<i64, _>(3), 140_000);
+}
+
+#[sqlx::test]
+async fn the_first_opening_balance_writes_a_created_action_log_entry(pool: PgPool) {
+    let (employer_id, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT employer_id, actor, action_type, target_type, target_id
+         FROM action_log_entry WHERE target_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>(0), employer_id.as_str());
+    assert_eq!(row.get::<String, _>(1), "actor");
+    assert_eq!(row.get::<String, _>(2), "opening_balance_created");
+    assert_eq!(row.get::<String, _>(3), "employment");
+}
+
+/// The same (Employment, TaxYear) recorded twice replaces the row rather
+/// than duplicating it, and the second write is a `Changed` act, not a
+/// second `Created`.
+#[sqlx::test]
+async fn re_recording_replaces_the_row_and_writes_a_changed_entry(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 30),
+        Money::from_cents(700_000).unwrap(),
+        Money::from_cents(140_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 10, 31),
+        Money::from_cents(800_000).unwrap(),
+        Money::from_cents(160_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "one row per (Employment, TaxYear), not two");
+
+    let row = sqlx::query(
+        "SELECT first_salt_period_end, prior_taxable_remuneration
+         FROM opening_balance WHERE employment_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<NaiveDate, _>(0), date(2026, 10, 31));
+    assert_eq!(row.get::<i64, _>(1), 800_000);
+
+    let action_types: Vec<String> = sqlx::query_scalar(
+        "SELECT action_type FROM action_log_entry WHERE target_id = $1 ORDER BY occurred_at",
+    )
+    .bind(employment_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        action_types,
+        vec!["opening_balance_created", "opening_balance_changed"]
+    );
+}
+
+// ---- Guard 1: SaltCoverageStart must be a PayPeriod end on the schedule ----
+
+#[sqlx::test]
+async fn a_salt_coverage_start_that_is_not_a_period_end_is_refused(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 15),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::SaltCoverageStartNotAPeriodEnd {
+            salt_coverage_start: date(2026, 9, 15),
+        })
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "a refused boundary must not be written");
+}
+
+/// The same guard on a schedule whose period end is not the last day of the
+/// month, so a nearby-but-wrong date must still be refused.
+#[sqlx::test]
+async fn a_salt_coverage_start_one_day_off_the_twenty_sixth_schedule_is_refused(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, twenty_sixth_schedule(), date(2026, 3, 26)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 26),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::SaltCoverageStartNotAPeriodEnd {
+            salt_coverage_start: date(2026, 9, 26),
+        })
+    );
+}
+
+// ---- Guard 2: SaltCoverageStart must fall inside the row's TaxYear ----
+
+#[sqlx::test]
+async fn a_salt_coverage_start_outside_the_stated_tax_year_is_refused(pool: PgPool) {
+    // The Employment has existed for years, so guard 3 is satisfied by any
+    // date in either TaxYear; only guard 2 can be failing here.
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2020, 1, 1)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2025),
+        date(2026, 10, 31),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::SaltCoverageStartOutsideTaxYear {
+            salt_coverage_start: date(2026, 10, 31),
+            tax_year: TaxYear::starting(2025),
+        })
+    );
+}
+
+// ---- Guard 3: on or after the Employment's first payable period end ----
+
+#[sqlx::test]
+async fn a_salt_coverage_start_before_the_employments_first_payable_period_is_refused(
+    pool: PgPool,
+) {
+    // The Employment starts in June, so May and earlier were never payable
+    // for it, even though May is inside the TaxYear.
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 6, 1)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 5, 31),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::SaltCoverageStartBeforeEmploymentIsPayable {
+                salt_coverage_start: date(2026, 5, 31),
+                first_payable_period_end: date(2026, 6, 30),
+            }
+        )
+    );
+}
+
+/// A continuing employee whose Employment predates the TaxYear entirely: the
+/// first payable period is the TaxYear's own first period (March), not the
+/// Employment's original start date years earlier. A boundary set at that
+/// TaxYear's own first period end is an empty covered span, so zero figures
+/// are accepted and non-zero figures are refused, even though the
+/// Employment itself is years older.
+#[sqlx::test]
+async fn a_continuing_employees_first_payable_period_is_the_tax_years_own_first_period(
+    pool: PgPool,
+) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2020, 1, 1)).await;
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 3, 31),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 3, 31),
+        Money::from_cents(1).unwrap(),
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan)
+    );
+}
+
+// ---- Guard 4: non-zero figures over an empty covered span ----
+
+#[sqlx::test]
+async fn zero_figures_at_the_employments_first_payable_period_are_accepted(pool: PgPool) {
+    // The Employment's very first payable period is also the boundary: the
+    // covered span is empty, and zero figures over an empty span state
+    // nothing false.
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 3, 31),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn non_zero_figures_at_the_employments_first_payable_period_are_refused(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 3, 31),
+        Money::from_cents(1).unwrap(),
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan)
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn non_zero_paye_alone_at_an_empty_covered_span_is_also_refused(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 3, 31),
+        Money::ZERO,
+        Money::from_cents(1).unwrap(),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan)
+    );
+}
+
+// ---- Employment existence and voiding ----
+
+#[sqlx::test]
+async fn recording_against_a_missing_employment_is_refused(pool: PgPool) {
+    let missing = EmploymentId::new("does-not-exist");
+
+    let result = record_opening_balance(
+        &pool,
+        &missing,
+        TaxYear::starting(2026),
+        date(2026, 9, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
+}
+
+#[sqlx::test]
+async fn a_voided_employment_accepts_no_opening_balance(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()))
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn an_unattributed_opening_balance_is_refused_by_the_database(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 9, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "",
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(PayrollAppError::Database(_))),
+        "expected a Database refusal, got {result:?}"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
