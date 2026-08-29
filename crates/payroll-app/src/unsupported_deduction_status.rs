@@ -1,8 +1,10 @@
-//! `DeclareUnsupportedDeductionStatus` (§4.5c, §12).
+//! `DeclareUnsupportedDeductionStatus` and the read that resolves which
+//! declaration governs a period (§4.5c, §12).
 
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, UnsupportedDeductionStatus, validate_effective_from_is_a_period_start,
+    EmployerId, EmploymentId, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    validate_effective_from_is_a_period_start,
 };
 use sqlx::PgPool;
 
@@ -118,4 +120,77 @@ pub async fn declare_unsupported_deduction_status(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Reads back the `UnsupportedDeductionStatus` **in force** at `as_of`:
+/// the row with the latest `effective_from` on or before that date.
+///
+/// `as_of` is a `PayPeriod` end date at every real call site, and because
+/// every `effective_from` is pinned to a `PayPeriod` start, exactly one
+/// row governs any given period (§4.5c) — the resolution is a `LIMIT 1`
+/// rather than an overlap search.
+///
+/// **No row in force means `Unknown`** (§4.5c), returned as the pure
+/// crate's own third value for the same reason `get_prior_employment`
+/// does: one spelling of silence, never two.
+///
+/// A missing or void Employment is refused rather than answered
+/// `Unknown`, exactly as in `get_prior_employment`.
+pub async fn get_unsupported_deduction_status(
+    pool: &PgPool,
+    employment_id: &EmploymentId,
+    as_of: NaiveDate,
+) -> Result<UnsupportedDeductionStatus, PayrollAppError> {
+    type DeclarationRow = (bool, Option<String>, Option<serde_json::Value>);
+
+    let row: Option<DeclarationRow> = sqlx::query_as(
+        "SELECT employment.is_void,
+                in_force.status,
+                in_force.kinds
+         FROM employment
+         LEFT JOIN LATERAL (
+             SELECT status, kinds
+             FROM unsupported_deduction_declaration
+             WHERE employment_id = employment.id AND effective_from <= $2
+             ORDER BY effective_from DESC
+             LIMIT 1
+         ) AS in_force ON TRUE
+         WHERE employment.id = $1",
+    )
+    .bind(employment_id.as_str())
+    .bind(as_of)
+    .fetch_optional(pool)
+    .await?;
+
+    let (is_void, status, kinds) =
+        row.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
+    if is_void {
+        return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
+    }
+
+    let Some(status) = status else {
+        return Ok(UnsupportedDeductionStatus::Unknown);
+    };
+
+    Ok(match status.as_str() {
+        "confirmed_none" => UnsupportedDeductionStatus::ConfirmedNone,
+        "present" => {
+            let kinds = kinds
+                .expect("unsupported_deduction_declaration CHECK: a 'present' row names kinds");
+            // The CHECK guarantees a non-empty JSON array; it cannot
+            // guarantee every element is one of the four kinds this build
+            // knows, so a row written outside Rust is a stored-data fault
+            // and not a domain refusal.
+            let kinds: UnsupportedDeductionKinds =
+                serde_json::from_value(kinds).map_err(|err| {
+                    PayrollAppError::Database(format!(
+                        "unsupported_deduction_declaration.kinds is not an UnsupportedDeductionKinds: {err}"
+                    ))
+                })?;
+            UnsupportedDeductionStatus::Present(kinds)
+        }
+        other => unreachable!(
+            "unsupported_deduction_declaration.status CHECK admits only 'confirmed_none' and 'present', not {other}"
+        ),
+    })
 }

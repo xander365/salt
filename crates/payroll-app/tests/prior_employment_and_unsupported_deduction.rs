@@ -11,7 +11,8 @@ use payroll::{
 };
 use payroll_app::{
     PayrollAppError, create_employer, create_employment, declare_prior_employment,
-    declare_unsupported_deduction_status, void_employment,
+    declare_unsupported_deduction_status, get_prior_employment, get_unsupported_deduction_status,
+    void_employment,
 };
 use sqlx::{PgPool, Row};
 
@@ -59,7 +60,7 @@ async fn a_confirmed_none_prior_employment_is_recorded_with_no_figures(pool: PgP
     .unwrap();
 
     let row = sqlx::query(
-        "SELECT status, taxable_remuneration::bigint, paye::bigint
+        "SELECT status, taxable_remuneration, paye
          FROM prior_employment_declaration
          WHERE employment_id = $1 AND tax_year = 2026",
     )
@@ -91,7 +92,7 @@ async fn a_present_prior_employment_is_recorded_with_its_figures_set_together(po
     .unwrap();
 
     let row = sqlx::query(
-        "SELECT status, taxable_remuneration::bigint, paye::bigint
+        "SELECT status, taxable_remuneration, paye
          FROM prior_employment_declaration
          WHERE employment_id = $1 AND tax_year = 2026",
     )
@@ -237,7 +238,7 @@ async fn redeclaring_prior_employment_replaces_the_row_and_writes_a_changed_entr
     assert_eq!(count, 1, "one row per (Employment, TaxYear), not two");
 
     let row = sqlx::query(
-        "SELECT status, taxable_remuneration::bigint FROM prior_employment_declaration
+        "SELECT status, taxable_remuneration FROM prior_employment_declaration
          WHERE employment_id = $1 AND tax_year = 2026",
     )
     .bind(employment_id.as_str())
@@ -584,4 +585,251 @@ async fn an_unattributed_unsupported_deduction_declaration_is_refused_by_the_dat
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+// ---- Reading the declarations back (§4.5b, §4.5c) ----
+
+/// The criterion the whole three-valued design rests on: silence reads as
+/// `Unknown`, never as a confirmed none.
+#[sqlx::test]
+async fn no_prior_employment_row_reads_back_as_unknown(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let prior_employment = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026))
+        .await
+        .unwrap();
+
+    assert_eq!(prior_employment, PriorEmployment::Unknown);
+}
+
+/// A declaration for one TaxYear says nothing about another, so the year
+/// with no row of its own is still `Unknown` — "nothing else means
+/// Unknown" cuts both ways.
+#[sqlx::test]
+async fn a_declaration_for_one_tax_year_leaves_another_unknown(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    declare_prior_employment(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let declared = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026))
+        .await
+        .unwrap();
+    let other_year = get_prior_employment(&pool, &employment_id, TaxYear::starting(2027))
+        .await
+        .unwrap();
+
+    assert_eq!(declared, PriorEmployment::None);
+    assert_eq!(other_year, PriorEmployment::Unknown);
+}
+
+#[sqlx::test]
+async fn a_present_prior_employment_reads_back_with_both_figures(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let figures = PriorEmploymentFigures::new(
+        Money::from_cents(150_000).unwrap(),
+        Money::from_cents(20_000).unwrap(),
+    );
+    declare_prior_employment(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        PriorEmployment::Some(figures),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let prior_employment = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026))
+        .await
+        .unwrap();
+
+    assert_eq!(prior_employment, PriorEmployment::Some(figures));
+}
+
+/// A caller naming an Employment that does not exist is not silence, and
+/// answering `Unknown` would turn a mistyped id into a fact about payroll.
+#[sqlx::test]
+async fn reading_prior_employment_for_a_missing_employment_is_refused(pool: PgPool) {
+    let missing = EmploymentId::new("no-such-employment");
+
+    let result = get_prior_employment(&pool, &missing, TaxYear::starting(2026)).await;
+
+    assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
+}
+
+#[sqlx::test]
+async fn reading_prior_employment_for_a_voided_employment_is_refused(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    declare_prior_employment(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let result = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026)).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentIsVoid(employment_id))
+    );
+}
+
+#[sqlx::test]
+async fn no_unsupported_deduction_row_in_force_reads_back_as_unknown(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let status = get_unsupported_deduction_status(&pool, &employment_id, date(2026, 2, 25))
+        .await
+        .unwrap();
+
+    assert_eq!(status, UnsupportedDeductionStatus::Unknown);
+}
+
+/// §4.5c's own story, read from the other side: exactly one row governs
+/// any given period, and it is the latest one effective on or before that
+/// period's end. March through July stay `ConfirmedNone` while August
+/// onwards is `Present`, and the period before the first declaration is
+/// still `Unknown`.
+#[sqlx::test]
+async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    declare_unsupported_deduction_status(
+        &pool,
+        &employment_id,
+        date(2026, 2, 26),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        "actor",
+    )
+    .await
+    .unwrap();
+    let kinds =
+        UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::ProvidentFund]).unwrap();
+    declare_unsupported_deduction_status(
+        &pool,
+        &employment_id,
+        date(2026, 7, 26),
+        UnsupportedDeductionStatus::Present(kinds.clone()),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let before_any = get_unsupported_deduction_status(&pool, &employment_id, date(2026, 2, 25))
+        .await
+        .unwrap();
+    let governed_by_the_first =
+        get_unsupported_deduction_status(&pool, &employment_id, date(2026, 6, 25))
+            .await
+            .unwrap();
+    let governed_by_the_second =
+        get_unsupported_deduction_status(&pool, &employment_id, date(2026, 8, 25))
+            .await
+            .unwrap();
+
+    assert_eq!(before_any, UnsupportedDeductionStatus::Unknown);
+    assert_eq!(
+        governed_by_the_first,
+        UnsupportedDeductionStatus::ConfirmedNone
+    );
+    assert_eq!(
+        governed_by_the_second,
+        UnsupportedDeductionStatus::Present(kinds)
+    );
+}
+
+#[sqlx::test]
+async fn reading_unsupported_deduction_status_for_a_missing_employment_is_refused(pool: PgPool) {
+    let missing = EmploymentId::new("no-such-employment");
+
+    let result = get_unsupported_deduction_status(&pool, &missing, date(2026, 2, 25)).await;
+
+    assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
+}
+
+#[sqlx::test]
+async fn reading_unsupported_deduction_status_for_a_voided_employment_is_refused(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    declare_unsupported_deduction_status(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        "actor",
+    )
+    .await
+    .unwrap();
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let result = get_unsupported_deduction_status(&pool, &employment_id, date(2026, 2, 25)).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentIsVoid(employment_id))
+    );
+}
+
+// ---- What the schema refuses on its own (0020) ----
+
+/// `PriorEmploymentFigures` holds two `Money` amounts and a `Money` is
+/// never negative, so the reader reconstructs one with `Money::from_cents`
+/// and can only `expect` it to succeed. The CHECK is what makes that
+/// expectation a schema guarantee rather than a hope about every writer.
+#[sqlx::test]
+async fn the_database_refuses_a_negative_prior_employment_figure(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let result = sqlx::query(
+        "INSERT INTO prior_employment_declaration
+            (employment_id, tax_year, status, taxable_remuneration, paye, declared_by)
+         VALUES ($1, 2026, 'present', -1, 20000, 'actor')",
+    )
+    .bind(employment_id.as_str())
+    .execute(&pool)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "expected the CHECK to refuse a negative Money"
+    );
+}
+
+/// The kinds column is the serialized form of a non-empty JSON array, and
+/// anything else is refused rather than aborting the CHECK's own
+/// evaluation.
+#[sqlx::test]
+async fn the_database_refuses_kinds_that_are_not_a_non_empty_array(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    for kinds in [r#"{"ProvidentFund": true}"#, "[]", r#""ProvidentFund""#] {
+        let result = sqlx::query(
+            "INSERT INTO unsupported_deduction_declaration
+                (employment_id, effective_from, status, kinds, declared_by)
+             VALUES ($1, DATE '2026-01-26', 'present', $2::jsonb, 'actor')",
+        )
+        .bind(employment_id.as_str())
+        .bind(kinds)
+        .execute(&pool)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "expected the CHECK to refuse kinds {kinds}"
+        );
+    }
 }

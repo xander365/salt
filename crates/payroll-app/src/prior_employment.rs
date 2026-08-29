@@ -1,6 +1,6 @@
-//! `DeclarePriorEmployment` (§4.5b, §12).
+//! `DeclarePriorEmployment` and the read that resolves it (§4.5b, §12).
 
-use payroll::{EmployerId, EmploymentId, PriorEmployment, TaxYear};
+use payroll::{EmployerId, EmploymentId, Money, PriorEmployment, PriorEmploymentFigures, TaxYear};
 use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
@@ -100,4 +100,72 @@ pub async fn declare_prior_employment(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Reads back the `PriorEmployment` fact for one (Employment, TaxYear).
+///
+/// **No row means `Unknown`, and nothing else means `Unknown`** (§4.5b).
+/// Returning the pure crate's three-valued type rather than an
+/// `Option<..>` is what states that: an `Option` would give a caller a
+/// second way to spell the same silence, and two spellings of silence is
+/// how one of them eventually gets read as a confirmed none.
+///
+/// A missing Employment is not silence — it is a caller naming something
+/// that does not exist — so it is refused rather than answered `Unknown`.
+/// A void Employment is refused for §4.3's reason: this is a calculation
+/// input, and a voided Employment reaches no payroll.
+pub async fn get_prior_employment(
+    pool: &PgPool,
+    employment_id: &EmploymentId,
+    tax_year: TaxYear,
+) -> Result<PriorEmployment, PayrollAppError> {
+    type DeclarationRow = (bool, Option<String>, Option<i64>, Option<i64>);
+
+    // One statement, and an outer join rather than two reads: "the
+    // Employment exists" and "it has no declaration" are the two answers
+    // this function must tell apart, and reading them separately would let
+    // a void committing in between report the second.
+    let row: Option<DeclarationRow> = sqlx::query_as(
+        "SELECT employment.is_void,
+                declaration.status,
+                declaration.taxable_remuneration,
+                declaration.paye
+         FROM employment
+         LEFT JOIN prior_employment_declaration AS declaration
+                ON declaration.employment_id = employment.id
+               AND declaration.tax_year = $2
+         WHERE employment.id = $1",
+    )
+    .bind(employment_id.as_str())
+    .bind(tax_year.starting_year())
+    .fetch_optional(pool)
+    .await?;
+
+    let (is_void, status, taxable_remuneration, paye) =
+        row.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
+    if is_void {
+        return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
+    }
+
+    let Some(status) = status else {
+        return Ok(PriorEmployment::Unknown);
+    };
+
+    let money = |cents: Option<i64>| {
+        Money::from_cents(
+            cents.expect("prior_employment_declaration CHECK: a 'present' row sets both figures"),
+        )
+        .expect("prior_employment_declaration CHECK: neither figure is negative, so it is a Money")
+    };
+
+    Ok(match status.as_str() {
+        "confirmed_none" => PriorEmployment::None,
+        "present" => PriorEmployment::Some(PriorEmploymentFigures::new(
+            money(taxable_remuneration),
+            money(paye),
+        )),
+        other => unreachable!(
+            "prior_employment_declaration.status CHECK admits only 'confirmed_none' and 'present', not {other}"
+        ),
+    })
 }
