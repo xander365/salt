@@ -54,7 +54,7 @@ async fn a_mid_year_adoption_boundary_with_non_zero_prior_figures_is_recorded(po
         &pool,
         &employment_id,
         TaxYear::starting(2026),
-        date(2026, 9, 30),
+        date(2026, 10, 31),
         Money::from_cents(700_000).unwrap(),
         Money::from_cents(140_000).unwrap(),
         "actor",
@@ -71,7 +71,7 @@ async fn a_mid_year_adoption_boundary_with_non_zero_prior_figures_is_recorded(po
     .await
     .unwrap();
     assert_eq!(row.get::<i32, _>(0), 2026);
-    assert_eq!(row.get::<NaiveDate, _>(1), date(2026, 9, 30));
+    assert_eq!(row.get::<NaiveDate, _>(1), date(2026, 10, 31));
     assert_eq!(row.get::<i64, _>(2), 700_000);
     assert_eq!(row.get::<i64, _>(3), 140_000);
 }
