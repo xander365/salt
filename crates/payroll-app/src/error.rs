@@ -1,6 +1,8 @@
 use chrono::NaiveDate;
 use payroll::{EmployerId, EmploymentId, PayrollError, TaxYear};
 
+use crate::payroll_run::PayrollRunId;
+
 /// `payroll-app`'s own error type. It wraps [`PayrollError`] rather than
 /// re-exporting it, because "PostgreSQL unavailable" and "run already
 /// finalized" are different categories and never share an enum (ADR-0009).
@@ -72,6 +74,25 @@ pub enum PayrollAppError {
     /// period end, so there is no pre-Salt period left for the figures to
     /// describe (§4.5 guard 4).
     OpeningBalanceFiguresOverAnEmptyCoveredSpan { salt_coverage_start: NaiveDate },
+    /// `RemoveEmploymentFromRun` was given an empty reason. Silent omission
+    /// is the dangerous failure (§4.8) — a removal is a deliberate,
+    /// reasoned act, and an empty reason states nothing.
+    RemovalReasonCannotBeEmpty,
+    /// `payroll_run_id` and `employment_id` do not name a live membership:
+    /// either the Employment was never proposed into that run, or it was
+    /// already removed. The two are not distinguished, for the same reason
+    /// `void_employment` does not distinguish "never existed" from
+    /// "already void" any further than it needs to — either way there is no
+    /// live membership left to remove.
+    EmploymentNotAnActiveRunMember {
+        payroll_run_id: PayrollRunId,
+        employment_id: EmploymentId,
+    },
+    /// `SetRunEarnings` was given a `BasicPay` line. `calculate` derives
+    /// `BasicPay` itself from the Employment's `CompensationTerms` — it is
+    /// also the social security base — so a second one supplied as a run
+    /// Earning would silently double it (§4.5d).
+    BasicPayCannotBeSetAsAnEarning,
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -127,6 +148,20 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "non-zero OpeningBalance figures were given over an empty covered span: SaltCoverageStart {salt_coverage_start} is itself the Employment's first payable PayPeriod end, so no pre-Salt period remains for them to describe"
             ),
+            Self::RemovalReasonCannotBeEmpty => {
+                write!(f, "a removal reason must not be empty")
+            }
+            Self::EmploymentNotAnActiveRunMember {
+                payroll_run_id,
+                employment_id,
+            } => write!(
+                f,
+                "Employment {employment_id} is not an active member of PayrollRun {payroll_run_id}"
+            ),
+            Self::BasicPayCannotBeSetAsAnEarning => write!(
+                f,
+                "BasicPay is derived by calculate() from the compensation terms and cannot be supplied as a run Earning"
+            ),
         }
     }
 }
@@ -154,7 +189,10 @@ impl std::error::Error for PayrollAppError {
             | Self::SaltCoverageStartNotAPeriodEnd { .. }
             | Self::SaltCoverageStartOutsideTaxYear { .. }
             | Self::SaltCoverageStartBeforeEmploymentIsPayable { .. }
-            | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan { .. } => None,
+            | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan { .. }
+            | Self::RemovalReasonCannotBeEmpty
+            | Self::EmploymentNotAnActiveRunMember { .. }
+            | Self::BasicPayCannotBeSetAsAnEarning => None,
         }
     }
 }

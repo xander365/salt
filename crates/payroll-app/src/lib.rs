@@ -14,6 +14,7 @@ mod employment;
 mod error;
 mod ids;
 mod opening_balance;
+mod payroll_run;
 mod prior_employment;
 mod unsupported_deduction_status;
 
@@ -23,6 +24,9 @@ pub use employer::create_employer;
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::PayrollAppError;
 pub use opening_balance::record_opening_balance;
+pub use payroll_run::{
+    PayrollRunId, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
+};
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,

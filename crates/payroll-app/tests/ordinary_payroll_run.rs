@@ -1,0 +1,578 @@
+//! Proves the use cases issue #29 introduces: `create_ordinary_payroll_run`,
+//! `remove_employment_from_run` and `set_run_earnings` — the Ordinary half
+//! of `docs/domain/payroll-run-persistence.md` §4.6-§4.8 and §4.5d, reached
+//! through the public API a later ticket calls, not raw SQL.
+
+use chrono::NaiveDate;
+use payroll::{DayOfMonth, Earning, EmploymentId, Money, PayPeriod, PeriodEndDay, PersonId};
+use payroll_app::{
+    PayrollAppError, PayrollRunId, create_employer, create_employment, create_ordinary_payroll_run,
+    remove_employment_from_run, set_run_earnings, void_employment,
+};
+use sqlx::{PgPool, Row};
+
+fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+/// A 26th-to-25th monthly schedule, matching the other tests in this crate.
+fn twenty_sixth_schedule() -> payroll::PaySchedule {
+    payroll::PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()))
+}
+
+/// 2026-01-26 to 2026-02-25, one of `twenty_sixth_schedule()`'s own periods.
+fn march_period() -> PayPeriod {
+    PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
+}
+
+async fn an_employer(pool: &PgPool) -> payroll::EmployerId {
+    create_employer(pool, twenty_sixth_schedule(), "actor")
+        .await
+        .unwrap()
+}
+
+async fn an_employment(
+    pool: &PgPool,
+    employer_id: &payroll::EmployerId,
+    person: &str,
+    start_date: NaiveDate,
+    end_date: Option<NaiveDate>,
+) -> EmploymentId {
+    create_employment(
+        pool,
+        employer_id,
+        &PersonId::new(person),
+        start_date,
+        end_date,
+        "actor",
+    )
+    .await
+    .unwrap()
+}
+
+// ---- CreateOrdinaryPayrollRun (§4.6-§4.8) ----
+
+#[sqlx::test]
+async fn a_draft_ordinary_run_is_created_with_its_period_and_pay_date(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+
+    let run_id = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT employer_id, period_start, period_end, pay_date, kind, status, correction_reason
+         FROM payroll_run WHERE id = $1::uuid",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>(0), employer_id.as_str());
+    assert_eq!(row.get::<NaiveDate, _>(1), date(2026, 1, 26));
+    assert_eq!(row.get::<NaiveDate, _>(2), date(2026, 2, 25));
+    assert_eq!(row.get::<NaiveDate, _>(3), date(2026, 3, 1));
+    assert_eq!(row.get::<String, _>(4), "ordinary");
+    assert_eq!(row.get::<String, _>(5), "draft");
+    assert_eq!(row.get::<Option<String>, _>(6), None);
+}
+
+#[sqlx::test]
+async fn every_employment_overlapping_the_period_is_proposed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let continuing = an_employment(&pool, &employer_id, "person-1", date(2025, 1, 1), None).await;
+    let joiner = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 1), None).await;
+    let leaver = an_employment(
+        &pool,
+        &employer_id,
+        "person-3",
+        date(2025, 1, 1),
+        Some(date(2026, 1, 26)),
+    )
+    .await;
+
+    let run_id = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT employment_id FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid ORDER BY employment_id",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected = vec![
+        continuing.as_str().to_string(),
+        joiner.as_str().to_string(),
+        leaver.as_str().to_string(),
+    ];
+    expected.sort();
+    assert_eq!(members, expected);
+}
+
+#[sqlx::test]
+async fn an_employment_wholly_outside_the_period_is_not_proposed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    an_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        date(2024, 1, 1),
+        Some(date(2026, 1, 25)),
+    )
+    .await;
+    an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
+
+    let run_id = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_employment WHERE payroll_run_id = $1::uuid",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn a_voided_employment_is_never_proposed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let voided = an_employment(&pool, &employer_id, "person-1", date(2025, 1, 1), None).await;
+    void_employment(&pool, &voided, "actor").await.unwrap();
+    let live = an_employment(&pool, &employer_id, "person-2", date(2025, 1, 1), None).await;
+
+    let run_id = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT employment_id FROM payroll_run_employment WHERE payroll_run_id = $1::uuid",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(members, vec![live.as_str().to_string()]);
+}
+
+#[sqlx::test]
+async fn a_second_ordinary_run_for_the_same_employer_and_period_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let result = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 5),
+        "actor",
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(PayrollAppError::Database(_))),
+        "expected a Database refusal, got {result:?}"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM payroll_run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn creating_a_run_against_a_missing_employer_is_refused(pool: PgPool) {
+    let missing = payroll::EmployerId::new("does-not-exist");
+
+    let result =
+        create_ordinary_payroll_run(&pool, &missing, march_period(), date(2026, 3, 1), "actor")
+            .await;
+
+    assert_eq!(result, Err(PayrollAppError::EmployerNotFound(missing)));
+}
+
+#[sqlx::test]
+async fn creating_a_run_writes_a_payroll_run_created_action_log_entry(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+
+    let run_id = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT employer_id, actor, action_type, target_type, target_id
+         FROM action_log_entry WHERE target_id = $1",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>(0), employer_id.as_str());
+    assert_eq!(row.get::<String, _>(1), "actor");
+    assert_eq!(row.get::<String, _>(2), "payroll_run_created");
+    assert_eq!(row.get::<String, _>(3), "payroll_run");
+}
+
+// ---- RemoveEmploymentFromRun (§4.8) ----
+
+async fn a_run_with_one_member(pool: &PgPool) -> (payroll::EmployerId, PayrollRunId, EmploymentId) {
+    let employer_id = an_employer(pool).await;
+    let employment_id = an_employment(pool, &employer_id, "person-1", date(2025, 1, 1), None).await;
+    let run_id = create_ordinary_payroll_run(
+        pool,
+        &employer_id,
+        march_period(),
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await
+    .unwrap();
+    (employer_id, run_id, employment_id)
+}
+
+#[sqlx::test]
+async fn removing_a_member_records_the_reason_actor_and_time(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+
+    remove_employment_from_run(
+        &pool,
+        &run_id,
+        &employment_id,
+        "on unpaid leave",
+        "reviewer",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT removed_by, removal_reason, removed_at FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>(0), "reviewer");
+    assert_eq!(row.get::<String, _>(1), "on unpaid leave");
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>(2)
+            .is_some()
+    );
+}
+
+#[sqlx::test]
+async fn removing_a_member_with_an_empty_reason_is_refused(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+
+    let result = remove_employment_from_run(&pool, &run_id, &employment_id, "", "reviewer").await;
+
+    assert_eq!(result, Err(PayrollAppError::RemovalReasonCannotBeEmpty));
+    let removed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT removed_at FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(removed_at, None);
+}
+
+#[sqlx::test]
+async fn removing_an_employment_that_is_not_a_member_is_refused(pool: PgPool) {
+    let (employer_id, run_id, _) = a_run_with_one_member(&pool).await;
+    let outsider = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
+
+    let result =
+        remove_employment_from_run(&pool, &run_id, &outsider, "wrong person", "reviewer").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentNotAnActiveRunMember {
+            payroll_run_id: run_id,
+            employment_id: outsider,
+        })
+    );
+}
+
+#[sqlx::test]
+async fn removing_an_already_removed_member_is_refused(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    remove_employment_from_run(&pool, &run_id, &employment_id, "first reason", "reviewer")
+        .await
+        .unwrap();
+
+    let result = remove_employment_from_run(
+        &pool,
+        &run_id,
+        &employment_id,
+        "second reason",
+        "someone-else",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentNotAnActiveRunMember {
+            payroll_run_id: run_id.clone(),
+            employment_id: employment_id.clone(),
+        })
+    );
+    let row = sqlx::query(
+        "SELECT removed_by, removal_reason FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<String, _>(0),
+        "reviewer",
+        "a refused second removal must not overwrite who removed it first"
+    );
+    assert_eq!(row.get::<String, _>(1), "first reason");
+}
+
+#[sqlx::test]
+async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_its_reason(
+    pool: PgPool,
+) {
+    let (employer_id, run_id, employment_id) = a_run_with_one_member(&pool).await;
+
+    remove_employment_from_run(
+        &pool,
+        &run_id,
+        &employment_id,
+        "on unpaid leave",
+        "reviewer",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT employer_id, actor, action_type, target_type, target_id, context
+         FROM action_log_entry WHERE target_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>(0), employer_id.as_str());
+    assert_eq!(row.get::<String, _>(1), "reviewer");
+    assert_eq!(row.get::<String, _>(2), "employment_removed_from_run");
+    assert_eq!(row.get::<String, _>(3), "employment");
+    let context: serde_json::Value = row.get(5);
+    assert_eq!(context, serde_json::json!({ "reason": "on unpaid leave" }));
+}
+
+// ---- SetRunEarnings (§4.5d) ----
+
+#[sqlx::test]
+async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let earnings = vec![
+        Earning::TaxableAllowance(Money::from_cents(50_000).unwrap()),
+        Earning::TaxableAllowance(Money::from_cents(10_000).unwrap()),
+    ];
+
+    set_run_earnings(&pool, &run_id, &employment_id, earnings.clone())
+        .await
+        .unwrap();
+
+    let rows: Vec<(i16, serde_json::Value)> = sqlx::query_as(
+        "SELECT line, earning_json FROM payroll_run_earning
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2 ORDER BY line",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, 0);
+    assert_eq!(rows[1].0, 1);
+    assert_eq!(
+        serde_json::from_value::<Earning>(rows[0].1.clone()).unwrap(),
+        earnings[0]
+    );
+    assert_eq!(
+        serde_json::from_value::<Earning>(rows[1].1.clone()).unwrap(),
+        earnings[1]
+    );
+}
+
+#[sqlx::test]
+async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+
+    set_run_earnings(&pool, &run_id, &employment_id, Vec::new())
+        .await
+        .unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_earning
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![Earning::TaxableAllowance(
+            Money::from_cents(50_000).unwrap(),
+        )],
+    )
+    .await
+    .unwrap();
+
+    set_run_earnings(&pool, &run_id, &employment_id, Vec::new())
+        .await
+        .unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_earning
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "the second call must clear the first call's lines"
+    );
+}
+
+#[sqlx::test]
+async fn a_basic_pay_line_is_refused(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+
+    let result = set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![Earning::BasicPay(Money::from_cents(500_000).unwrap())],
+    )
+    .await;
+
+    assert_eq!(result, Err(PayrollAppError::BasicPayCannotBeSetAsAnEarning));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_earning
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "a refused BasicPay line must not be written");
+}
+
+#[sqlx::test]
+async fn a_basic_pay_line_among_others_is_refused_and_writes_nothing(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+
+    let result = set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![
+            Earning::TaxableAllowance(Money::from_cents(10_000).unwrap()),
+            Earning::BasicPay(Money::from_cents(500_000).unwrap()),
+        ],
+    )
+    .await;
+
+    assert_eq!(result, Err(PayrollAppError::BasicPayCannotBeSetAsAnEarning));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_earning
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_a_database_refusal(
+    pool: PgPool,
+) {
+    let (employer_id, run_id, _) = a_run_with_one_member(&pool).await;
+    let outsider = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
+
+    let result = set_run_earnings(
+        &pool,
+        &run_id,
+        &outsider,
+        vec![Earning::TaxableAllowance(
+            Money::from_cents(10_000).unwrap(),
+        )],
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(PayrollAppError::Database(_))),
+        "expected a Database refusal, got {result:?}"
+    );
+}
