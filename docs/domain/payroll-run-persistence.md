@@ -1124,6 +1124,7 @@ PK (employment_id, period_end) on liveness    one live payroll
 one Ordinary run per Employer + PayPeriod
 CHECK  correction_reason non-empty when kind = Correction
 CHECK  at most one membership row when kind = Correction
+FK     no voided Employment in run membership
 REVOKE UPDATE, DELETE on finalized_payroll
 ```
 

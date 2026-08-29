@@ -109,6 +109,57 @@ async fn an_ordinary_run_permits_more_than_one_employment(pool: PgPool) {
     .expect("an Ordinary run auto-proposes every overlapping Employment");
 }
 
+/// §4.3: a mis-created Employment is void rather than deleted, and therefore
+/// cannot be proposed into a run. The converse guard matters too: otherwise a
+/// member could become void after it had already entered a run.
+#[sqlx::test]
+async fn a_voided_employment_cannot_be_or_become_a_run_member(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'draft', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert ordinary run");
+
+    sqlx::query("UPDATE employment SET is_void = TRUE WHERE id = 'emp-2'")
+        .execute(&mut *conn)
+        .await
+        .expect("void an Employment that is not a run member");
+
+    let void_member = sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-2')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await;
+    assert!(
+        void_member.is_err(),
+        "a voided Employment must not enter run membership"
+    );
+
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("an active Employment can join a run");
+
+    let void_member = sqlx::query("UPDATE employment SET is_void = TRUE WHERE id = 'emp-1'")
+        .execute(&mut *conn)
+        .await;
+    assert!(void_member.is_err(), "a run member must not become void");
+}
+
 #[sqlx::test]
 async fn only_one_ordinary_run_exists_per_employer_and_pay_period(pool: PgPool) {
     let mut conn = pool.acquire().await.expect("acquire connection");
