@@ -5,6 +5,7 @@ use sqlx::{Acquire, PgPool, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::error::PayrollAppError;
+use crate::freeze::employment_has_a_finalization_in;
 
 /// Records the `PriorEmploymentDeclaration` for one (Employment, TaxYear),
 /// or replaces whichever one is already there. Concurrent employment is out
@@ -16,10 +17,12 @@ use crate::error::PayrollAppError;
 /// two-valued, and `Unknown` is what the absence of a row already means
 /// (§4.5b), so it is refused here rather than written.
 ///
-/// This writes no pre-finalization gate and enforces no freeze: `calculate`
-/// already refuses `Unknown`, so a run missing this declaration can never
-/// reach `Calculated` (§4.5b). Freezing an existing declaration once it has
-/// been read into a finalization is a later ticket.
+/// `calculate` already refuses `Unknown`, so a run missing this declaration
+/// can never reach `Calculated` (§4.5b). Frozen once the Employment's first
+/// finalization in that TaxYear has happened (ADR-0013, issue #33): a
+/// `PriorEmployment` declaration is re-read into every later period's
+/// YearToDateContext, so an edit after that point would re-price
+/// already-finalized figures silently.
 pub async fn declare_prior_employment(
     pool: &PgPool,
     employment_id: &EmploymentId,
@@ -55,6 +58,16 @@ pub async fn declare_prior_employment(
         return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
     }
     let employer_id = EmployerId::new(employer_id);
+
+    // ADR-0013: see the identical guard in `record_opening_balance` —
+    // `finalized_payroll` never loses a row, so this counts a reversed
+    // FinalizedPayroll exactly as a live one.
+    if employment_has_a_finalization_in(&mut tx, employment_id, tax_year).await? {
+        return Err(PayrollAppError::PriorEmploymentFrozenByFinalization {
+            employment_id: employment_id.clone(),
+            tax_year,
+        });
+    }
 
     // `xmax = 0` is true only for the row version this statement itself
     // inserted; an update leaves the prior version's `xmax` set. That is

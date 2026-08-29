@@ -3,8 +3,10 @@
 //! Recording only, and never automatic: an `OpeningBalance` is an
 //! affirmative payroll fact or it is nothing (ADR-0014). Nothing here is
 //! called from `create_employment`, and nothing else in this crate writes
-//! this table. Freezing an existing row once it has been read into a
-//! finalization is a later ticket.
+//! this table. Frozen once the Employment's first finalization in that
+//! TaxYear has happened (ADR-0013, issue #33) — checked before any of the
+//! four guards below, since a frozen row refuses regardless of what it is
+//! being asked to change to.
 
 use chrono::NaiveDate;
 use payroll::{EmployerId, EmploymentId, Money, PayPeriod, PaySchedule, PayrollError, TaxYear};
@@ -13,6 +15,7 @@ use sqlx::PgPool;
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::pay_schedule_from_columns;
 use crate::error::PayrollAppError;
+use crate::freeze::employment_has_a_finalization_in;
 
 /// Records the `OpeningBalance` for one (Employment, TaxYear), or replaces
 /// whichever one is already there.
@@ -69,6 +72,19 @@ pub async fn record_opening_balance(
     }
     let employer_id = EmployerId::new(employer_id);
     let schedule = pay_schedule_from_columns(&kind, value);
+
+    // ADR-0013: OpeningBalance is re-read into every later period's
+    // YearToDateContext, so once this Employment's first FinalizedPayroll in
+    // `tax_year` exists, changing it here would re-price every already-paid
+    // future period while the frozen snapshots kept showing the old figure.
+    // `finalized_payroll` never loses a row, so this check counts a
+    // reversed FinalizedPayroll exactly as a live one.
+    if employment_has_a_finalization_in(&mut tx, employment_id, tax_year).await? {
+        return Err(PayrollAppError::OpeningBalanceFrozenByFinalization {
+            employment_id: employment_id.clone(),
+            tax_year,
+        });
+    }
 
     let coverage_period = period_containing(schedule, salt_coverage_start)?;
     if coverage_period.end() != salt_coverage_start {

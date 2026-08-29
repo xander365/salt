@@ -185,6 +185,33 @@ pub enum PayrollAppError {
     /// whitespace. A reversal is a deliberate, attributed act (§6.1), the
     /// same demand `RemovalReasonCannotBeEmpty` makes of a run removal.
     ReversalReasonCannotBeEmpty,
+    /// `RecordOpeningBalance` was asked to write or replace a row for an
+    /// (Employment, TaxYear) that already has a `FinalizedPayroll` — Live or
+    /// reversed (ADR-0013, §4.5). `OpeningBalance` is re-read into every
+    /// later period's `YearToDateContext`, so an edit after that point would
+    /// re-price already-finalized figures while their frozen snapshots kept
+    /// showing the old ones.
+    OpeningBalanceFrozenByFinalization {
+        employment_id: EmploymentId,
+        tax_year: TaxYear,
+    },
+    /// `DeclarePriorEmployment` was asked to write or replace a row for an
+    /// (Employment, TaxYear) that already has a `FinalizedPayroll` — Live or
+    /// reversed (ADR-0013, §4.5b). The same reason as
+    /// [`OpeningBalanceFrozenByFinalization`]: this fact is re-read into
+    /// every later period's `YearToDateContext`.
+    PriorEmploymentFrozenByFinalization {
+        employment_id: EmploymentId,
+        tax_year: TaxYear,
+    },
+    /// `ChangePaySchedule` was asked to change an Employer whose Employments
+    /// already have a `FinalizedPayroll` — Live or reversed — in the given
+    /// TaxYear (ADR-0013, §4.2). The guard that keeps a TaxYear at exactly
+    /// twelve periods and cumulative PAYE sound.
+    PayScheduleFrozenByFinalization {
+        employer_id: EmployerId,
+        tax_year: TaxYear,
+    },
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -331,6 +358,33 @@ impl std::fmt::Display for PayrollAppError {
             Self::ReversalReasonCannotBeEmpty => {
                 write!(f, "a reversal reason must not be empty")
             }
+            Self::OpeningBalanceFrozenByFinalization {
+                employment_id,
+                tax_year,
+            } => write!(
+                f,
+                "OpeningBalance for Employment {employment_id} in TaxYear {} is frozen: \
+                 that Employment has already finalized a payroll in that TaxYear",
+                tax_year.starting_year()
+            ),
+            Self::PriorEmploymentFrozenByFinalization {
+                employment_id,
+                tax_year,
+            } => write!(
+                f,
+                "the PriorEmployment declaration for Employment {employment_id} in TaxYear {} \
+                 is frozen: that Employment has already finalized a payroll in that TaxYear",
+                tax_year.starting_year()
+            ),
+            Self::PayScheduleFrozenByFinalization {
+                employer_id,
+                tax_year,
+            } => write!(
+                f,
+                "Employer {employer_id}'s PaySchedule is frozen for TaxYear {}: a payroll has \
+                 already been finalized in that TaxYear",
+                tax_year.starting_year()
+            ),
         }
     }
 }
@@ -377,7 +431,10 @@ impl std::error::Error for PayrollAppError {
             | Self::FinalizationCalculationMismatch { .. }
             | Self::FinalizedPayrollNotFound(_)
             | Self::FinalizedPayrollAlreadyReversed(_)
-            | Self::ReversalReasonCannotBeEmpty => None,
+            | Self::ReversalReasonCannotBeEmpty
+            | Self::OpeningBalanceFrozenByFinalization { .. }
+            | Self::PriorEmploymentFrozenByFinalization { .. }
+            | Self::PayScheduleFrozenByFinalization { .. } => None,
         }
     }
 }

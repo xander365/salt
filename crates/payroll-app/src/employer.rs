@@ -3,15 +3,16 @@
 //! one `PaySchedule`" is structural — this use case needs no extra guard
 //! for it.
 
-use payroll::{DayOfMonth, EmployerId, PaySchedule, PeriodEndDay};
+use payroll::{DayOfMonth, EmployerId, PaySchedule, PeriodEndDay, TaxYear};
 use sqlx::PgPool;
 
+use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::error::PayrollAppError;
+use crate::freeze::employer_has_a_finalization_in;
 use crate::ids::new_id;
 
-/// Records a new Employer with the given `PaySchedule`. A later change to
-/// that schedule is a separate use case (§4.2: legal only at a TaxYear
-/// boundary, which is domain reasoning this ticket does not implement).
+/// Records a new Employer with the given `PaySchedule`. Changing it later is
+/// [`change_pay_schedule`].
 pub async fn create_employer(
     pool: &PgPool,
     pay_schedule: PaySchedule,
@@ -32,6 +33,75 @@ pub async fn create_employer(
     .await?;
 
     Ok(id)
+}
+
+/// Changes an Employer's `PaySchedule` (§4.2), refused once any Employment
+/// of theirs has a `FinalizedPayroll` in `current_tax_year` (ADR-0013, issue
+/// #33) — the guard that keeps a TaxYear at exactly twelve periods and
+/// cumulative PAYE sound. Deliberately not effective-dated: the `employer`
+/// table carries exactly one `PaySchedule`, per its own docstring above, so
+/// this simply overwrites it, and the refusal is what confines a change to a
+/// TaxYear that has finalized nothing yet — the next one, in practice, once
+/// the current TaxYear has any finalized payroll. History stays safe
+/// regardless: a `FinalizedPayroll` freezes the schedule it actually used,
+/// so an Employer's schedule changing under it later changes nothing about
+/// what already happened.
+///
+/// `current_tax_year` is the caller's own account of which TaxYear this
+/// change is being made in, for the same reason every other use case here
+/// takes its dates as parameters rather than reading the wall clock.
+pub async fn change_pay_schedule(
+    pool: &PgPool,
+    employer_id: &EmployerId,
+    new_schedule: PaySchedule,
+    current_tax_year: TaxYear,
+    changed_by: &str,
+) -> Result<(), PayrollAppError> {
+    let mut tx = pool.begin().await?;
+
+    // `FOR UPDATE` serialises a concurrent change against the freeze check
+    // below, the same discipline the `FOR SHARE`/`FOR UPDATE` locks
+    // elsewhere in this crate hold against their own concurrent writers.
+    let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM employer WHERE id = $1 FOR UPDATE")
+        .bind(employer_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Err(PayrollAppError::EmployerNotFound(employer_id.clone()));
+    }
+
+    if employer_has_a_finalization_in(&mut tx, employer_id, current_tax_year).await? {
+        return Err(PayrollAppError::PayScheduleFrozenByFinalization {
+            employer_id: employer_id.clone(),
+            tax_year: current_tax_year,
+        });
+    }
+
+    let (kind, value) = period_end_day_columns(new_schedule.period_end_day());
+    sqlx::query(
+        "UPDATE employer SET period_end_day_kind = $2, period_end_day_value = $3 WHERE id = $1",
+    )
+    .bind(employer_id.as_str())
+    .bind(kind)
+    .bind(value)
+    .execute(&mut *tx)
+    .await?;
+
+    write_action_log_entry(
+        &mut tx,
+        ActionLogEntry {
+            employer_id,
+            actor: changed_by,
+            action_type: ActionType::PayScheduleChanged,
+            target_type: "employer",
+            target_id: employer_id.as_str(),
+            context: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
 }
 
 fn period_end_day_columns(period_end_day: PeriodEndDay) -> (&'static str, Option<i16>) {
