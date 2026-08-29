@@ -160,3 +160,70 @@ async fn the_restricted_role_can_still_insert_and_select(pool: PgPool) {
         .expect("the restricted role can still read finalized_payroll");
     assert_eq!(row.get::<String, _>(0), finalized_payroll_id);
 }
+
+#[sqlx::test]
+async fn the_restricted_role_cannot_mutate_reversals_or_action_log_entries(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    let finalized_payroll_id = a_finalized_payroll(&mut conn).await;
+
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .expect("switch to the restricted role");
+
+    sqlx::query(
+        "INSERT INTO reversal (finalized_payroll_id, reversed_by, reason)
+         VALUES ($1::uuid, 'test-actor', 'test reversal')",
+    )
+    .bind(&finalized_payroll_id)
+    .execute(&mut *conn)
+    .await
+    .expect("the restricted role can create a reversal");
+
+    sqlx::query(
+        "INSERT INTO action_log_entry (employer_id, actor, action_type, target_type, target_id)
+         VALUES ('employer-1', 'test-actor', 'payroll_finalized', 'payroll_run', 'test-run')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("the restricted role can append an action log entry");
+
+    for (action, result) in [
+        (
+            "update a reversal",
+            sqlx::query(
+                "UPDATE reversal SET reason = 'changed' WHERE finalized_payroll_id = $1::uuid",
+            )
+            .bind(&finalized_payroll_id)
+            .execute(&mut *conn)
+            .await,
+        ),
+        (
+            "delete a reversal",
+            sqlx::query("DELETE FROM reversal WHERE finalized_payroll_id = $1::uuid")
+                .bind(&finalized_payroll_id)
+                .execute(&mut *conn)
+                .await,
+        ),
+        (
+            "update an action log entry",
+            sqlx::query(
+                "UPDATE action_log_entry SET actor = 'changed' WHERE employer_id = 'employer-1'",
+            )
+            .execute(&mut *conn)
+            .await,
+        ),
+        (
+            "delete an action log entry",
+            sqlx::query("DELETE FROM action_log_entry WHERE employer_id = 'employer-1'")
+                .execute(&mut *conn)
+                .await,
+        ),
+    ] {
+        let err = result.expect_err(&format!("the restricted role cannot {action}"));
+        assert!(
+            is_insufficient_privilege(&err),
+            "expected an insufficient_privilege refusal while attempting to {action}, got {err:?}"
+        );
+    }
+}

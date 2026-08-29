@@ -3,7 +3,10 @@
 //! (not a plain `CHECK`, since the rule spans two tables) and two `UNIQUE`
 //! constraints whose absence would be a silent, hard-to-notice regression.
 
-use sqlx::PgPool;
+use std::time::Duration;
+
+use sqlx::{Acquire, PgPool};
+use tokio::sync::oneshot;
 
 const UNIQUE_VIOLATION: &str = "23505";
 
@@ -228,5 +231,164 @@ async fn a_reversed_finalized_payroll_can_be_replaced_at_most_once(pool: PgPool)
     assert!(
         is_unique_violation(&err),
         "expected a unique_violation, got {err:?}"
+    );
+}
+
+#[sqlx::test]
+async fn concurrent_membership_additions_leave_a_correction_run_with_one_member(pool: PgPool) {
+    let mut setup_connection = pool.acquire().await.expect("acquire setup connection");
+    an_employer_and_two_employments(&mut setup_connection).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status,
+             correction_reason, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-06-05', 'correction', 'draft',
+             'fix march', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *setup_connection)
+    .await
+    .expect("insert correction run");
+
+    let mut first_connection = pool.acquire().await.expect("acquire first connection");
+    let mut first_transaction = first_connection
+        .begin()
+        .await
+        .expect("begin first transaction");
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1')",
+    )
+    .bind(&run_id)
+    .execute(&mut *first_transaction)
+    .await
+    .expect("first membership is allowed");
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let second_pool = pool.clone();
+    let second_run_id = run_id.clone();
+    let second_membership = tokio::spawn(async move {
+        let mut connection = second_pool
+            .acquire()
+            .await
+            .expect("acquire second connection");
+        let mut transaction = connection.begin().await.expect("begin second transaction");
+        started_sender.send(()).expect("notify first transaction");
+        let result = sqlx::query(
+            "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+             VALUES ($1::uuid, 'emp-2')",
+        )
+        .bind(&second_run_id)
+        .execute(&mut *transaction)
+        .await;
+        transaction
+            .rollback()
+            .await
+            .expect("rollback second transaction");
+        result
+    });
+
+    started_receiver.await.expect("second transaction started");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !second_membership.is_finished(),
+        "the second insert must wait for the first transaction's run-row lock"
+    );
+
+    first_transaction
+        .commit()
+        .await
+        .expect("commit first transaction");
+    let result = second_membership.await.expect("join second task");
+    assert!(
+        result.is_err(),
+        "the second concurrent membership must be refused after the first commits"
+    );
+}
+
+#[sqlx::test]
+async fn reclassifying_a_multi_member_ordinary_run_as_a_correction_is_refused(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'draft', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert ordinary run");
+
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1'), ($1::uuid, 'emp-2')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("insert ordinary memberships");
+
+    let result = sqlx::query(
+        "UPDATE payroll_run
+         SET kind = 'correction', correction_reason = 'reclassified'
+         WHERE id = $1::uuid",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a multi-member ordinary run cannot be reclassified as a Correction run"
+    );
+}
+
+#[sqlx::test]
+async fn liveness_must_match_the_finalized_payrolls_employment_and_period(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'finalized', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert finalized ordinary run");
+
+    let finalized_payroll_id: String = sqlx::query_scalar(
+        "INSERT INTO finalized_payroll
+            (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
+             payroll_input_json, payroll_rules_json, payroll_calculation_json,
+             taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version, finalized_by)
+         VALUES
+            ($1::uuid, 'emp-1', 'employer-1', '2026-03-01', '2026-03-31', 2026,
+             '{}', '{}', '{}', 15000, 1200, 'paye-1', 'ssc-1', '0.1.0+gdeadbeef', 'actor')
+         RETURNING id::text",
+    )
+    .bind(&run_id)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert finalized payroll");
+
+    let result = sqlx::query(
+        "INSERT INTO live_finalized_payroll (employment_id, period_end, finalized_payroll_id)
+         VALUES ('emp-2', '2026-03-31', $1::uuid)",
+    )
+    .bind(&finalized_payroll_id)
+    .execute(&mut *conn)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "liveness cannot identify a different Employment than its finalized payroll"
     );
 }
