@@ -13,12 +13,16 @@ mod employer;
 mod employment;
 mod error;
 mod ids;
+mod prior_employment;
+mod unsupported_deduction_status;
 
 pub use action_log::ActionType;
 pub use compensation_terms::record_compensation_terms;
 pub use employer::create_employer;
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::PayrollAppError;
+pub use prior_employment::declare_prior_employment;
+pub use unsupported_deduction_status::declare_unsupported_deduction_status;
 
 /// The Salt release that produced this build: semver plus a short git SHA in
 /// one string, e.g. `0.1.0+g1a2b3c4` (CONTEXT.md, `SaltVersion`). Lets a

@@ -5,7 +5,7 @@
 //! can do.
 
 use chrono::NaiveDate;
-use payroll::{EmploymentId, Money, validate_compensation_terms_effective_from};
+use payroll::{EmploymentId, Money, validate_effective_from_is_a_period_start};
 use sqlx::PgPool;
 
 use crate::employer::pay_schedule_from_columns;
@@ -53,7 +53,7 @@ pub async fn record_compensation_terms(
     }
     let schedule = pay_schedule_from_columns(&kind, value);
 
-    validate_compensation_terms_effective_from(schedule, effective_from)?;
+    validate_effective_from_is_a_period_start(schedule, effective_from)?;
 
     sqlx::query(
         "INSERT INTO compensation_terms (employment_id, effective_from, basic_pay, created_by)

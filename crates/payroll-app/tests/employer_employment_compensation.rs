@@ -141,7 +141,7 @@ async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(po
     assert_eq!(
         result,
         Err(PayrollAppError::from(
-            PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            PayrollError::EffectiveFromNotAPeriodStart {
                 next_valid_effective_from: date(2026, 1, 26),
             }
         ))

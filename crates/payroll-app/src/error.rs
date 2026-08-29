@@ -42,6 +42,14 @@ pub enum PayrollAppError {
     /// No `CompensationTerms` row is in force for this Employment as of the
     /// requested date.
     NoCompensationTermsInForce(EmploymentId),
+    /// A `PriorEmployment` declaration was given as `Unknown`. `Unknown` is
+    /// what an absent row means (§4.5b) — it describes silence, not a fact
+    /// to write, so declaring it explicitly is refused rather than stored.
+    PriorEmploymentDeclarationCannotBeUnknown,
+    /// An `UnsupportedDeductionStatus` declaration was given as `Unknown`,
+    /// for the same reason: `Unknown` is what no row in force means (§4.5c),
+    /// not a fact a declaration can state.
+    UnsupportedDeductionDeclarationCannotBeUnknown,
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -62,6 +70,14 @@ impl std::fmt::Display for PayrollAppError {
             Self::NoCompensationTermsInForce(id) => {
                 write!(f, "no CompensationTerms are in force for Employment {id}")
             }
+            Self::PriorEmploymentDeclarationCannotBeUnknown => write!(
+                f,
+                "a PriorEmployment declaration cannot itself be Unknown; omit the declaration instead"
+            ),
+            Self::UnsupportedDeductionDeclarationCannotBeUnknown => write!(
+                f,
+                "an UnsupportedDeductionStatus declaration cannot itself be Unknown; omit the declaration instead"
+            ),
         }
     }
 }
@@ -83,7 +99,9 @@ impl std::error::Error for PayrollAppError {
             | Self::EmploymentNotFound(_)
             | Self::EmploymentIsVoid(_)
             | Self::EmploymentEndsBeforeItStarts { .. }
-            | Self::NoCompensationTermsInForce(_) => None,
+            | Self::NoCompensationTermsInForce(_)
+            | Self::PriorEmploymentDeclarationCannotBeUnknown
+            | Self::UnsupportedDeductionDeclarationCannotBeUnknown => None,
         }
     }
 }

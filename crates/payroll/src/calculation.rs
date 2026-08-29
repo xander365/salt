@@ -96,7 +96,13 @@ pub enum PayrollError {
     /// mid-period is refused rather than silently rounded onto the next
     /// period — an Employer must never believe a rise took effect on the
     /// 15th while Salt quietly disagrees.
-    CompensationTermsNotEffectiveOnAPeriodStart {
+    ///
+    /// Also the refusal `validate_effective_from_is_a_period_start` returns
+    /// for any other effective-dated declaration pinned to a `PayPeriod`
+    /// start the same way (§4.5c's `UnsupportedDeductionStatus`) — the
+    /// requirement is one fact about the schedule, not a fact only
+    /// `CompensationTerms` has.
+    EffectiveFromNotAPeriodStart {
         next_valid_effective_from: NaiveDate,
     },
     /// The Employment's end date is before its start date.
@@ -215,12 +221,12 @@ impl std::fmt::Display for PayrollError {
                     "the pay schedule cannot name the period around {date}: it is outside the representable calendar"
                 )
             }
-            PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            PayrollError::EffectiveFromNotAPeriodStart {
                 next_valid_effective_from,
             } => {
                 write!(
                     f,
-                    "compensation terms effective_from must be a pay period start date; the next valid effective date is {next_valid_effective_from}"
+                    "effective_from must be a pay period start date; the next valid effective date is {next_valid_effective_from}"
                 )
             }
             PayrollError::ContradictoryEmploymentDates => {
@@ -495,7 +501,7 @@ pub fn calculate(
     let period_days = (input.period.end() - input.period.start()).num_days() + 1;
 
     let terms = input.employment.compensation_terms();
-    validate_compensation_terms_effective_from(input.schedule, terms.effective_from())?;
+    validate_effective_from_is_a_period_start(input.schedule, terms.effective_from())?;
     if !terms.cover_days(employed.first(), employed.last()) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
@@ -650,12 +656,14 @@ fn period_containing(schedule: PaySchedule, date: NaiveDate) -> Result<PayPeriod
         .ok_or(PayrollError::PayScheduleOutsideRepresentableCalendar { date })
 }
 
-/// Validates a `CompensationTerms.effective_from` against INV-014: it must
-/// be the start date of one of `schedule`'s own `PayPeriod`s. `calculate`
-/// runs this same check once a `PayPeriod` is in hand; it is exposed here so
-/// a caller recording a `CompensationTerms` row can make the same refusal
-/// before any `PayPeriod` exists to calculate against.
-pub fn validate_compensation_terms_effective_from(
+/// Validates an effective-dated declaration's `effective_from` against
+/// INV-014: it must be the start date of one of `schedule`'s own
+/// `PayPeriod`s. `calculate` runs this same check on `CompensationTerms`
+/// once a `PayPeriod` is in hand; it is exposed here so a caller recording
+/// an effective-dated row — `CompensationTerms`, or `UnsupportedDeductionStatus`
+/// (§4.5c) — can make the same refusal before any `PayPeriod` exists to
+/// calculate against.
+pub fn validate_effective_from_is_a_period_start(
     schedule: PaySchedule,
     effective_from: NaiveDate,
 ) -> Result<(), PayrollError> {
@@ -666,7 +674,7 @@ pub fn validate_compensation_terms_effective_from(
                 date: effective_from,
             },
         )?;
-        return Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+        return Err(PayrollError::EffectiveFromNotAPeriodStart {
             next_valid_effective_from,
         });
     }
@@ -2058,7 +2066,7 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &test_rules()),
-            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            Err(PayrollError::EffectiveFromNotAPeriodStart {
                 next_valid_effective_from: date(2026, 3, 1),
             })
         );
@@ -2085,7 +2093,7 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &test_rules()),
-            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            Err(PayrollError::EffectiveFromNotAPeriodStart {
                 next_valid_effective_from: date(2028, 2, 29),
             })
         );
@@ -2114,29 +2122,30 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &test_rules()),
-            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            Err(PayrollError::EffectiveFromNotAPeriodStart {
                 next_valid_effective_from: date(2026, 1, 26),
             })
         );
     }
 
-    // `validate_compensation_terms_effective_from` is the same INV-014
+    // `validate_effective_from_is_a_period_start` is the same INV-014
     // check `calculate` makes above, exposed directly so a caller recording
-    // a `CompensationTerms` row can refuse it before any `PayPeriod`
-    // exists — see `payroll-app`'s `record_compensation_terms`.
+    // an effective-dated row can refuse it before any `PayPeriod` exists —
+    // see `payroll-app`'s `record_compensation_terms` and
+    // `declare_unsupported_deduction_status`.
     #[test]
-    fn validate_compensation_terms_effective_from_accepts_a_period_start() {
+    fn validate_effective_from_is_a_period_start_accepts_a_period_start() {
         assert_eq!(
-            validate_compensation_terms_effective_from(test_schedule(), date(2026, 1, 26)),
+            validate_effective_from_is_a_period_start(test_schedule(), date(2026, 1, 26)),
             Ok(())
         );
     }
 
     #[test]
-    fn validate_compensation_terms_effective_from_refuses_a_mid_period_date() {
+    fn validate_effective_from_is_a_period_start_refuses_a_mid_period_date() {
         assert_eq!(
-            validate_compensation_terms_effective_from(test_schedule(), date(2026, 1, 10)),
-            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            validate_effective_from_is_a_period_start(test_schedule(), date(2026, 1, 10)),
+            Err(PayrollError::EffectiveFromNotAPeriodStart {
                 next_valid_effective_from: date(2026, 1, 26),
             })
         );

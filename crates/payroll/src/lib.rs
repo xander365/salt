@@ -26,7 +26,7 @@ mod year_to_date;
 
 pub use calculation::{
     PayeResult, PayeTrace, PayrollCalculation, PayrollError, PayrollInput, SscResult, SscTrace,
-    Warning, calculate, validate_compensation_terms_effective_from,
+    Warning, calculate, validate_effective_from_is_a_period_start,
 };
 pub use deduction::{Deduction, StatutoryDeduction};
 pub use earning::Earning;
