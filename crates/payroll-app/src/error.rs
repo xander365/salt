@@ -94,9 +94,6 @@ pub enum PayrollAppError {
     },
     /// No PayrollRun exists with this id.
     PayrollRunNotFound(PayrollRunId),
-    /// Membership and Earnings are working state, so they can change only
-    /// while the PayrollRun is Draft (§4.7).
-    PayrollRunNotDraft(PayrollRunId),
     /// Removing a member is the deliberate omission path of an Ordinary run;
     /// Correction runs have the opposite membership semantics (§4.8).
     PayrollRunIsNotOrdinary(PayrollRunId),
@@ -124,10 +121,10 @@ pub enum PayrollAppError {
     /// also the social security base — so a second one supplied as a run
     /// Earning would silently double it (§4.5d).
     BasicPayCannotBeSetAsAnEarning,
-    /// `CalculatePayrollRun` was asked to recalculate a run that is already
-    /// `Finalized`: working state can no longer change once history has
-    /// been written (§4.7), so there is nothing left for a recalculation to
-    /// overwrite.
+    /// Working state — membership, Earnings, the working calculation — was
+    /// asked to change on a run that is already `Finalized`. Once history
+    /// has been written there is nothing left to overwrite (§4.7). A
+    /// `Calculated` run is not refused: editing it reopens it as `Draft`.
     PayrollRunAlreadyFinalized(PayrollRunId),
 }
 
@@ -197,7 +194,6 @@ impl std::fmt::Display for PayrollAppError {
                 schedules_period.end()
             ),
             Self::PayrollRunNotFound(id) => write!(f, "no PayrollRun exists with id {id}"),
-            Self::PayrollRunNotDraft(id) => write!(f, "PayrollRun {id} is not Draft"),
             Self::PayrollRunIsNotOrdinary(id) => {
                 write!(f, "PayrollRun {id} is not an Ordinary run")
             }
@@ -248,7 +244,6 @@ impl std::error::Error for PayrollAppError {
             | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan { .. }
             | Self::PayPeriodNotGeneratedByThePaySchedule { .. }
             | Self::PayrollRunNotFound(_)
-            | Self::PayrollRunNotDraft(_)
             | Self::PayrollRunIsNotOrdinary(_)
             | Self::RemovalReasonCannotBeEmpty
             | Self::EmploymentNotAnActiveRunMember { .. }

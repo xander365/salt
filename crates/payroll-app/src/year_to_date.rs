@@ -4,7 +4,7 @@
 
 use chrono::NaiveDate;
 use payroll::{EmploymentId, Money, PayrollError, PeriodsElapsed, TaxYear, YearToDateContext};
-use sqlx::PgPool;
+use sqlx::{Acquire, Postgres};
 
 use crate::error::PayrollAppError;
 use crate::prior_employment::get_prior_employment;
@@ -35,14 +35,24 @@ use crate::prior_employment::get_prior_employment;
 /// tickets that fill `live_finalized_payroll` with rows — so this join is
 /// written now, to be exercised for real once they ship, rather than
 /// rewritten later.
-pub async fn build_year_to_date_context(
-    pool: &PgPool,
+///
+/// Takes anything a connection can be acquired from — a `&PgPool` for a
+/// standalone read, or a `&mut Transaction` so a caller assembling several
+/// facts at once reads them all on the one connection, inside its own
+/// transaction and under whatever lock it already holds. All three reads
+/// below share that connection, so the `OpeningBalance`, the live history
+/// and the `PriorEmployment` are one consistent account of the TaxYear
+/// rather than three snapshots taken moments apart.
+pub async fn build_year_to_date_context<'a>(
+    conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     period_end: NaiveDate,
 ) -> Result<YearToDateContext, PayrollAppError> {
+    let mut conn = conn.acquire().await?;
+
     let tax_year = TaxYear::for_period_end(period_end);
     let periods_elapsed = PeriodsElapsed::from_period_end(period_end);
-    let prior_employment = get_prior_employment(pool, employment_id, tax_year).await?;
+    let prior_employment = get_prior_employment(&mut *conn, employment_id, tax_year).await?;
 
     let opening: Option<(i64, i64)> = sqlx::query_as(
         "SELECT prior_taxable_remuneration, prior_paye
@@ -51,16 +61,16 @@ pub async fn build_year_to_date_context(
     )
     .bind(employment_id.as_str())
     .bind(tax_year.starting_year())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     let (opening_taxable_cents, opening_paye_cents) = opening.unwrap_or((0, 0));
 
-    // `finalized_payroll.taxable_remuneration`/`.paye` are NUMERIC, not
-    // BIGINT (migration 0021 hardened `opening_balance` the same way, but
-    // nothing writes this table yet, so it was left for finalization to
-    // harden). Every value finalization will ever write is a whole number
-    // of cents — the same `Money::cents()` every other Money column in this
-    // schema stores — so the cast is exact, never a rounding shortcut.
+    // `finalized_payroll.taxable_remuneration`/`.paye` are BIGINT cents,
+    // non-negative, by migration 0024 — the same hardening 0020 and 0021
+    // gave the other Money columns. PostgreSQL's `SUM` over BIGINT still
+    // widens to NUMERIC to keep the running total from overflowing, so the
+    // cast back is what names the result's type; the CHECK is what makes it
+    // exact, never a rounding shortcut.
     let (live_taxable_cents, live_paye_cents): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(finalized.taxable_remuneration), 0)::bigint,
                 COALESCE(SUM(finalized.paye), 0)::bigint
@@ -73,27 +83,24 @@ pub async fn build_year_to_date_context(
     .bind(employment_id.as_str())
     .bind(period_end)
     .bind(tax_year.starting_year())
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
 
-    let money = |cents: i64, column: &str| {
-        Money::from_cents(cents).map_err(|_| {
-            PayrollAppError::Database(format!(
-                "{column} holds a negative amount for employment {employment_id}"
-            ))
-        })
+    // Both sides are non-negative whole cents by CHECK (`opening_balance`
+    // from 0021, `finalized_payroll` from 0024), so reconstructing a `Money`
+    // cannot fail — the same schema-guaranteed `expect` every other reader
+    // in this crate uses. Their *sum* is a different matter: a TaxYear's
+    // worth of live history can genuinely exceed what a `Money` holds, and
+    // that is a refusal to report rather than a stored-data fault.
+    let money = |cents: i64| {
+        Money::from_cents(cents)
+            .expect("opening_balance and finalized_payroll CHECK: Money columns hold whole, non-negative cents")
     };
-    let prior_taxable_remuneration = money(
-        opening_taxable_cents,
-        "opening_balance.prior_taxable_remuneration",
-    )?
-    .checked_add(money(
-        live_taxable_cents,
-        "finalized_payroll.taxable_remuneration",
-    )?)
-    .map_err(|_| PayrollAppError::from(PayrollError::AmountOverflow))?;
-    let prior_paye = money(opening_paye_cents, "opening_balance.prior_paye")?
-        .checked_add(money(live_paye_cents, "finalized_payroll.paye")?)
+    let prior_taxable_remuneration = money(opening_taxable_cents)
+        .checked_add(money(live_taxable_cents))
+        .map_err(|_| PayrollAppError::from(PayrollError::AmountOverflow))?;
+    let prior_paye = money(opening_paye_cents)
+        .checked_add(money(live_paye_cents))
         .map_err(|_| PayrollAppError::from(PayrollError::AmountOverflow))?;
 
     Ok(YearToDateContext::new(
@@ -110,7 +117,7 @@ mod tests {
     use super::*;
     use crate::{create_employer, create_employment, declare_prior_employment, void_employment};
     use payroll::{DayOfMonth, PeriodEndDay, PersonId, PriorEmployment};
-    use sqlx::Row;
+    use sqlx::{PgPool, Row};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()

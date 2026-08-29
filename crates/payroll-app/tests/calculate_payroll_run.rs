@@ -126,6 +126,52 @@ async fn working_calculation_row(
 
 // ---- CalculatePayrollRun (§4.9) ----
 
+/// Every fact a member's `PayrollInput` needs is read on the transaction
+/// `calculate_payroll_run` already opened, never on a second connection
+/// borrowed from the pool. Two failures ride on that, and this test pins
+/// the one that can be reproduced cheaply: a caller holding one pooled
+/// connection while asking for another is how a pool of N deadlocks under N
+/// concurrent callers. A pool of exactly one makes the single-caller case
+/// of that hang immediately, so a regression here fails rather than waits
+/// for load.
+///
+/// The other failure the same change prevents has no cheap test: a second
+/// connection reads its own snapshot, so a `CompensationTerms` correction
+/// committing mid-run could leave two members of one run calculated against
+/// different facts.
+#[sqlx::test]
+async fn a_calculation_needs_only_the_one_connection_it_already_holds(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+    set_run_earnings(&pool, &run_id, &employment_id, Vec::new())
+        .await
+        .unwrap();
+
+    let single_connection_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+
+    let refusals = calculate_payroll_run(&single_connection_pool, &run_id, "calculator")
+        .await
+        .expect("a calculation that needs a second connection times out here instead");
+
+    assert_eq!(refusals, Vec::new());
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
+}
+
 #[sqlx::test]
 async fn a_fully_declared_single_member_run_calculates_and_becomes_calculated(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
@@ -166,6 +212,68 @@ async fn a_fully_declared_single_member_run_calculates_and_becomes_calculated(po
                     .as_i64()
                     .unwrap()
         )
+    );
+}
+
+/// The whole loop an Employer actually walks: calculate, read the figures,
+/// spot a wrong Earning, fix it, calculate again. The correction reopens the
+/// run to `Draft` (§4.7) and the second calculation carries the new line.
+#[sqlx::test]
+async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation_carries_it(
+    pool: PgPool,
+) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+
+    calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
+
+    set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![Earning::TaxableAllowance(
+            Money::from_cents(250000).unwrap(),
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        run_status(&pool, &run_id).await,
+        "draft",
+        "the stored calculation no longer accounts for the new line"
+    );
+
+    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    assert_eq!(refusals, Vec::new());
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
+    let (input_json, _, calculation_json, _) =
+        working_calculation_row(&pool, &run_id, &employment_id)
+            .await
+            .expect("the recalculated row");
+    assert_eq!(
+        input_json["earnings"].as_array().unwrap().len(),
+        1,
+        "the corrected Earning reached the calculation's input"
+    );
+    assert_eq!(
+        calculation_json["gross_remuneration"],
+        serde_json::json!(1500000 + 250000)
     );
 }
 

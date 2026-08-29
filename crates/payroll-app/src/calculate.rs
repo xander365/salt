@@ -22,7 +22,7 @@ use sqlx::PgPool;
 use crate::employer::pay_schedule_from_columns;
 use crate::employment::get_employment_snapshot;
 use crate::error::PayrollAppError;
-use crate::payroll_run::PayrollRunId;
+use crate::payroll_run::{PayrollRunId, lock_run};
 use crate::unsupported_deduction_status::get_unsupported_deduction_status;
 use crate::year_to_date::build_year_to_date_context;
 
@@ -60,6 +60,13 @@ pub struct PayrollRunCalculationRefusal {
 /// Otherwise the run is (or remains) `Draft`. Recalculation writes no
 /// `ActionLog` entry.
 ///
+/// A run with **no** active members satisfies that condition vacuously and
+/// becomes `Calculated`. This is deliberate, not an oversight: §4.7 defines
+/// the state as a property of the members, and an Employer who has removed
+/// everyone from a run with a stated reason for each has said something
+/// complete about the period. Whether such a run may then be *finalized* is
+/// finalization's own question (§5.1), asked where the history is written.
+///
 /// Refused outright, before any member is touched, when the run does not
 /// exist or is already `Finalized` — working state can no longer change
 /// once history has been written (§4.7).
@@ -72,29 +79,22 @@ pub async fn calculate_payroll_run(
 
     // Locking the run for the whole recalculation is what makes two
     // concurrent calls to this function serialize rather than race each
-    // other's status update at the end.
-    let run: Option<(String, chrono::NaiveDate, chrono::NaiveDate, String)> = sqlx::query_as(
-        "SELECT employer_id, period_start, period_end, status
-         FROM payroll_run WHERE id = $1::uuid FOR UPDATE",
-    )
-    .bind(payroll_run_id.as_str())
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((employer_id, period_start, period_end, status)) = run else {
-        return Err(PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()));
-    };
-    if status == "finalized" {
+    // other's status update at the end. Unlike every other caller of
+    // `lock_run`, this one accepts `Calculated` as well as `Draft`:
+    // recalculating a run that already calculated cleanly is the ordinary
+    // way to pick up a corrected fact.
+    let run = lock_run(&mut tx, payroll_run_id).await?;
+    if run.status == "finalized" {
         return Err(PayrollAppError::PayrollRunAlreadyFinalized(
             payroll_run_id.clone(),
         ));
     }
-    let period = PayPeriod::new(period_start, period_end)
-        .expect("payroll_run CHECK: period_end >= period_start");
+    let period = run.period;
 
     let (schedule_kind, schedule_value): (String, Option<i16>) = sqlx::query_as(
         "SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1",
     )
-    .bind(&employer_id)
+    .bind(run.employer_id.as_str())
     .fetch_one(&mut *tx)
     .await?;
     let schedule = pay_schedule_from_columns(&schedule_kind, schedule_value);
@@ -121,7 +121,8 @@ pub async fn calculate_payroll_run(
         let employment_id = EmploymentId::new(member_id.clone());
         let earnings = earnings_by_member.remove(&member_id).unwrap_or_default();
 
-        match assemble_and_calculate(pool, &employment_id, period, schedule, earnings, &rules).await
+        match assemble_and_calculate(&mut tx, &employment_id, period, schedule, earnings, &rules)
+            .await
         {
             Ok((input, calculation)) => {
                 store_working_calculation(
@@ -186,18 +187,26 @@ async fn run_earnings_by_member(
 
 /// Assembles one member's `PayrollInput` from current facts and calculates
 /// it — the one seam the per-member loop above branches its outcome on.
+///
+/// Every fact is read on the caller's own transaction, not on a second
+/// connection from the pool. Two reasons, and either alone would settle it:
+/// a second connection sees its own snapshot, so a `CompensationTerms`
+/// correction committing mid-run could leave two members of one run
+/// calculated against different facts; and holding one pooled connection
+/// while asking for another is how a pool of N deadlocks under N concurrent
+/// callers.
 async fn assemble_and_calculate(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     employment_id: &EmploymentId,
     period: PayPeriod,
     schedule: PaySchedule,
     earnings: Vec<Earning>,
     rules: &PayrollRules,
 ) -> Result<(PayrollInput, PayrollCalculation), PayrollAppError> {
-    let employment = get_employment_snapshot(pool, employment_id, period.end()).await?;
+    let employment = get_employment_snapshot(&mut **tx, employment_id, period.end()).await?;
     let unsupported_deductions =
-        get_unsupported_deduction_status(pool, employment_id, period.end()).await?;
-    let year_to_date = build_year_to_date_context(pool, employment_id, period.end()).await?;
+        get_unsupported_deduction_status(&mut **tx, employment_id, period.end()).await?;
+    let year_to_date = build_year_to_date_context(&mut **tx, employment_id, period.end()).await?;
 
     let input = PayrollInput::new(
         employment,

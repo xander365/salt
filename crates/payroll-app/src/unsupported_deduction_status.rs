@@ -6,7 +6,7 @@ use payroll::{
     EmployerId, EmploymentId, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
     validate_effective_from_is_a_period_start,
 };
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::pay_schedule_from_columns;
@@ -136,11 +136,18 @@ pub async fn declare_unsupported_deduction_status(
 ///
 /// A missing or void Employment is refused rather than answered
 /// `Unknown`, exactly as in `get_prior_employment`.
-pub async fn get_unsupported_deduction_status(
-    pool: &PgPool,
+///
+/// Takes anything a connection can be acquired from — a `&PgPool` for a
+/// standalone read, or a `&mut Transaction` so a caller assembling several
+/// facts at once reads them all on the one connection, inside its own
+/// transaction and under whatever lock it already holds.
+pub async fn get_unsupported_deduction_status<'a>(
+    conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     as_of: NaiveDate,
 ) -> Result<UnsupportedDeductionStatus, PayrollAppError> {
+    let mut conn = conn.acquire().await?;
+
     type DeclarationRow = (bool, Option<String>, Option<serde_json::Value>);
 
     let row: Option<DeclarationRow> = sqlx::query_as(
@@ -159,7 +166,7 @@ pub async fn get_unsupported_deduction_status(
     )
     .bind(employment_id.as_str())
     .bind(as_of)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let (is_void, status, kinds) =

@@ -6,7 +6,7 @@ use payroll::{
     CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, PersonId,
     PersonReference,
 };
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::error::PayrollAppError;
@@ -130,11 +130,18 @@ pub async fn void_employment(
 ///
 /// A void Employment is refused: this snapshot is a calculation input, and
 /// §4.3 keeps a voided Employment out of every payroll.
-pub async fn get_employment_snapshot(
-    pool: &PgPool,
+///
+/// Takes anything a connection can be acquired from — a `&PgPool` for a
+/// standalone read, or a `&mut Transaction` so a caller assembling several
+/// facts at once reads them all on the one connection, inside its own
+/// transaction and under whatever lock it already holds.
+pub async fn get_employment_snapshot<'a>(
+    conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     as_of: NaiveDate,
 ) -> Result<EmploymentSnapshot, PayrollAppError> {
+    let mut conn = conn.acquire().await?;
+
     type SnapshotRow = (
         String,
         String,
@@ -170,7 +177,7 @@ pub async fn get_employment_snapshot(
     )
     .bind(employment_id.as_str())
     .bind(as_of)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let (employer_id, person_id, start_date, end_date, is_void, effective_from, basic_pay, next) =

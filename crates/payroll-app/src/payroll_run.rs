@@ -185,26 +185,85 @@ fn overlaps(period: PayPeriod, start_date: NaiveDate, end_date: Option<NaiveDate
     start_date <= period.end() && end_date.is_none_or(|end| end >= period.start())
 }
 
-/// Locks a run and verifies it is still in the one lifecycle state where
-/// working state may change (§4.7). The lock also prevents a finalizer from
-/// moving the same run to `Finalized` between this check and the mutation.
-async fn lock_draft_run(
+/// Takes the run's `FOR UPDATE` lock and reads back the columns every
+/// lifecycle decision is made on. A run that does not exist is refused here,
+/// so no caller has to spell that out; **which** states the caller accepts is
+/// the caller's own question, and it answers it from the returned `status`.
+///
+/// The lock is what serialises everything that touches one run — two
+/// removals, a removal against a recalculation, a recalculation against a
+/// finalizer — so it is taken before any state is judged, never after.
+pub(crate) async fn lock_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<LockedRun, PayrollAppError> {
+    let run: Option<(String, String, NaiveDate, NaiveDate, String)> = sqlx::query_as(
+        "SELECT kind, status, period_start, period_end, employer_id
+         FROM payroll_run WHERE id = $1::uuid FOR UPDATE",
+    )
+    .bind(payroll_run_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some((kind, status, period_start, period_end, employer_id)) = run else {
+        return Err(PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()));
+    };
+    Ok(LockedRun {
+        kind,
+        status,
+        period: PayPeriod::new(period_start, period_end)
+            .expect("payroll_run CHECK: period_end is never before period_start"),
+        employer_id: EmployerId::new(employer_id),
+    })
+}
+
+/// One `payroll_run` row, read under its own `FOR UPDATE` lock.
+pub(crate) struct LockedRun {
+    pub kind: String,
+    pub status: String,
+    pub period: PayPeriod,
+    pub employer_id: EmployerId,
+}
+
+/// Locks a run, verifies working state may still change, and puts the run
+/// back into `Draft` so the edit about to happen is reflected in its status.
+///
+/// **`Calculated` is editable, and editing reopens the run.** §4.7's arrow
+/// runs `Draft → Calculated → Finalized`, but the state it defines is a
+/// property of the members — "every member has a current, successful
+/// working calculation" — not a gate the Employer passed through. Seeing the
+/// figures is exactly when a wrong Earning or a member who should not be
+/// paid becomes visible, so refusing the edit would leave an Employer who
+/// spotted a mistake with finalizing it or nothing. The moment a line
+/// changes, the stored calculations are no longer current, which is the
+/// definition of `Draft`; setting the status back here is what keeps the
+/// column honest rather than a claim about calculations that have since
+/// gone stale.
+///
+/// `Finalized` is the one refusal left, and it is absolute: history has
+/// been written and working state can no longer change.
+///
+/// The lock is taken before the status is judged, so a finalizer cannot
+/// move the same run to `Finalized` between this check and the mutation.
+async fn lock_and_reopen_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<String, PayrollAppError> {
-    let run: Option<(String, String)> =
-        sqlx::query_as("SELECT kind, status FROM payroll_run WHERE id = $1::uuid FOR UPDATE")
-            .bind(payroll_run_id.as_str())
-            .fetch_optional(&mut **tx)
-            .await?;
-
-    let Some((kind, status)) = run else {
-        return Err(PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()));
-    };
-    if status != "draft" {
-        return Err(PayrollAppError::PayrollRunNotDraft(payroll_run_id.clone()));
+    let run = lock_run(tx, payroll_run_id).await?;
+    if run.status == "finalized" {
+        return Err(PayrollAppError::PayrollRunAlreadyFinalized(
+            payroll_run_id.clone(),
+        ));
     }
-    Ok(kind)
+
+    sqlx::query(
+        "UPDATE payroll_run SET status = 'draft' WHERE id = $1::uuid AND status <> 'draft'",
+    )
+    .bind(payroll_run_id.as_str())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(run.kind)
 }
 
 /// Removes `employment_id` from `payroll_run_id`'s working membership.
@@ -235,7 +294,7 @@ pub async fn remove_employment_from_run(
     }
 
     let mut tx = pool.begin().await?;
-    let kind = lock_draft_run(&mut tx, payroll_run_id).await?;
+    let kind = lock_and_reopen_run(&mut tx, payroll_run_id).await?;
     if kind != "ordinary" {
         return Err(PayrollAppError::PayrollRunIsNotOrdinary(
             payroll_run_id.clone(),
@@ -312,7 +371,7 @@ pub async fn set_run_earnings(
     }
 
     let mut tx = pool.begin().await?;
-    lock_draft_run(&mut tx, payroll_run_id).await?;
+    lock_and_reopen_run(&mut tx, payroll_run_id).await?;
 
     // Earning lines are a fact about paying this Employment for this
     // period, so a run that is not paying it has nowhere to put them. The
@@ -323,9 +382,9 @@ pub async fn set_run_earnings(
     // would sit there looking like pay that was intended.
     //
     // No row lock is needed here. `remove_employment_from_run` takes the
-    // run's own `FOR UPDATE` before it removes anything, and `lock_draft_run`
-    // above holds that same lock, so a removal cannot commit between this
-    // read and the writes below.
+    // run's own `FOR UPDATE` before it removes anything, and
+    // `lock_and_reopen_run` above holds that same lock, so a removal cannot
+    // commit between this read and the writes below.
     let is_active_member: Option<bool> = sqlx::query_scalar(
         "SELECT TRUE FROM payroll_run_employment
          WHERE payroll_run_id = $1::uuid AND employment_id = $2 AND removed_at IS NULL",

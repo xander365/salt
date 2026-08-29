@@ -925,6 +925,89 @@ async fn a_finalized_payroll_agrees_with_the_run_it_came_from(pool: PgPool) {
         .expect("a FinalizedPayroll agreeing with its run is the supported shape");
 }
 
+/// §8 sums `finalized_payroll.taxable_remuneration` and `.paye` for every
+/// later period of the TaxYear, so these two columns are the only place a
+/// stored Money is read back as arithmetic rather than as a display figure.
+/// A negative or fractional cent here would be rounded away by the reader's
+/// cast and change a PAYE figure for the rest of the year, in a table no
+/// role may correct. The CHECK is what makes the reader's `Money::from_cents`
+/// a schema guarantee rather than a hope about every writer (migration 0024).
+#[sqlx::test]
+async fn a_finalized_payroll_holds_whole_non_negative_cents(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'finalized', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert ordinary run");
+
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("emp-1 is a member of the run");
+
+    let insert = |taxable_remuneration: &str, paye: &str| {
+        format!(
+            "INSERT INTO finalized_payroll
+                (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
+                 payroll_input_json, payroll_rules_json, payroll_calculation_json,
+                 taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version,
+                 finalized_by)
+             VALUES
+                ($1::uuid, 'emp-1', 'employer-1', '2026-03-01', '2026-03-31', 2026,
+                 '{{}}', '{{}}', '{{}}', {taxable_remuneration}, {paye}, 'paye-1', 'ssc-1',
+                 '0.1.0+gdeadbeef', 'actor')"
+        )
+    };
+
+    // A fraction of a cent is not refused so much as unrepresentable: the
+    // columns are BIGINT, so there is no value of them a `Money` cannot
+    // decode. That half of the guarantee is the type; the CHECK below is
+    // the other half.
+    let types: Vec<String> = sqlx::query_scalar(
+        "SELECT data_type FROM information_schema.columns
+         WHERE table_name = 'finalized_payroll'
+           AND column_name IN ('taxable_remuneration', 'paye')
+         ORDER BY column_name",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .expect("read the column types");
+    assert_eq!(types, vec!["bigint".to_string(), "bigint".to_string()]);
+
+    for (case, statement) in [
+        ("a negative taxable remuneration", insert("-1", "1200")),
+        ("a negative PAYE", insert("15000", "-1")),
+    ] {
+        let result = sqlx::query(&statement)
+            .bind(&run_id)
+            .execute(&mut *conn)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a FinalizedPayroll holding {case} must be refused"
+        );
+    }
+
+    sqlx::query(&insert("15000", "1200"))
+        .bind(&run_id)
+        .execute(&mut *conn)
+        .await
+        .expect("whole, non-negative cents are the supported shape");
+}
+
 /// §4.4 is explicit that CompensationTerms carries `effective_from` only: a row
 /// is in force until the next row's `effective_from`. A second column stating
 /// the same boundary could disagree with the first, making a gap or an overlap

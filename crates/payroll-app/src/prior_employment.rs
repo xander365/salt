@@ -1,7 +1,7 @@
 //! `DeclarePriorEmployment` and the read that resolves it (§4.5b, §12).
 
 use payroll::{EmployerId, EmploymentId, Money, PriorEmployment, PriorEmploymentFigures, TaxYear};
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::error::PayrollAppError;
@@ -114,11 +114,18 @@ pub async fn declare_prior_employment(
 /// that does not exist — so it is refused rather than answered `Unknown`.
 /// A void Employment is refused for §4.3's reason: this is a calculation
 /// input, and a voided Employment reaches no payroll.
-pub async fn get_prior_employment(
-    pool: &PgPool,
+///
+/// Takes anything a connection can be acquired from — a `&PgPool` for a
+/// standalone read, or a `&mut Transaction` so a caller assembling several
+/// facts at once reads them all on the one connection, inside its own
+/// transaction and under whatever lock it already holds.
+pub async fn get_prior_employment<'a>(
+    conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     tax_year: TaxYear,
 ) -> Result<PriorEmployment, PayrollAppError> {
+    let mut conn = conn.acquire().await?;
+
     type DeclarationRow = (bool, Option<String>, Option<i64>, Option<i64>);
 
     // One statement, and an outer join rather than two reads: "the
@@ -138,7 +145,7 @@ pub async fn get_prior_employment(
     )
     .bind(employment_id.as_str())
     .bind(tax_year.starting_year())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let (is_void, status, taxable_remuneration, paye) =

@@ -437,7 +437,7 @@ which is precisely how two processes both conclude they may finalize.
 ### 4.7 PayrollRun lifecycle
 
 ```text
-Draft  →  Calculated  →  Finalized
+Draft  ⇄  Calculated  →  Finalized
 ```
 
 **There is no `Reviewed` state.** Finalizing is itself the deliberate approval,
@@ -451,6 +451,22 @@ machinery and buys a checkbox. `CONTEXT.md` has been updated.
   calculation. A partially calculated run is still `Draft`.
 - **Finalized** — immutable history was created atomically; working state can no
   longer change; the run cannot finalize again.
+
+**`Calculated` is editable, and editing reopens the run.** The arrow back to
+`Draft` is not a second thought about the lifecycle: `Calculated` is defined
+above as a *property of the members*, not as a gate the Employer passed
+through. Seeing the figures is precisely when a wrong Earning, or a member
+who should not be paid this period, becomes visible — so refusing the edit
+would leave an Employer who spotted a mistake with finalizing it or nothing.
+The instant an Earning changes or a member leaves, the stored calculations
+stop being a current account of the run, which is the definition of `Draft`;
+moving the status back is what keeps the column honest rather than a claim
+about calculations that have gone stale. The Employer recalculates to reach
+`Calculated` again.
+
+A separate `ReopenPayrollRun` act was rejected for the reason §4.7 rejects
+`Reviewed`: it enforces no invariant the edit does not already enforce, and
+buys a second thing to forget. `Finalized` remains the one absolute refusal.
 
 ### 4.8 Run membership
 
@@ -1436,3 +1452,4 @@ The result is testable entirely from Rust plus PostgreSQL.
 | 38 | A Correction run checks its own period only — neither earlier nor later |
 | 39 | Lineage may be null for a Correction that supersedes a reasoned removal or covers an omission; `correction_reason` is mandatory in every case |
 | 40 | A Correction run's earnings are pre-populated from the reversed snapshot, degrading to empty when the snapshot schema is no longer readable |
+| 41 | Editing a `Calculated` run's earnings or membership is accepted and reopens it as `Draft`; `Finalized` is the one absolute refusal |

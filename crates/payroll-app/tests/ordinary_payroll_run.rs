@@ -499,23 +499,50 @@ async fn removing_an_already_removed_member_is_refused(pool: PgPool) {
     assert_eq!(row.get::<String, _>(1), "first reason");
 }
 
+/// Seeing the calculated figures is exactly when an Employer notices that
+/// someone should not be paid this period, so a `Calculated` run must still
+/// accept a removal — and the removal reopens it. The stored calculations
+/// are no longer a current account of the run's members the moment one
+/// leaves, which is the definition of `Draft` (§4.7).
 #[sqlx::test]
-async fn a_member_cannot_be_removed_after_calculation_or_finalization(pool: PgPool) {
-    for status in ["calculated", "finalized"] {
-        let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
-        sqlx::query("UPDATE payroll_run SET status = $1 WHERE id = $2::uuid")
-            .bind(status)
-            .bind(run_id.as_str())
-            .execute(&pool)
-            .await
-            .unwrap();
+async fn removing_a_member_from_a_calculated_run_reopens_it(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    sqlx::query("UPDATE payroll_run SET status = 'calculated' WHERE id = $1::uuid")
+        .bind(run_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let result =
-            remove_employment_from_run(&pool, &run_id, &employment_id, "unpaid leave", "actor")
-                .await;
+    remove_employment_from_run(&pool, &run_id, &employment_id, "unpaid leave", "actor")
+        .await
+        .unwrap();
 
-        assert_eq!(result, Err(PayrollAppError::PayrollRunNotDraft(run_id)));
-    }
+    let status: String = sqlx::query_scalar("SELECT status FROM payroll_run WHERE id = $1::uuid")
+        .bind(run_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "draft");
+}
+
+/// `Finalized` is the one absolute refusal: history has been written, and
+/// working state can no longer change (§4.7).
+#[sqlx::test]
+async fn a_member_cannot_be_removed_after_finalization(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    sqlx::query("UPDATE payroll_run SET status = 'finalized' WHERE id = $1::uuid")
+        .bind(run_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let result =
+        remove_employment_from_run(&pool, &run_id, &employment_id, "unpaid leave", "actor").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id))
+    );
 }
 
 #[sqlx::test]
@@ -639,29 +666,60 @@ async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
     );
 }
 
+/// An Earning corrected after the figures are on screen is the ordinary
+/// case, not an exception: the edit is accepted and the run reopens, so its
+/// status stops claiming calculations that the new line has made stale.
 #[sqlx::test]
-async fn earnings_cannot_change_after_calculation_or_finalization(pool: PgPool) {
-    for status in ["calculated", "finalized"] {
-        let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
-        sqlx::query("UPDATE payroll_run SET status = $1 WHERE id = $2::uuid")
-            .bind(status)
-            .bind(run_id.as_str())
-            .execute(&pool)
-            .await
-            .unwrap();
+async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    sqlx::query("UPDATE payroll_run SET status = 'calculated' WHERE id = $1::uuid")
+        .bind(run_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let result = set_run_earnings(
-            &pool,
-            &run_id,
-            &employment_id,
-            vec![Earning::TaxableAllowance(
-                Money::from_cents(10_000).unwrap(),
-            )],
-        )
-        .await;
+    set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![Earning::TaxableAllowance(
+            Money::from_cents(10_000).unwrap(),
+        )],
+    )
+    .await
+    .unwrap();
 
-        assert_eq!(result, Err(PayrollAppError::PayrollRunNotDraft(run_id)));
-    }
+    let status: String = sqlx::query_scalar("SELECT status FROM payroll_run WHERE id = $1::uuid")
+        .bind(run_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "draft");
+}
+
+#[sqlx::test]
+async fn earnings_cannot_change_after_finalization(pool: PgPool) {
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    sqlx::query("UPDATE payroll_run SET status = 'finalized' WHERE id = $1::uuid")
+        .bind(run_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let result = set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![Earning::TaxableAllowance(
+            Money::from_cents(10_000).unwrap(),
+        )],
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id))
+    );
 }
 
 #[sqlx::test]
