@@ -653,6 +653,64 @@ async fn a_correction_run_must_say_why_it_exists(pool: PgPool) {
     );
 }
 
+/// §4.5 guard 2, and ADR-0005's rule that a `PayPeriod` belongs to the
+/// `TaxYear` its **end** date falls in: January and February belong to the
+/// year that started the previous March. §7 reads `first_salt_period_end` as
+/// the boundary of the row's own `TaxYear` and §8 adds the row's figures to
+/// that one year, so a row whose boundary belongs to another year would
+/// answer both questions wrongly and silently.
+#[sqlx::test]
+async fn an_opening_balance_boundary_belongs_to_its_own_tax_year(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    // 31 January 2027 is inside the TaxYear starting March 2026, not the one
+    // starting March 2027 -- the reading a bare calendar year gets wrong.
+    let january_belongs_to_the_previous_march = sqlx::query(
+        "INSERT INTO opening_balance
+            (employment_id, tax_year, first_salt_period_end,
+             prior_taxable_remuneration, prior_paye, created_by)
+         VALUES ('emp-1', 2026, '2027-01-31', 0, 0, 'actor')",
+    )
+    .execute(&mut *conn)
+    .await;
+
+    assert!(
+        january_belongs_to_the_previous_march.is_ok(),
+        "a January boundary belongs to the TaxYear that started the previous March, \
+         got {january_belongs_to_the_previous_march:?}"
+    );
+
+    for (case, tax_year, boundary) in [
+        (
+            "a boundary a whole year after its TaxYear",
+            2026,
+            "2027-10-31",
+        ),
+        (
+            "a boundary a whole year before its TaxYear",
+            2026,
+            "2025-10-31",
+        ),
+        (
+            "a January boundary read as its own calendar year",
+            2027,
+            "2027-01-31",
+        ),
+    ] {
+        let result = sqlx::query(&format!(
+            "INSERT INTO opening_balance
+                (employment_id, tax_year, first_salt_period_end,
+                 prior_taxable_remuneration, prior_paye, created_by)
+             VALUES ('emp-2', {tax_year}, '{boundary}', 0, 0, 'actor')"
+        ))
+        .execute(&mut *conn)
+        .await;
+
+        assert!(result.is_err(), "{case} must be refused");
+    }
+}
+
 /// §4.8: a removal is the deliberate, reasoned act that keeps a silent
 /// omission from being possible, so the three removal columns are set
 /// together or not at all, and the reason is never blank.

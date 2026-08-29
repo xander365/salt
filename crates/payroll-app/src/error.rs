@@ -71,7 +71,7 @@ pub enum PayrollAppError {
     /// span — `SaltCoverageStart` equal to the Employment's first payable
     /// period end, so there is no pre-Salt period left for the figures to
     /// describe (§4.5 guard 4).
-    OpeningBalanceFiguresOverAnEmptyCoveredSpan,
+    OpeningBalanceFiguresOverAnEmptyCoveredSpan { salt_coverage_start: NaiveDate },
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -121,9 +121,11 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "SaltCoverageStart {salt_coverage_start} falls before the Employment's first payable PayPeriod end {first_payable_period_end} in that TaxYear"
             ),
-            Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan => write!(
+            Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan {
+                salt_coverage_start,
+            } => write!(
                 f,
-                "non-zero OpeningBalance figures were given over an empty covered span"
+                "non-zero OpeningBalance figures were given over an empty covered span: SaltCoverageStart {salt_coverage_start} is itself the Employment's first payable PayPeriod end, so no pre-Salt period remains for them to describe"
             ),
         }
     }
@@ -152,7 +154,7 @@ impl std::error::Error for PayrollAppError {
             | Self::SaltCoverageStartNotAPeriodEnd { .. }
             | Self::SaltCoverageStartOutsideTaxYear { .. }
             | Self::SaltCoverageStartBeforeEmploymentIsPayable { .. }
-            | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan => None,
+            | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan { .. } => None,
         }
     }
 }

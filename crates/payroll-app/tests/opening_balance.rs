@@ -3,9 +3,14 @@
 //! reached through the public API rather than raw SQL.
 
 use chrono::NaiveDate;
-use payroll::{DayOfMonth, EmployerId, EmploymentId, Money, PeriodEndDay, PersonId, TaxYear};
+use payroll::{
+    DayOfMonth, EmployerId, EmploymentId, Money, PeriodEndDay, PersonId, PriorEmployment, TaxYear,
+    UnsupportedDeductionStatus,
+};
 use payroll_app::{
-    PayrollAppError, create_employer, create_employment, record_opening_balance, void_employment,
+    PayrollAppError, create_employer, create_employment, declare_prior_employment,
+    declare_unsupported_deduction_status, record_compensation_terms, record_opening_balance,
+    void_employment,
 };
 use sqlx::{PgPool, Row};
 
@@ -255,6 +260,50 @@ async fn a_salt_coverage_start_outside_the_stated_tax_year_is_refused(pool: PgPo
     );
 }
 
+/// ADR-0005 keys a `PayPeriod`'s `TaxYear` on its **end** date alone, so a
+/// period ending in January or February belongs to the TaxYear that started
+/// the previous March. Guard 2 must read the boundary that way and not as a
+/// bare calendar year, or an Employer adopting Salt in February would be
+/// refused for stating the only TaxYear their boundary can be in.
+#[sqlx::test]
+async fn a_february_boundary_belongs_to_the_tax_year_that_started_the_previous_march(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2027, 2, 28),
+        Money::from_cents(1_200_000).unwrap(),
+        Money::from_cents(240_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // The same boundary read as its own calendar year is the wrong TaxYear,
+    // and is refused.
+    let result = record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2027),
+        date(2027, 2, 28),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::SaltCoverageStartOutsideTaxYear {
+            salt_coverage_start: date(2027, 2, 28),
+            tax_year: TaxYear::starting(2027),
+        })
+    );
+}
+
 // ---- Guard 3: on or after the Employment's first payable period end ----
 
 #[sqlx::test]
@@ -326,7 +375,11 @@ async fn a_continuing_employees_first_payable_period_is_the_tax_years_own_first_
 
     assert_eq!(
         result,
-        Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan)
+        Err(
+            PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan {
+                salt_coverage_start: date(2026, 3, 31),
+            }
+        )
     );
 }
 
@@ -377,7 +430,11 @@ async fn non_zero_figures_at_the_employments_first_payable_period_are_refused(po
 
     assert_eq!(
         result,
-        Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan)
+        Err(
+            PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan {
+                salt_coverage_start: date(2026, 3, 31),
+            }
+        )
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM opening_balance")
         .fetch_one(&pool)
@@ -404,7 +461,11 @@ async fn non_zero_paye_alone_at_an_empty_covered_span_is_also_refused(pool: PgPo
 
     assert_eq!(
         result,
-        Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan)
+        Err(
+            PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan {
+                salt_coverage_start: date(2026, 3, 31),
+            }
+        )
     );
 }
 
@@ -483,4 +544,156 @@ async fn an_unattributed_opening_balance_is_refused_by_the_database(pool: PgPool
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+// ---- Never automatic (§4.5, ADR-0014) ----
+
+/// An `OpeningBalance` is an affirmative payroll fact or it is nothing: no
+/// other use case may write one, because a Salt-written zero row would turn
+/// "nobody entered prior year-to-date" into "confirmed zero" — the exact
+/// conflation INV-012 exists to prevent (ADR-0014).
+///
+/// Every standing-fact use case an Employer reaches before their first
+/// payroll runs here, and the table stays empty through all of them.
+#[sqlx::test]
+async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
+    let (_, employment_id) =
+        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+
+    let count = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM opening_balance")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        count(pool.clone()).await,
+        0,
+        "creating an Employer and an Employment must write no OpeningBalance"
+    );
+
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 3, 1),
+        Money::from_cents(1_500_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_prior_employment(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &pool,
+        &employment_id,
+        date(2026, 3, 1),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count(pool).await,
+        0,
+        "no standing-fact use case may write an OpeningBalance; only \
+         record_opening_balance does"
+    );
+}
+
+/// ADR-0014: the boundary is per Employment, not per Employer. One
+/// Employer adopting Salt in October has a continuing employee whose
+/// pre-Salt figures run March–September, and a November joiner whose
+/// covered span is empty. Both rows coexist, each with its own boundary.
+#[sqlx::test]
+async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
+    let employer_id = create_employer(&pool, calendar_month_schedule(), "actor")
+        .await
+        .unwrap();
+    let continuing = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 3, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    let joiner = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-2"),
+        date(2026, 11, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    record_opening_balance(
+        &pool,
+        &continuing,
+        TaxYear::starting(2026),
+        date(2026, 10, 31),
+        Money::from_cents(700_000).unwrap(),
+        Money::from_cents(140_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    record_opening_balance(
+        &pool,
+        &joiner,
+        TaxYear::starting(2026),
+        date(2026, 11, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let boundaries: Vec<(String, NaiveDate, i64)> = sqlx::query_as(
+        "SELECT employment_id, first_salt_period_end, prior_taxable_remuneration
+         FROM opening_balance ORDER BY first_salt_period_end",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        boundaries,
+        vec![
+            (continuing.as_str().to_owned(), date(2026, 10, 31), 700_000),
+            (joiner.as_str().to_owned(), date(2026, 11, 30), 0),
+        ]
+    );
+
+    // The joiner's own figures must still be zero: their covered span is
+    // empty, whatever the other Employment's boundary says.
+    let result = record_opening_balance(
+        &pool,
+        &joiner,
+        TaxYear::starting(2026),
+        date(2026, 11, 30),
+        Money::from_cents(1).unwrap(),
+        Money::ZERO,
+        "actor",
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan {
+                salt_coverage_start: date(2026, 11, 30),
+            }
+        )
+    );
 }

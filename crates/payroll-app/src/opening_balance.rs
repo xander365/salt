@@ -23,7 +23,9 @@ use crate::error::PayrollAppError;
 /// 1. `salt_coverage_start` must itself be a `PayPeriod` **end** date the
 ///    Employer's `PaySchedule` generates — the same demand INV-014 makes of
 ///    a `CompensationTerms` **start**.
-/// 2. It must fall inside `tax_year`.
+/// 2. It must fall inside `tax_year` — restated as a schema `CHECK` in
+///    migration 0022, because every later reader treats the boundary as a
+///    date inside the row's own `TaxYear` (§7, §8).
 /// 3. It must be on or after the Employment's first payable `PayPeriod` end
 ///    in `tax_year`: Salt cannot claim to have replaced a system for
 ///    periods in which the Employment did not exist.
@@ -97,7 +99,11 @@ pub async fn record_opening_balance(
     if covered_span_is_empty
         && (prior_taxable_remuneration != Money::ZERO || prior_paye != Money::ZERO)
     {
-        return Err(PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan);
+        return Err(
+            PayrollAppError::OpeningBalanceFiguresOverAnEmptyCoveredSpan {
+                salt_coverage_start,
+            },
+        );
     }
 
     // `xmax = 0` is true only for the row version this statement itself
@@ -168,11 +174,16 @@ fn first_payable_period_end(
     let employment_first_period_end = period_containing(schedule, employment_start_date)?.end();
 
     // Every TaxYear's own first period ends in its own March (ADR-0005), so
-    // 1 March of `tax_year`'s starting year always lands inside it.
-    let march_first = NaiveDate::from_ymd_opt(tax_year.starting_year(), 3, 1).expect(
-        "1 March of any TaxYear's starting year is within the representable calendar \
-         whenever that starting year itself is",
-    );
+    // 1 March of `tax_year`'s starting year always lands inside it. Guard 2
+    // has already matched that starting year to a real `NaiveDate`'s own
+    // year, so this construction fails only at the very edge of the
+    // representable calendar — where it is refused rather than panicked on,
+    // exactly as `period_containing` refuses there.
+    let march_first = NaiveDate::from_ymd_opt(tax_year.starting_year(), 3, 1).ok_or(
+        PayrollError::PayScheduleOutsideRepresentableCalendar {
+            date: employment_start_date,
+        },
+    )?;
     let tax_year_first_period_end = period_containing(schedule, march_first)?.end();
 
     Ok(employment_first_period_end.max(tax_year_first_period_end))
