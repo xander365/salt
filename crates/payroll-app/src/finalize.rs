@@ -48,6 +48,16 @@ use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
 use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run};
 
+/// The shape of the three JSONB snapshots this code freezes (§9, §9.1).
+///
+/// It ships from day one and is stored on every row, because it is the field
+/// a future reader branches on to render old history without constructing
+/// current domain types — and there are no in-place JSON migrations, ever
+/// (the application has no `UPDATE` grant on the table). A shape change means
+/// this constant becomes 2 and new rows carry 2; rows written at 1 stay at 1
+/// and are still read by the version-1 reader.
+pub const SNAPSHOT_SCHEMA_VERSION: i32 = 1;
+
 /// One member's approved `WorkingPayrollCalculation`, read back so its three
 /// values can be compared against a fresh reassembly/re-resolution/recompute
 /// of the same three (§5.2).
@@ -133,9 +143,20 @@ pub async fn finalize_payroll_run(
         let stored = fetch_working_calculation(&mut tx, payroll_run_id, &employment_id).await?;
         let earnings = earnings_by_member.remove(&member_id).unwrap_or_default();
 
+        // A rebuild that refuses outright — a `CompensationTerms` row deleted,
+        // an Employment voided, a declaration withdrawn since the run
+        // calculated — is named by the Employment it blocked, for the same
+        // reason the three mismatches below are and `calculate_payroll_run`
+        // returns its refusals as `PayrollRunCalculationRefusal`: an Employer
+        // told only "PriorEmployment is Unknown" about a ten-member run has
+        // been told nothing they can act on.
         let (current_input, current_calculation) =
             assemble_and_calculate(&mut tx, &employment_id, period, schedule, earnings, &rules)
-                .await?;
+                .await
+                .map_err(|refusal| PayrollAppError::FinalizationRebuildRefused {
+                    employment_id: employment_id.clone(),
+                    refusal: Box::new(refusal),
+                })?;
 
         if current_input != stored.input {
             return Err(PayrollAppError::FinalizationInputMismatch {
@@ -254,8 +275,15 @@ async fn fetch_working_calculation(
 /// `PayrollInput`, `PayrollRules` and `PayrollCalculation`, both rule ids,
 /// the `SaltVersion`, and `TaxableRemuneration`/`PAYE` as real numeric
 /// columns beside the JSONB snapshots (§9) — the columns year-to-date
-/// actually reads. `snapshot_schema_version` is left to the column's own
-/// `DEFAULT 1` (migration 0009).
+/// actually reads.
+///
+/// `snapshot_schema_version` is bound explicitly from
+/// [`SNAPSHOT_SCHEMA_VERSION`] rather than left to the column's `DEFAULT 1`
+/// (migration 0009). §9.1 makes it the field a future reader branches on to
+/// render old history, and there are no in-place JSON migrations ever — so
+/// the version must be the one *this code's* snapshot shape actually is. A
+/// default states what the column was created with, which stops being the
+/// same fact the day a shape change ships.
 #[allow(clippy::too_many_arguments)]
 async fn insert_finalized_payroll(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -278,8 +306,9 @@ async fn insert_finalized_payroll(
         "INSERT INTO finalized_payroll
             (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
              payroll_input_json, payroll_rules_json, payroll_calculation_json,
-             taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version, finalized_by)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version,
+             snapshot_schema_version, finalized_by)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
          RETURNING id::text",
     )
     .bind(payroll_run_id.as_str())
@@ -296,6 +325,7 @@ async fn insert_finalized_payroll(
     .bind(calculation.paye_table_id.as_str())
     .bind(calculation.ssc_rules_id.as_str())
     .bind(crate::SALT_VERSION)
+    .bind(SNAPSHOT_SCHEMA_VERSION)
     .bind(finalized_by)
     .fetch_one(&mut **tx)
     .await?;

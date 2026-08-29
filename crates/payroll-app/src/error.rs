@@ -133,6 +133,21 @@ pub enum PayrollAppError {
     /// — still `Draft`, with at least one member unresolved. `Finalized` is
     /// the separate, absolute refusal above.
     PayrollRunNotCalculated(PayrollRunId),
+    /// Finalization's rebuild of one member refused before any of the three
+    /// comparisons could be made — an Employment voided, a
+    /// `CompensationTerms` row withdrawn, a declaration removed since the
+    /// run reached `Calculated`, or any refusal `calculate` itself raises.
+    ///
+    /// The Employment is named alongside the refusal for the same reason
+    /// [`crate::PayrollRunCalculationRefusal`] names it and the three
+    /// mismatches below do: an Employer told only "PriorEmployment is
+    /// Unknown" about a ten-member run has been told nothing they can act
+    /// on. The whole run refuses regardless (§5.1) — this says which member
+    /// to go and fix.
+    FinalizationRebuildRefused {
+        employment_id: EmploymentId,
+        refusal: Box<PayrollAppError>,
+    },
     /// Finalization's reassembled `PayrollInput` no longer equals what the
     /// working calculation approved (§5.2). Carries both so the mismatch is
     /// explainable rather than merely declared — the whole point of
@@ -249,6 +264,13 @@ impl std::fmt::Display for PayrollAppError {
             Self::PayrollRunNotCalculated(id) => {
                 write!(f, "PayrollRun {id} is not Calculated")
             }
+            Self::FinalizationRebuildRefused {
+                employment_id,
+                refusal,
+            } => write!(
+                f,
+                "finalizing Employment {employment_id} refused: {refusal}"
+            ),
             Self::FinalizationInputMismatch {
                 employment_id,
                 approved,
@@ -304,6 +326,11 @@ impl std::error::Error for PayrollAppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Payroll(err) => err.source(),
+            // Same reason as `Payroll` above: `Display` already prints the
+            // wrapped refusal's message, so returning it as the source would
+            // make every chain-printing reporter say it twice. Whatever sat
+            // *below* it is still reachable.
+            Self::FinalizationRebuildRefused { refusal, .. } => refusal.source(),
             Self::Database(_)
             | Self::EmployerNotFound(_)
             | Self::EmploymentNotFound(_)

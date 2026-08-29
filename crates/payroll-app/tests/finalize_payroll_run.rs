@@ -15,8 +15,8 @@ use payroll::{
     UnsupportedDeductionStatus, ruleset_for,
 };
 use payroll_app::{
-    PayrollAppError, PayrollRunId, SALT_VERSION, calculate_payroll_run, create_employer,
-    create_employment, create_ordinary_payroll_run, declare_prior_employment,
+    PayrollAppError, PayrollRunId, SALT_VERSION, SNAPSHOT_SCHEMA_VERSION, calculate_payroll_run,
+    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
     declare_unsupported_deduction_status, finalize_payroll_run, record_compensation_terms,
 };
 use sqlx::{Acquire, PgPool, Row};
@@ -234,7 +234,11 @@ async fn finalizing_a_calculated_run_freezes_the_complete_snapshot_and_marks_the
     assert_eq!(row.paye_table_id, expected_rules.paye_table().id().as_str());
     assert_eq!(row.ssc_rules_id, expected_rules.ssc_ruleset().id().as_str());
     assert_eq!(row.salt_version, SALT_VERSION);
-    assert_eq!(row.snapshot_schema_version, 1);
+    assert_eq!(row.snapshot_schema_version, SNAPSHOT_SCHEMA_VERSION);
+    assert_eq!(
+        SNAPSHOT_SCHEMA_VERSION, 1,
+        "§9: the snapshot ships at version 1"
+    );
     assert_eq!(row.finalized_by, "finalizer");
     assert_eq!(row.replaces_finalized_payroll_id, None);
     assert_eq!(row.taxable_remuneration_cents, 1500000);
@@ -482,6 +486,10 @@ async fn finalization_refuses_when_the_recomputed_calculation_differs(pool: PgPo
         ),
         "expected a FinalizationCalculationMismatch, got {result:?}"
     );
+    // ADR-0010: the refusal names *what changed inside* the value that
+    // differed, not only which of the three it was.
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("net_pay"), "{message}");
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
         .fetch_one(&pool)
         .await
@@ -649,6 +657,9 @@ async fn finalization_refuses_when_the_re_resolved_rules_differ_while_the_calcul
         ),
         "expected a FinalizationRulesMismatch, got {result:?}"
     );
+    let message = result.as_ref().unwrap_err().to_string();
+    assert!(message.contains("ssc_ruleset.id"), "{message}");
+    assert!(message.contains("ssc-2025-03-tampered"), "{message}");
 
     // The stored calculation was computed under the real ruleset and was
     // never touched by this tamper, so it is still exactly what a fresh
@@ -747,6 +758,15 @@ async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_on
             .is_none(),
         "no liveness row for the good member either"
     );
+    // The rows, the liveness, the audit entry and the status change are one
+    // transaction (§5.3, §10), so a refusal leaves none of the four behind —
+    // not a `PayrollFinalized` entry for a run that never finalized, and not
+    // a status that says it did.
+    assert_eq!(
+        action_log_count(&pool, "payroll_finalized", run_id.as_str()).await,
+        0
+    );
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
 }
 
 // ---- Concurrency (§5.4, §14 test 1) ----
@@ -758,14 +778,19 @@ async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_on
 // is inferred for one specific lifetime rather than proven for every one
 // (rust-lang/rust#100013 and similar) — `cargo build` reports "implementation
 // of `Send`/`Acquire` is not general enough" for *any* async fn in this crate
-// spawned this way, `calculate_payroll_run` included. So this test proves the
-// two halves separately: raw SQL, on two real connections with a controlled
-// interleaving, proves the `FOR UPDATE` lock genuinely blocks a second
-// transaction rather than merely being present in the SQL; the real
-// `finalize_payroll_run`, called twice in the sequence the lock enforces,
-// proves that exactly one of the two calls a lock like that could ever admit
-// actually succeeds, and that the loser's own refusal — not an
-// application-side status check — is what the lock's blocked side sees.
+// spawned this way, `calculate_payroll_run` included. `tokio::join!` is the
+// way round it: it polls both futures in place, so no `Send` bound is ever
+// required, while each still draws its own connection from the pool — two
+// real PostgreSQL transactions racing for one row.
+//
+// So the test proves the guarantee in two steps. Raw SQL, on two real
+// connections with a controlled interleaving, proves the `FOR UPDATE` lock
+// genuinely blocks a second transaction rather than merely being present in
+// the SQL. Then two real `finalize_payroll_run` calls, simultaneously in
+// flight, prove that exactly one of them succeeds and that the loser's own
+// refusal — read from the status the winner committed, not from an
+// application-side check made before the race — is what the blocked side
+// sees.
 #[sqlx::test]
 async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
@@ -831,17 +856,34 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
     let status_seen_after_the_lock_was_released = racing_task.await.expect("join racing task");
     assert_eq!(status_seen_after_the_lock_was_released, "calculated");
 
-    // Phase 2: the lock is what a real finalizer takes first, so two real
-    // calls made in the order the lock would enforce show what its winner
-    // and its loser each see — success once, then the loser's own refusal.
-    finalize_payroll_run(&pool, &run_id, "finalizer-a")
-        .await
-        .unwrap();
-    let second_call = finalize_payroll_run(&pool, &run_id, "finalizer-b").await;
+    // Phase 2: two *real* `finalize_payroll_run` calls, genuinely in flight
+    // at once. `tokio::join!` polls both futures in place rather than
+    // spawning them, so neither needs the `Send` bound the note above
+    // explains this crate's async functions cannot prove — and both still
+    // take their own connection from the pool, so the interleaving is two
+    // real PostgreSQL transactions racing for one row, not two turns of the
+    // same one. Which of them wins the `FOR UPDATE` is PostgreSQL's to
+    // decide and this test does not care; that exactly one does is the
+    // whole invariant (§5.4).
+    let (first, second) = tokio::join!(
+        finalize_payroll_run(&pool, &run_id, "finalizer-a"),
+        finalize_payroll_run(&pool, &run_id, "finalizer-b"),
+    );
+
+    let (winner, loser) = match (&first, &second) {
+        (Ok(()), Err(_)) => (&first, &second),
+        (Err(_), Ok(())) => (&second, &first),
+        _ => panic!("exactly one finalization must succeed, got {first:?} and {second:?}"),
+    };
+    assert_eq!(winner.as_ref().ok(), Some(&()));
+    // The loser is refused by re-reading the status the winner committed —
+    // the lock releasing is what lets it read at all — not by an
+    // application-side check made before the race.
     assert_eq!(
-        second_call,
+        *loser,
         Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id.clone()))
     );
+    assert_eq!(run_status(&pool, &run_id).await, "finalized");
 
     let live_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM live_finalized_payroll WHERE employment_id = $1 AND period_end = $2",
@@ -860,4 +902,68 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
             .await
             .unwrap();
     assert_eq!(finalized_count, 1, "no duplicate FinalizedPayroll row");
+}
+
+/// §5.1 and user story 30: a member whose rebuild refuses outright — rather
+/// than merely differing — blocks the whole run, and the refusal says *which*
+/// Employment to go and fix.
+///
+/// `PayrollError::PriorEmploymentUnknown` carries no `EmploymentId` of its
+/// own, which is exactly why finalization must name one: without it an
+/// Employer with ten members is told a fact about the run and nothing about
+/// where to look. The declaration is withdrawn directly, since the public API
+/// has no "undeclare" use case — that is the point, this is a fact moving
+/// underneath an approved run.
+#[sqlx::test]
+async fn a_members_rebuild_refusal_names_the_employment_and_finalizes_nobody(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let good = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-good",
+        Money::from_cents(900000).unwrap(),
+    )
+    .await;
+    let bad = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-bad",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    assert!(
+        good.as_str() < bad.as_str(),
+        "UUIDv7 ids order by creation, so the refusing member must be rebuilt second"
+    );
+    let run_id = a_calculated_run(&pool, &employer_id).await;
+
+    sqlx::query("DELETE FROM prior_employment_declaration WHERE employment_id = $1")
+        .bind(bad.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::FinalizationRebuildRefused {
+            employment_id: bad.clone(),
+            refusal: Box::new(PayrollAppError::Payroll(
+                payroll::PayrollError::PriorEmploymentUnknown
+            )),
+        })
+    );
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains(bad.as_str()), "{message}");
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "the member that rebuilt cleanly must not finalize either"
+    );
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
 }
