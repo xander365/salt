@@ -7,8 +7,17 @@
 //! under `[workspace.lints]`, so a member cannot opt out of it by
 //! forgetting an attribute.
 
+mod action_log;
+mod compensation_terms;
+mod employer;
+mod employment;
 mod error;
+mod ids;
 
+pub use action_log::ActionType;
+pub use compensation_terms::record_compensation_terms;
+pub use employer::create_employer;
+pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::PayrollAppError;
 
 /// The Salt release that produced this build: semver plus a short git SHA in

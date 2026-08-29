@@ -495,17 +495,7 @@ pub fn calculate(
     let period_days = (input.period.end() - input.period.start()).num_days() + 1;
 
     let terms = input.employment.compensation_terms();
-    let effective_period = period_containing(input.schedule, terms.effective_from())?;
-    if effective_period.start() != terms.effective_from() {
-        let next_valid_effective_from = effective_period.end().succ_opt().ok_or(
-            PayrollError::PayScheduleOutsideRepresentableCalendar {
-                date: terms.effective_from(),
-            },
-        )?;
-        return Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
-            next_valid_effective_from,
-        });
-    }
+    validate_compensation_terms_effective_from(input.schedule, terms.effective_from())?;
     if !terms.cover_days(employed.first(), employed.last()) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
@@ -658,6 +648,29 @@ fn period_containing(schedule: PaySchedule, date: NaiveDate) -> Result<PayPeriod
     schedule
         .period_containing(date)
         .ok_or(PayrollError::PayScheduleOutsideRepresentableCalendar { date })
+}
+
+/// Validates a `CompensationTerms.effective_from` against INV-014: it must
+/// be the start date of one of `schedule`'s own `PayPeriod`s. `calculate`
+/// runs this same check once a `PayPeriod` is in hand; it is exposed here so
+/// a caller recording a `CompensationTerms` row can make the same refusal
+/// before any `PayPeriod` exists to calculate against.
+pub fn validate_compensation_terms_effective_from(
+    schedule: PaySchedule,
+    effective_from: NaiveDate,
+) -> Result<(), PayrollError> {
+    let effective_period = period_containing(schedule, effective_from)?;
+    if effective_period.start() != effective_from {
+        let next_valid_effective_from = effective_period.end().succ_opt().ok_or(
+            PayrollError::PayScheduleOutsideRepresentableCalendar {
+                date: effective_from,
+            },
+        )?;
+        return Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+            next_valid_effective_from,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2101,6 +2114,28 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &test_rules()),
+            Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+                next_valid_effective_from: date(2026, 1, 26),
+            })
+        );
+    }
+
+    // `validate_compensation_terms_effective_from` is the same INV-014
+    // check `calculate` makes above, exposed directly so a caller recording
+    // a `CompensationTerms` row can refuse it before any `PayPeriod`
+    // exists — see `payroll-app`'s `record_compensation_terms`.
+    #[test]
+    fn validate_compensation_terms_effective_from_accepts_a_period_start() {
+        assert_eq!(
+            validate_compensation_terms_effective_from(test_schedule(), date(2026, 1, 26)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_compensation_terms_effective_from_refuses_a_mid_period_date() {
+        assert_eq!(
+            validate_compensation_terms_effective_from(test_schedule(), date(2026, 1, 10)),
             Err(PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
                 next_valid_effective_from: date(2026, 1, 26),
             })

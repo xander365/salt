@@ -1,0 +1,329 @@
+//! Proves the use cases issue #26 introduces: `create_employer`,
+//! `create_employment`, `record_compensation_terms`, `void_employment`, and
+//! `get_employment_snapshot` — the seams `docs/domain/payroll-run-persistence.md`
+//! §4.2-§4.4 and §10 describe, reached through the public API a later ticket
+//! calls, not raw SQL.
+
+use chrono::NaiveDate;
+use payroll::{DayOfMonth, Money, PayrollError, PeriodEndDay, PersonId};
+use payroll_app::{
+    PayrollAppError, create_employer, create_employment, get_employment_snapshot,
+    record_compensation_terms, void_employment,
+};
+use sqlx::{PgPool, Row};
+
+fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+/// A 26th-to-25th monthly schedule: 2026-01-26 to 2026-02-25 is one of its
+/// own `PayPeriod`s, so `2026-01-26` and `2026-02-26` are period starts and
+/// `2026-01-10` is not.
+fn twenty_sixth_schedule() -> payroll::PaySchedule {
+    payroll::PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()))
+}
+
+#[sqlx::test]
+async fn an_employer_is_created_with_exactly_one_pay_schedule(pool: PgPool) {
+    let schedule = twenty_sixth_schedule();
+    let employer_id = create_employer(&pool, schedule, "actor").await.unwrap();
+
+    let row =
+        sqlx::query("SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1")
+            .bind(employer_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.get::<String, _>(0), "day");
+    assert_eq!(row.get::<i16, _>(1), 25);
+}
+
+#[sqlx::test]
+async fn an_employment_is_created_with_a_start_date_and_an_optional_end_date(pool: PgPool) {
+    let employer_id = create_employer(&pool, twenty_sixth_schedule(), "actor")
+        .await
+        .unwrap();
+    let person_id = PersonId::new("person-1");
+
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &person_id,
+        date(2026, 1, 26),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query("SELECT start_date, end_date, is_void FROM employment WHERE id = $1")
+        .bind(employment_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<NaiveDate, _>(0), date(2026, 1, 26));
+    assert_eq!(row.get::<Option<NaiveDate>, _>(1), None);
+    assert!(!row.get::<bool, _>(2));
+
+    let leaver_id = create_employment(
+        &pool,
+        &employer_id,
+        &person_id,
+        date(2026, 1, 26),
+        Some(date(2026, 6, 25)),
+        "actor",
+    )
+    .await
+    .unwrap();
+    let row = sqlx::query("SELECT end_date FROM employment WHERE id = $1")
+        .bind(leaver_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<Option<NaiveDate>, _>(0), Some(date(2026, 6, 25)));
+}
+
+async fn an_employer_and_employment(pool: &PgPool) -> (payroll::EmployerId, payroll::EmploymentId) {
+    let employer_id = create_employer(pool, twenty_sixth_schedule(), "actor")
+        .await
+        .unwrap();
+    let employment_id = create_employment(
+        pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 1, 26),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    (employer_id, employment_id)
+}
+
+#[sqlx::test]
+async fn compensation_terms_are_accepted_on_a_pay_periods_own_start_date(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        Money::from_cents(500000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT effective_from, basic_pay FROM compensation_terms WHERE employment_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<NaiveDate, _>(0), date(2026, 1, 26));
+    assert_eq!(row.get::<i64, _>(1), 500000);
+}
+
+#[sqlx::test]
+async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 10),
+        Money::from_cents(500000).unwrap(),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::from(
+            PayrollError::CompensationTermsNotEffectiveOnAPeriodStart {
+                next_valid_effective_from: date(2026, 1, 26),
+            }
+        ))
+    );
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM compensation_terms WHERE employment_id = $1")
+            .bind(employment_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 0,
+        "a refused CompensationTerms row must not be written"
+    );
+}
+
+#[sqlx::test]
+async fn recording_compensation_terms_against_a_missing_employment_is_refused(pool: PgPool) {
+    let missing = payroll::EmploymentId::new("does-not-exist");
+
+    let result = record_compensation_terms(
+        &pool,
+        &missing,
+        date(2026, 1, 26),
+        Money::from_cents(500000).unwrap(),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
+}
+
+/// A UNIQUE constraint violation is PostgreSQL refusing the statement, not
+/// Rust refusing a fact it understands — the Deep Instruction that a
+/// PostgreSQL constraint violation must never surface as a domain refusal.
+#[sqlx::test]
+async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let basic_pay = Money::from_cents(500000).unwrap();
+
+    record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), basic_pay, "actor")
+        .await
+        .unwrap();
+
+    let result =
+        record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), basic_pay, "actor")
+            .await;
+
+    assert!(
+        matches!(result, Err(PayrollAppError::Database(_))),
+        "expected a Database refusal, got {result:?}"
+    );
+}
+
+#[sqlx::test]
+async fn an_employment_can_be_voided_and_is_never_physically_deleted(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let row = sqlx::query("SELECT is_void FROM employment WHERE id = $1")
+        .bind(employment_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(row.get::<bool, _>(0), "the Employment must be marked void");
+}
+
+#[sqlx::test]
+async fn voiding_writes_an_employment_voided_action_log_entry(pool: PgPool) {
+    let (employer_id, employment_id) = an_employer_and_employment(&pool).await;
+
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let row = sqlx::query(
+        "SELECT employer_id, actor, action_type, target_type, target_id
+         FROM action_log_entry WHERE target_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>(0), employer_id.as_str());
+    assert_eq!(row.get::<String, _>(1), "actor");
+    assert_eq!(row.get::<String, _>(2), "employment_voided");
+    assert_eq!(row.get::<String, _>(3), "employment");
+}
+
+#[sqlx::test]
+async fn voiding_a_missing_employment_is_refused(pool: PgPool) {
+    let missing = payroll::EmploymentId::new("does-not-exist");
+
+    let result = void_employment(&pool, &missing, "actor").await;
+
+    assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM action_log_entry")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "a refused void must write no ActionLog entry");
+}
+
+#[sqlx::test]
+async fn reading_an_employment_back_yields_a_snapshot_the_pure_crate_accepts(pool: PgPool) {
+    let (employer_id, employment_id) = an_employer_and_employment(&pool).await;
+    let basic_pay = Money::from_cents(500000).unwrap();
+    record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), basic_pay, "actor")
+        .await
+        .unwrap();
+
+    let snapshot = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1))
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.employment_id(), &employment_id);
+    assert_eq!(snapshot.employer_id(), &employer_id);
+    assert_eq!(snapshot.person().person_id().as_str(), "person-1");
+    assert_eq!(snapshot.start_date(), date(2026, 1, 26));
+    assert_eq!(snapshot.end_date(), None);
+    assert_eq!(
+        snapshot.compensation_terms().effective_from(),
+        date(2026, 1, 26)
+    );
+    assert_eq!(snapshot.compensation_terms().effective_until(), None);
+    assert_eq!(snapshot.compensation_terms().basic_pay(), basic_pay);
+}
+
+/// §4.4: a `CompensationTerms` row is in force until the next row's
+/// `effective_from`. `get_employment_snapshot` derives that boundary itself
+/// — there is no `effective_until` column to read it from.
+#[sqlx::test]
+async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_from(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let march_pay = Money::from_cents(500000).unwrap();
+    let april_pay = Money::from_cents(550000).unwrap();
+    record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), march_pay, "actor")
+        .await
+        .unwrap();
+    record_compensation_terms(&pool, &employment_id, date(2026, 2, 26), april_pay, "actor")
+        .await
+        .unwrap();
+
+    let first_period = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1))
+        .await
+        .unwrap();
+    assert_eq!(first_period.compensation_terms().basic_pay(), march_pay);
+    assert_eq!(
+        first_period.compensation_terms().effective_until(),
+        Some(date(2026, 2, 25)),
+        "the first row must end the day before the second row begins"
+    );
+
+    let second_period = get_employment_snapshot(&pool, &employment_id, date(2026, 3, 1))
+        .await
+        .unwrap();
+    assert_eq!(second_period.compensation_terms().basic_pay(), april_pay);
+    assert_eq!(second_period.compensation_terms().effective_until(), None);
+}
+
+#[sqlx::test]
+async fn reading_an_employment_with_no_compensation_terms_in_force_is_refused(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let result = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1)).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::NoCompensationTermsInForce(employment_id))
+    );
+}
+
+#[sqlx::test]
+async fn reading_a_missing_employment_is_refused(pool: PgPool) {
+    let missing = payroll::EmploymentId::new("does-not-exist");
+
+    let result = get_employment_snapshot(&pool, &missing, date(2026, 2, 1)).await;
+
+    assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
+}
