@@ -192,6 +192,45 @@ async fn action_log_count(pool: &PgPool, action_type: &str, target_id: &str) -> 
     .unwrap()
 }
 
+struct ActionLogRow {
+    employer_id: String,
+    actor: String,
+    target_type: String,
+    context: Option<serde_json::Value>,
+}
+
+async fn the_reversal_action_log_entry(
+    pool: &PgPool,
+    finalized_payroll_id: &FinalizedPayrollId,
+) -> ActionLogRow {
+    let row = sqlx::query(
+        "SELECT employer_id, actor, target_type, context FROM action_log_entry
+         WHERE action_type = 'finalized_payroll_reversed' AND target_id = $1",
+    )
+    .bind(finalized_payroll_id.as_str())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    ActionLogRow {
+        employer_id: row.get(0),
+        actor: row.get(1),
+        target_type: row.get(2),
+        context: row.get(3),
+    }
+}
+
+async fn run_status(pool: &PgPool, finalized_payroll_id: &FinalizedPayrollId) -> String {
+    sqlx::query_scalar(
+        "SELECT run.status FROM payroll_run AS run
+         JOIN finalized_payroll AS finalized ON finalized.payroll_run_id = run.id
+         WHERE finalized.id = $1::uuid",
+    )
+    .bind(finalized_payroll_id.as_str())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 // ---- The tracer bullet: reverses, leaves the original untouched ----
 
 #[sqlx::test]
@@ -475,4 +514,149 @@ async fn a_year_to_date_context_built_after_reversal_excludes_the_reversed_perio
         .unwrap();
     assert_eq!(after.prior_taxable_remuneration(), Money::ZERO);
     assert_eq!(after.prior_paye(), Money::ZERO);
+}
+
+// ---- The audit trail ----
+
+/// §10: the `FinalizedPayrollReversed` entry is where the reason survives in
+/// a readable form — the `Reversal` row carries it too, but the ActionLog is
+/// the one trail an auditor walks across every kind of act. Counting the
+/// entry, which the tracer bullet already does, would still pass if the
+/// entry named the wrong Employer, the wrong actor, or carried no reason at
+/// all, so this reads every field it writes.
+#[sqlx::test]
+async fn the_reversal_action_log_entry_names_the_employer_actor_target_and_reason(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let finalized_payroll_id = a_finalized_payroll(&pool, &employer_id, &employment_id).await;
+
+    reverse_finalized_payroll(
+        &pool,
+        &finalized_payroll_id,
+        "March rate captured wrong",
+        "hr",
+    )
+    .await
+    .unwrap();
+
+    let entry = the_reversal_action_log_entry(&pool, &finalized_payroll_id).await;
+    // The Employer is read from the FinalizedPayroll being reversed, not
+    // passed in, so an entry filed under the wrong Employer would hide the
+    // reversal from the only trail that lists it.
+    assert_eq!(entry.employer_id, employer_id.as_str());
+    assert_eq!(entry.actor, "hr");
+    assert_eq!(entry.target_type, "finalized_payroll");
+    assert_eq!(
+        entry.context,
+        Some(serde_json::json!({ "reason": "March rate captured wrong" })),
+    );
+}
+
+// ---- Blast radius ----
+
+/// §6.2: reversal deletes *the* liveness row — the one naming this
+/// `FinalizedPayroll` — and touches nothing else. The delete keys on
+/// `finalized_payroll_id`, so a mistake there would take a colleague's
+/// identically-dated payroll out of every later year-to-date silently, with
+/// no `Reversal` row anywhere to explain it and no way to put it back except
+/// a replacement nobody knows to finalize.
+///
+/// The run the two share stays `finalized` as well: a reversal is a new fact
+/// about one payroll, never a reopening of the run that produced it (§5.1).
+#[sqlx::test]
+async fn reversing_one_finalized_payroll_leaves_the_others_in_the_run_live(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let reversed_employment = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let untouched_employment = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-2",
+        Money::from_cents(2200000).unwrap(),
+    )
+    .await;
+
+    // One Ordinary run proposes both Employments, so both finalize together
+    // and both are live for the same `period_end`.
+    let run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    assert_eq!(
+        calculate_payroll_run(&pool, &run_id, "calculator")
+            .await
+            .unwrap(),
+        Vec::new(),
+        "the run must reach Calculated"
+    );
+    let finalized = finalize_payroll_run(&pool, &run_id, "finalizer")
+        .await
+        .unwrap();
+    let finalized_payroll_id = |employment: &EmploymentId| {
+        finalized
+            .iter()
+            .find(|(id, _)| id == employment)
+            .map(|(_, finalized_payroll_id)| finalized_payroll_id.clone())
+            .expect("every member of the run finalized")
+    };
+    let reversed_id = finalized_payroll_id(&reversed_employment);
+    let untouched_id = finalized_payroll_id(&untouched_employment);
+
+    let untouched_before =
+        build_year_to_date_context(&pool, &untouched_employment, next_period().end())
+            .await
+            .unwrap();
+
+    reverse_finalized_payroll(&pool, &reversed_id, "person-1's March rate was wrong", "hr")
+        .await
+        .unwrap();
+
+    assert!(
+        live_finalized_payroll_id(&pool, &reversed_employment, period().end())
+            .await
+            .is_none(),
+        "the reversed payroll's liveness row is gone"
+    );
+    assert_eq!(
+        live_finalized_payroll_id(&pool, &untouched_employment, period().end()).await,
+        Some(untouched_id.to_string()),
+        "the other Employment's March payroll is still live, and still the same one"
+    );
+    assert_eq!(
+        reversal_count(&pool, &untouched_id).await,
+        0,
+        "no Reversal was recorded against the other Employment's payroll"
+    );
+    assert_eq!(
+        action_log_count(&pool, "finalized_payroll_reversed", untouched_id.as_str()).await,
+        0
+    );
+
+    let untouched_after =
+        build_year_to_date_context(&pool, &untouched_employment, next_period().end())
+            .await
+            .unwrap();
+    assert_eq!(
+        untouched_after.prior_taxable_remuneration(),
+        untouched_before.prior_taxable_remuneration(),
+        "reversing one Employment's payroll must not move another's year-to-date"
+    );
+    assert_eq!(untouched_after.prior_paye(), untouched_before.prior_paye());
+
+    assert_eq!(
+        run_status(&pool, &untouched_id).await,
+        "finalized",
+        "a reversal records a new fact; it never reopens the run it came from"
+    );
 }
