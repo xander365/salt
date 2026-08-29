@@ -21,11 +21,29 @@ env:
   # A rustdoc warning fails the build. Public statutory documentation linking to
   # a private item is exactly the rot this suite exists to catch.
   RUSTDOCFLAGS: -D warnings
+  # #[sqlx::test] (issue #25) reads this to find the server, then creates and
+  # migrates a fresh throwaway database per test — the migration-applying
+  # role above needs superuser so it can freely CREATE ROLE and SET ROLE.
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out the repository
         uses: actions/checkout@v5
@@ -54,6 +72,26 @@ jobs:
         # Cargo.lock. Without it a fresh resolve can turn this suite green on
         # code the repository does not contain.
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Cache sqlx-cli
+        id: cache-sqlx-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/sqlx
+          key: sqlx-cli-0.8.6-${{ runner.os }}
+
+      - name: Install sqlx-cli
+        if: steps.cache-sqlx-cli.outputs.cache-hit != 'true'
+        run: |
+          cargo install sqlx-cli --version 0.8.6 --locked \
+            --no-default-features --features postgres,rustls
+
+      - name: Run database migrations
+        # A smoke test that the migrations this repository ships apply
+        # cleanly to a real server — independent of `cargo test`, which
+        # migrates its own throwaway databases per #[sqlx::test] rather than
+        # this one.
+        run: sqlx migrate run --source crates/payroll-app/migrations
 
       - name: cargo test
         # --no-fail-fast so every failing gate reports, rather than only the
