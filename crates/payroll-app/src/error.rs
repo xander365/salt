@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use payroll::{EmployerId, EmploymentId, PayrollError, TaxYear};
+use payroll::{EmployerId, EmploymentId, PayPeriod, PayrollError, TaxYear};
 
 use crate::payroll_run::PayrollRunId;
 
@@ -74,6 +74,24 @@ pub enum PayrollAppError {
     /// period end, so there is no pre-Salt period left for the figures to
     /// describe (§4.5 guard 4).
     OpeningBalanceFiguresOverAnEmptyCoveredSpan { salt_coverage_start: NaiveDate },
+    /// A PayrollRun was asked for a `PayPeriod` the Employer's own
+    /// `PaySchedule` does not generate (§4.2, §4.6). Everything downstream
+    /// reads a run's period as one of the schedule's twelve: sequencing
+    /// walks back to "the immediately preceding PayPeriod" (§8), the
+    /// Ordinary uniqueness index keys on the period end alone (§4.6), and
+    /// `calculate` resolves the CompensationTerms in force from the
+    /// period's own boundaries. A period the schedule never generates has
+    /// no predecessor and no successor, so it is refused at the one point
+    /// it enters the system.
+    ///
+    /// `schedules_period` is the period the schedule does generate around
+    /// the requested end date — the one the caller almost certainly meant,
+    /// named for the same reason [`PayrollError::EffectiveFromNotAPeriodStart`]
+    /// names the next valid date.
+    PayPeriodNotGeneratedByThePaySchedule {
+        period: PayPeriod,
+        schedules_period: PayPeriod,
+    },
     /// No PayrollRun exists with this id.
     PayrollRunNotFound(PayrollRunId),
     /// Membership and Earnings are working state, so they can change only
@@ -82,16 +100,21 @@ pub enum PayrollAppError {
     /// Removing a member is the deliberate omission path of an Ordinary run;
     /// Correction runs have the opposite membership semantics (§4.8).
     PayrollRunIsNotOrdinary(PayrollRunId),
-    /// `RemoveEmploymentFromRun` was given an empty reason. Silent omission
-    /// is the dangerous failure (§4.8) — a removal is a deliberate,
-    /// reasoned act, and an empty reason states nothing.
+    /// `RemoveEmploymentFromRun` was given a reason that is empty or only
+    /// whitespace. Silent omission is the dangerous failure (§4.8) — a
+    /// removal is a deliberate, reasoned act, and a blank reason states
+    /// nothing while looking like it states something.
     RemovalReasonCannotBeEmpty,
     /// `payroll_run_id` and `employment_id` do not name a live membership:
     /// either the Employment was never proposed into that run, or it was
     /// already removed. The two are not distinguished, for the same reason
     /// `void_employment` does not distinguish "never existed" from
     /// "already void" any further than it needs to — either way there is no
-    /// live membership left to remove.
+    /// live membership to act on.
+    ///
+    /// Both `RemoveEmploymentFromRun` and `SetRunEarnings` refuse with it.
+    /// Earning lines are a fact about paying this Employment for this
+    /// period, so a run that is not paying it has nowhere to put them.
     EmploymentNotAnActiveRunMember {
         payroll_run_id: PayrollRunId,
         employment_id: EmploymentId,
@@ -156,6 +179,18 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "non-zero OpeningBalance figures were given over an empty covered span: SaltCoverageStart {salt_coverage_start} is itself the Employment's first payable PayPeriod end, so no pre-Salt period remains for them to describe"
             ),
+            Self::PayPeriodNotGeneratedByThePaySchedule {
+                period,
+                schedules_period,
+            } => write!(
+                f,
+                "PayPeriod {} to {} is not one the Employer's PaySchedule generates; \
+                 the schedule's own period around that end date is {} to {}",
+                period.start(),
+                period.end(),
+                schedules_period.start(),
+                schedules_period.end()
+            ),
             Self::PayrollRunNotFound(id) => write!(f, "no PayrollRun exists with id {id}"),
             Self::PayrollRunNotDraft(id) => write!(f, "PayrollRun {id} is not Draft"),
             Self::PayrollRunIsNotOrdinary(id) => {
@@ -203,6 +238,7 @@ impl std::error::Error for PayrollAppError {
             | Self::SaltCoverageStartOutsideTaxYear { .. }
             | Self::SaltCoverageStartBeforeEmploymentIsPayable { .. }
             | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan { .. }
+            | Self::PayPeriodNotGeneratedByThePaySchedule { .. }
             | Self::PayrollRunNotFound(_)
             | Self::PayrollRunNotDraft(_)
             | Self::PayrollRunIsNotOrdinary(_)

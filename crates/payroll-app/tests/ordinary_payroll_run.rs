@@ -288,6 +288,57 @@ async fn creating_a_run_against_a_missing_employer_is_refused(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_period_the_employers_schedule_does_not_generate_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    // Calendar February, under a schedule whose periods run the 26th to the
+    // 25th. Nothing later could walk back from it to a preceding period.
+    let calendar_february = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
+
+    let result = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        calendar_february,
+        date(2026, 3, 1),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayPeriodNotGeneratedByThePaySchedule {
+            period: calendar_february,
+            schedules_period: PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap(),
+        })
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM payroll_run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "a refused run must not be written");
+}
+
+#[sqlx::test]
+async fn a_period_ending_on_a_schedule_boundary_but_starting_elsewhere_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    // The end date the Ordinary uniqueness index keys on is correct, so only
+    // checking that half would let this through — priced over a span nobody
+    // works.
+    let short_period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 25)).unwrap();
+
+    let result =
+        create_ordinary_payroll_run(&pool, &employer_id, short_period, date(2026, 3, 1), "actor")
+            .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayPeriodNotGeneratedByThePaySchedule {
+            period: short_period,
+            schedules_period: march_period(),
+        })
+    );
+}
+
+#[sqlx::test]
 async fn creating_a_run_writes_a_payroll_run_created_action_log_entry(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
 
@@ -364,22 +415,31 @@ async fn removing_a_member_records_the_reason_actor_and_time(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn removing_a_member_with_an_empty_reason_is_refused(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+async fn removing_a_member_with_a_blank_reason_is_refused(pool: PgPool) {
+    // A reason of `" "` states nothing while looking like it states
+    // something, and the ActionLog it would land in cannot be corrected.
+    for blank in ["", " ", "\t\n  "] {
+        let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
 
-    let result = remove_employment_from_run(&pool, &run_id, &employment_id, "", "reviewer").await;
+        let result =
+            remove_employment_from_run(&pool, &run_id, &employment_id, blank, "reviewer").await;
 
-    assert_eq!(result, Err(PayrollAppError::RemovalReasonCannotBeEmpty));
-    let removed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT removed_at FROM payroll_run_employment
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(run_id.as_str())
-    .bind(employment_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(removed_at, None);
+        assert_eq!(
+            result,
+            Err(PayrollAppError::RemovalReasonCannotBeEmpty),
+            "a reason of {blank:?} must be refused"
+        );
+        let removed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT removed_at FROM payroll_run_employment
+             WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+        )
+        .bind(run_id.as_str())
+        .bind(employment_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(removed_at, None);
+    }
 }
 
 #[sqlx::test]
@@ -658,9 +718,7 @@ async fn a_basic_pay_line_among_others_is_refused_and_writes_nothing(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_a_database_refusal(
-    pool: PgPool,
-) {
+async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_refused(pool: PgPool) {
     let (employer_id, run_id, _) = a_run_with_one_member(&pool).await;
     let outsider = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
@@ -674,8 +732,56 @@ async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_a_databa
     )
     .await;
 
-    assert!(
-        matches!(result, Err(PayrollAppError::Database(_))),
-        "expected a Database refusal, got {result:?}"
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentNotAnActiveRunMember {
+            payroll_run_id: run_id,
+            employment_id: outsider,
+        })
     );
+}
+
+#[sqlx::test]
+async fn setting_earnings_for_a_removed_member_is_refused(pool: PgPool) {
+    // A removal is the Employer's deliberate statement that this person is
+    // not paid this period. Lines written afterwards would sit in the run
+    // looking like pay that was intended.
+    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    remove_employment_from_run(
+        &pool,
+        &run_id,
+        &employment_id,
+        "on unpaid leave",
+        "reviewer",
+    )
+    .await
+    .unwrap();
+
+    let result = set_run_earnings(
+        &pool,
+        &run_id,
+        &employment_id,
+        vec![Earning::TaxableAllowance(
+            Money::from_cents(10_000).unwrap(),
+        )],
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentNotAnActiveRunMember {
+            payroll_run_id: run_id.clone(),
+            employment_id: employment_id.clone(),
+        })
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_earning
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
 }

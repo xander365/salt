@@ -6,10 +6,11 @@
 //! first line and share nothing after it.
 
 use chrono::NaiveDate;
-use payroll::{Earning, EmployerId, EmploymentId, PayPeriod};
+use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError};
 use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::employer::pay_schedule_from_columns;
 use crate::error::PayrollAppError;
 
 /// `payroll-app`'s own id (§4.1): a native UUID, unlike the pure crate's
@@ -51,6 +52,16 @@ impl std::fmt::Display for PayrollRunId {
 /// `EmploymentSnapshot::employed_days_within` uses elsewhere in the domain
 /// governs membership too.
 ///
+/// `period` must be one the Employer's own `PaySchedule` generates, the
+/// same demand INV-014 makes of a `CompensationTerms` start date and §4.5
+/// guard 1 makes of a `SaltCoverageStart`. Everything downstream reads a
+/// run's period as one of the schedule's twelve: sequencing walks back to
+/// "the immediately preceding PayPeriod" (§8), the Ordinary uniqueness
+/// index keys on the period end alone (§4.6), and `calculate` resolves the
+/// `CompensationTerms` in force from the period's own boundaries. An
+/// invented period has no predecessor to walk back to, so it is refused
+/// here rather than left to fail confusingly at finalization.
+///
 /// A second Ordinary run for the same Employer and PayPeriod is refused by
 /// the unique index `one_ordinary_payroll_run_per_employer_and_period`
 /// (migration 0007) — a PostgreSQL refusal, not a domain one, the same as
@@ -64,20 +75,28 @@ pub async fn create_ordinary_payroll_run(
 ) -> Result<PayrollRunId, PayrollAppError> {
     let mut tx = pool.begin().await?;
 
+    // One read does two jobs: it proves the Employer exists and yields the
+    // `PaySchedule` `period` is checked against, and it locks the Employer.
+    //
     // Creating an Employment takes PostgreSQL's KEY SHARE lock on its
     // Employer through the foreign key. Taking UPDATE here makes that
     // creation serialize with this membership snapshot: an Employment that
     // commits before the run does is either visible below, or waited until the
     // fully-populated run commits. Without this lock, one could commit after
-    // the SELECT below and be silently absent from the only Ordinary run.
-    let employer_exists: Option<bool> =
-        sqlx::query_scalar("SELECT TRUE FROM employer WHERE id = $1 FOR UPDATE")
-            .bind(employer_id.as_str())
-            .fetch_optional(&mut *tx)
-            .await?;
-    if employer_exists.is_none() {
+    // the employment SELECT below and be silently absent from the only
+    // Ordinary run.
+    let schedule_row: Option<(String, Option<i16>)> = sqlx::query_as(
+        "SELECT period_end_day_kind, period_end_day_value FROM employer
+         WHERE id = $1 FOR UPDATE",
+    )
+    .bind(employer_id.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((kind, value)) = schedule_row else {
         return Err(PayrollAppError::EmployerNotFound(employer_id.clone()));
-    }
+    };
+
+    validate_period_is_one_the_schedule_generates(pay_schedule_from_columns(&kind, value), period)?;
 
     let id: String = sqlx::query_scalar(
         "INSERT INTO payroll_run
@@ -134,6 +153,31 @@ pub async fn create_ordinary_payroll_run(
     Ok(run_id)
 }
 
+/// Validates that `period` is a `PayPeriod` `schedule` itself generates —
+/// both boundaries, not just the end date, because a run whose `period_end`
+/// is right and whose `period_start` is not would still key correctly in
+/// the Ordinary uniqueness index while pricing a span nobody works.
+///
+/// Decided in Rust against the pure crate's `PaySchedule`, never as SQL
+/// date arithmetic, for the same reason `record_compensation_terms` and
+/// `record_opening_balance` decide their boundaries there: the schedule's
+/// month arithmetic exists once.
+fn validate_period_is_one_the_schedule_generates(
+    schedule: PaySchedule,
+    period: PayPeriod,
+) -> Result<(), PayrollAppError> {
+    let schedules_period = schedule
+        .period_containing(period.end())
+        .ok_or(PayrollError::PayScheduleOutsideRepresentableCalendar { date: period.end() })?;
+    if schedules_period != period {
+        return Err(PayrollAppError::PayPeriodNotGeneratedByThePaySchedule {
+            period,
+            schedules_period,
+        });
+    }
+    Ok(())
+}
+
 /// Whether an Employment spanning `[start_date, end_date]` overlaps
 /// `period`. `end_date` of `None` means still employed, so it overlaps
 /// everything from `start_date` onward.
@@ -164,9 +208,10 @@ async fn lock_draft_run(
 }
 
 /// Removes `employment_id` from `payroll_run_id`'s working membership.
-/// Demands a non-empty `reason` — checked in Rust before anything is
-/// written, though `payroll_run_employment`'s own CHECK (migration 0012)
-/// would refuse a blank one regardless — and records `actor` and the time
+/// Demands a `reason` that is not blank — checked in Rust before anything
+/// is written, though `payroll_run_employment`'s own CHECKs (migrations
+/// 0012 and 0023) would refuse an empty or whitespace-only one regardless —
+/// and records `actor` and the time
 /// as `removed_by`/`removed_at` in the same statement that clears the
 /// membership.
 ///
@@ -182,7 +227,10 @@ pub async fn remove_employment_from_run(
     reason: &str,
     actor: &str,
 ) -> Result<(), PayrollAppError> {
-    if reason.is_empty() {
+    // Whitespace, not just `""`: a reason of `" "` is a reason nobody can
+    // read six months later, and the ActionLog it lands in cannot be
+    // corrected afterwards.
+    if reason.trim().is_empty() {
         return Err(PayrollAppError::RemovalReasonCannotBeEmpty);
     }
 
@@ -247,6 +295,9 @@ pub async fn remove_employment_from_run(
 /// A `BasicPay` line is refused. `calculate` derives `BasicPay` itself from
 /// the Employment's `CompensationTerms` — it is also the social security
 /// base — so a second one supplied here would silently double it.
+///
+/// An Employment that is not an *active* member of the run is refused too:
+/// one that was never proposed, and one that was removed with a reason.
 pub async fn set_run_earnings(
     pool: &PgPool,
     payroll_run_id: &PayrollRunId,
@@ -262,6 +313,33 @@ pub async fn set_run_earnings(
 
     let mut tx = pool.begin().await?;
     lock_draft_run(&mut tx, payroll_run_id).await?;
+
+    // Earning lines are a fact about paying this Employment for this
+    // period, so a run that is not paying it has nowhere to put them. The
+    // membership foreign key from migration 0017 already refuses an
+    // Employment that was never proposed, but it cannot see `removed_at`:
+    // without this check, lines could be written against someone the
+    // Employer has deliberately, reasonedly taken out of the run, and they
+    // would sit there looking like pay that was intended.
+    //
+    // No row lock is needed here. `remove_employment_from_run` takes the
+    // run's own `FOR UPDATE` before it removes anything, and `lock_draft_run`
+    // above holds that same lock, so a removal cannot commit between this
+    // read and the writes below.
+    let is_active_member: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2 AND removed_at IS NULL",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if is_active_member.is_none() {
+        return Err(PayrollAppError::EmploymentNotAnActiveRunMember {
+            payroll_run_id: payroll_run_id.clone(),
+            employment_id: employment_id.clone(),
+        });
+    }
 
     // Replace, not merge: the whole point of §4.5d is that this call states
     // the complete list, so a prior call's leftover lines must not survive
@@ -304,6 +382,46 @@ mod tests {
 
     fn period() -> PayPeriod {
         PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
+    }
+
+    fn schedule() -> PaySchedule {
+        PaySchedule::new(payroll::PeriodEndDay::Day(
+            payroll::DayOfMonth::new(25).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn the_schedules_own_period_is_accepted() {
+        assert_eq!(
+            validate_period_is_one_the_schedule_generates(schedule(), period()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_calendar_month_is_refused_by_a_twenty_sixth_to_twenty_fifth_schedule() {
+        let calendar_february = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
+
+        assert_eq!(
+            validate_period_is_one_the_schedule_generates(schedule(), calendar_february),
+            Err(PayrollAppError::PayPeriodNotGeneratedByThePaySchedule {
+                period: calendar_february,
+                schedules_period: PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_period_with_the_right_end_and_a_wrong_start_is_refused() {
+        let wrong_start = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 25)).unwrap();
+
+        assert_eq!(
+            validate_period_is_one_the_schedule_generates(schedule(), wrong_start),
+            Err(PayrollAppError::PayPeriodNotGeneratedByThePaySchedule {
+                period: wrong_start,
+                schedules_period: period(),
+            })
+        );
     }
 
     #[test]

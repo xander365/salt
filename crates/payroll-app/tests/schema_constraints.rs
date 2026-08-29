@@ -618,7 +618,11 @@ async fn a_correction_run_must_say_why_it_exists(pool: PgPool) {
     let mut conn = pool.acquire().await.expect("acquire connection");
     an_employer_and_two_employments(&mut conn).await;
 
-    for (case, correction_reason) in [("a missing", "NULL"), ("an empty", "''")] {
+    for (case, correction_reason) in [
+        ("a missing", "NULL"),
+        ("an empty", "''"),
+        ("a whitespace-only", "'   '"),
+    ] {
         let result = sqlx::query(&format!(
             "INSERT INTO payroll_run
                 (employer_id, period_start, period_end, pay_date, kind, status,
@@ -751,6 +755,14 @@ async fn a_removal_from_a_run_is_attributed_and_reasoned(pool: PgPool) {
         (
             "a removal with an empty reason",
             "removed_at = now(), removed_by = 'actor', removal_reason = ''",
+        ),
+        (
+            "a removal whose reason is only whitespace",
+            "removed_at = now(), removed_by = 'actor', removal_reason = '   '",
+        ),
+        (
+            "a removal whose actor is only whitespace",
+            "removed_at = now(), removed_by = ' ', removal_reason = 'unpaid leave'",
         ),
     ] {
         let result = sqlx::query(&format!(
@@ -936,4 +948,64 @@ async fn compensation_terms_state_only_when_they_begin(pool: PgPool) {
         "a row is in force until the next row's effective_from, so no column may \
          state an end independently, found {columns:?}"
     );
+}
+
+/// §10 makes the ActionLog "who did what and when", and §4.8 makes a removal
+/// reason the thing an Employer needs six months later. Migration 0019 refused
+/// the empty string for both; a value made only of whitespace answers those
+/// questions with exactly as much, and neither is fixable afterwards — the
+/// application role may not `UPDATE` the log at all (migration 0015), nor a
+/// finalized payroll. Migration 0023 refuses it everywhere both kinds of
+/// column appear.
+#[sqlx::test]
+async fn an_actor_and_a_reason_are_never_only_whitespace(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    for (case, statement) in [
+        (
+            "an Employer created by nobody",
+            "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
+             VALUES ('employer-2', 'day', 25, ' ')",
+        ),
+        (
+            "an Employment created by nobody",
+            "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
+             VALUES ('emp-3', 'employer-1', 'person-3', '2026-03-01', '  ')",
+        ),
+        (
+            "an Employment naming no Person",
+            "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
+             VALUES ('emp-4', 'employer-1', ' ', '2026-03-01', 'actor')",
+        ),
+        (
+            "CompensationTerms recorded by nobody",
+            "INSERT INTO compensation_terms
+                (employment_id, effective_from, basic_pay, created_by)
+             VALUES ('emp-1', '2026-02-26', 500000, ' ')",
+        ),
+        (
+            "a PayrollRun created by nobody",
+            "INSERT INTO payroll_run
+                (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+             VALUES
+                ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'draft', ' ')",
+        ),
+        (
+            "an ActionLog entry naming no actor",
+            "INSERT INTO action_log_entry
+                (employer_id, actor, action_type, target_type, target_id)
+             VALUES ('employer-1', ' ', 'payroll_run_created', 'payroll_run', 'some-id')",
+        ),
+        (
+            "an ActionLog entry pointing at nothing",
+            "INSERT INTO action_log_entry
+                (employer_id, actor, action_type, target_type, target_id)
+             VALUES ('employer-1', 'actor', 'payroll_run_created', 'payroll_run', '  ')",
+        ),
+    ] {
+        let result = sqlx::query(statement).execute(&mut *conn).await;
+
+        assert!(result.is_err(), "{case} must be refused");
+    }
 }
