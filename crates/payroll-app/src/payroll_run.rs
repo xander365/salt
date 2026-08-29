@@ -64,11 +64,25 @@ pub async fn create_ordinary_payroll_run(
 ) -> Result<PayrollRunId, PayrollAppError> {
     let mut tx = pool.begin().await?;
 
-    let id: Option<String> = sqlx::query_scalar(
+    // Creating an Employment takes PostgreSQL's KEY SHARE lock on its
+    // Employer through the foreign key. Taking UPDATE here makes that
+    // creation serialize with this membership snapshot: an Employment that
+    // commits before the run does is either visible below, or waited until the
+    // fully-populated run commits. Without this lock, one could commit after
+    // the SELECT below and be silently absent from the only Ordinary run.
+    let employer_exists: Option<bool> =
+        sqlx::query_scalar("SELECT TRUE FROM employer WHERE id = $1 FOR UPDATE")
+            .bind(employer_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    if employer_exists.is_none() {
+        return Err(PayrollAppError::EmployerNotFound(employer_id.clone()));
+    }
+
+    let id: String = sqlx::query_scalar(
         "INSERT INTO payroll_run
             (employer_id, period_start, period_end, pay_date, kind, status, created_by)
-         SELECT $1, $2, $3, $4, 'ordinary', 'draft', $5
-         WHERE EXISTS (SELECT 1 FROM employer WHERE id = $1)
+         VALUES ($1, $2, $3, $4, 'ordinary', 'draft', $5)
          RETURNING id::text",
     )
     .bind(employer_id.as_str())
@@ -76,11 +90,9 @@ pub async fn create_ordinary_payroll_run(
     .bind(period.end())
     .bind(pay_date)
     .bind(created_by)
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    let run_id = PayrollRunId::new(
-        id.ok_or_else(|| PayrollAppError::EmployerNotFound(employer_id.clone()))?,
-    );
+    let run_id = PayrollRunId::new(id);
 
     // Every active Employment for this Employer is a membership candidate;
     // the overlap decision below is what actually admits one.
@@ -129,6 +141,28 @@ fn overlaps(period: PayPeriod, start_date: NaiveDate, end_date: Option<NaiveDate
     start_date <= period.end() && end_date.is_none_or(|end| end >= period.start())
 }
 
+/// Locks a run and verifies it is still in the one lifecycle state where
+/// working state may change (§4.7). The lock also prevents a finalizer from
+/// moving the same run to `Finalized` between this check and the mutation.
+async fn lock_draft_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<String, PayrollAppError> {
+    let run: Option<(String, String)> =
+        sqlx::query_as("SELECT kind, status FROM payroll_run WHERE id = $1::uuid FOR UPDATE")
+            .bind(payroll_run_id.as_str())
+            .fetch_optional(&mut **tx)
+            .await?;
+
+    let Some((kind, status)) = run else {
+        return Err(PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()));
+    };
+    if status != "draft" {
+        return Err(PayrollAppError::PayrollRunNotDraft(payroll_run_id.clone()));
+    }
+    Ok(kind)
+}
+
 /// Removes `employment_id` from `payroll_run_id`'s working membership.
 /// Demands a non-empty `reason` — checked in Rust before anything is
 /// written, though `payroll_run_employment`'s own CHECK (migration 0012)
@@ -153,6 +187,12 @@ pub async fn remove_employment_from_run(
     }
 
     let mut tx = pool.begin().await?;
+    let kind = lock_draft_run(&mut tx, payroll_run_id).await?;
+    if kind != "ordinary" {
+        return Err(PayrollAppError::PayrollRunIsNotOrdinary(
+            payroll_run_id.clone(),
+        ));
+    }
 
     let employer_id: Option<String> = sqlx::query_scalar(
         "UPDATE payroll_run_employment
@@ -221,6 +261,7 @@ pub async fn set_run_earnings(
     }
 
     let mut tx = pool.begin().await?;
+    lock_draft_run(&mut tx, payroll_run_id).await?;
 
     // Replace, not merge: the whole point of §4.5d is that this call states
     // the complete list, so a prior call's leftover lines must not survive

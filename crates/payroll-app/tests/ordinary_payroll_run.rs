@@ -10,6 +10,7 @@ use payroll_app::{
     remove_employment_from_run, set_run_earnings, void_employment,
 };
 use sqlx::{PgPool, Row};
+use tokio::sync::oneshot;
 
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).unwrap()
@@ -182,6 +183,64 @@ async fn a_voided_employment_is_never_proposed(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(members, vec![live.as_str().to_string()]);
+}
+
+#[sqlx::test]
+async fn an_employment_committing_during_run_creation_is_proposed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let mut employment_transaction = pool.begin().await.unwrap();
+
+    // This is the KEY SHARE lock create_employment's employer foreign key
+    // takes. CreateOrdinaryPayrollRun must wait on it before taking its
+    // membership snapshot, or this Employment can commit just after that
+    // snapshot and be silently omitted.
+    sqlx::query("SELECT id FROM employer WHERE id = $1 FOR KEY SHARE")
+        .bind(employer_id.as_str())
+        .fetch_one(&mut *employment_transaction)
+        .await
+        .unwrap();
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let creating_pool = pool.clone();
+    let creating_employer = employer_id.clone();
+    let creating_run = tokio::spawn(async move {
+        started_sender.send(()).unwrap();
+        create_ordinary_payroll_run(
+            &creating_pool,
+            &creating_employer,
+            march_period(),
+            date(2026, 3, 1),
+            "actor",
+        )
+        .await
+    });
+    started_receiver.await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !creating_run.is_finished(),
+        "run creation must wait for an Employment creation holding the Employer lock"
+    );
+
+    sqlx::query(
+        "INSERT INTO employment (id, employer_id, person_id, start_date, end_date, created_by)
+         VALUES ('employment-created-concurrently', $1, 'person-concurrently',
+                 '2025-01-01', NULL, 'actor')",
+    )
+    .bind(employer_id.as_str())
+    .execute(&mut *employment_transaction)
+    .await
+    .unwrap();
+    employment_transaction.commit().await.unwrap();
+
+    let run_id = creating_run.await.unwrap().unwrap();
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT employment_id FROM payroll_run_employment WHERE payroll_run_id = $1::uuid",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(members, vec!["employment-created-concurrently"]);
 }
 
 #[sqlx::test]
@@ -381,6 +440,25 @@ async fn removing_an_already_removed_member_is_refused(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_member_cannot_be_removed_after_calculation_or_finalization(pool: PgPool) {
+    for status in ["calculated", "finalized"] {
+        let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+        sqlx::query("UPDATE payroll_run SET status = $1 WHERE id = $2::uuid")
+            .bind(status)
+            .bind(run_id.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result =
+            remove_employment_from_run(&pool, &run_id, &employment_id, "unpaid leave", "actor")
+                .await;
+
+        assert_eq!(result, Err(PayrollAppError::PayrollRunNotDraft(run_id)));
+    }
+}
+
+#[sqlx::test]
 async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_its_reason(
     pool: PgPool,
 ) {
@@ -499,6 +577,31 @@ async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
         count, 0,
         "the second call must clear the first call's lines"
     );
+}
+
+#[sqlx::test]
+async fn earnings_cannot_change_after_calculation_or_finalization(pool: PgPool) {
+    for status in ["calculated", "finalized"] {
+        let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+        sqlx::query("UPDATE payroll_run SET status = $1 WHERE id = $2::uuid")
+            .bind(status)
+            .bind(run_id.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result = set_run_earnings(
+            &pool,
+            &run_id,
+            &employment_id,
+            vec![Earning::TaxableAllowance(
+                Money::from_cents(10_000).unwrap(),
+            )],
+        )
+        .await;
+
+        assert_eq!(result, Err(PayrollAppError::PayrollRunNotDraft(run_id)));
+    }
 }
 
 #[sqlx::test]

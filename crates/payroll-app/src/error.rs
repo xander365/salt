@@ -74,6 +74,14 @@ pub enum PayrollAppError {
     /// period end, so there is no pre-Salt period left for the figures to
     /// describe (§4.5 guard 4).
     OpeningBalanceFiguresOverAnEmptyCoveredSpan { salt_coverage_start: NaiveDate },
+    /// No PayrollRun exists with this id.
+    PayrollRunNotFound(PayrollRunId),
+    /// Membership and Earnings are working state, so they can change only
+    /// while the PayrollRun is Draft (§4.7).
+    PayrollRunNotDraft(PayrollRunId),
+    /// Removing a member is the deliberate omission path of an Ordinary run;
+    /// Correction runs have the opposite membership semantics (§4.8).
+    PayrollRunIsNotOrdinary(PayrollRunId),
     /// `RemoveEmploymentFromRun` was given an empty reason. Silent omission
     /// is the dangerous failure (§4.8) — a removal is a deliberate,
     /// reasoned act, and an empty reason states nothing.
@@ -148,6 +156,11 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "non-zero OpeningBalance figures were given over an empty covered span: SaltCoverageStart {salt_coverage_start} is itself the Employment's first payable PayPeriod end, so no pre-Salt period remains for them to describe"
             ),
+            Self::PayrollRunNotFound(id) => write!(f, "no PayrollRun exists with id {id}"),
+            Self::PayrollRunNotDraft(id) => write!(f, "PayrollRun {id} is not Draft"),
+            Self::PayrollRunIsNotOrdinary(id) => {
+                write!(f, "PayrollRun {id} is not an Ordinary run")
+            }
             Self::RemovalReasonCannotBeEmpty => {
                 write!(f, "a removal reason must not be empty")
             }
@@ -190,6 +203,9 @@ impl std::error::Error for PayrollAppError {
             | Self::SaltCoverageStartOutsideTaxYear { .. }
             | Self::SaltCoverageStartBeforeEmploymentIsPayable { .. }
             | Self::OpeningBalanceFiguresOverAnEmptyCoveredSpan { .. }
+            | Self::PayrollRunNotFound(_)
+            | Self::PayrollRunNotDraft(_)
+            | Self::PayrollRunIsNotOrdinary(_)
             | Self::RemovalReasonCannotBeEmpty
             | Self::EmploymentNotAnActiveRunMember { .. }
             | Self::BasicPayCannotBeSetAsAnEarning => None,
