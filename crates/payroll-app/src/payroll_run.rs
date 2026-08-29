@@ -12,29 +12,13 @@ use sqlx::PgPool;
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::pay_schedule_from_columns;
 use crate::error::PayrollAppError;
+use crate::ids::app_id;
 
-/// `payroll-app`'s own id (§4.1): a native UUID, unlike the pure crate's
-/// opaque `TEXT`-backed ids. Held here as its canonical text form rather
-/// than a `uuid::Uuid` so every query can bind and read it exactly like
-/// `EmploymentId`, with an explicit `::uuid`/`::text` cast in the SQL where
-/// the column type must be pinned down.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PayrollRunId(String);
-
-impl PayrollRunId {
-    fn new(id: impl Into<String>) -> Self {
-        PayrollRunId(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for PayrollRunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
+app_id! {
+    /// `payroll-app`'s own id (§4.1): a native UUID, unlike the pure crate's
+    /// opaque `TEXT`-backed ids. Minted only by `create_ordinary_payroll_run`,
+    /// where the row itself is inserted.
+    PayrollRunId
 }
 
 /// Creates a Draft Ordinary `PayrollRun` for `employer_id` and `period`, and

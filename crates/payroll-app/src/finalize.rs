@@ -46,6 +46,7 @@ use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
 use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
+use crate::ids::app_id;
 use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run};
 
 /// The shape of the three JSONB snapshots this code freezes (§9, §9.1).
@@ -58,28 +59,13 @@ use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lo
 /// and are still read by the version-1 reader.
 pub const SNAPSHOT_SCHEMA_VERSION: i32 = 1;
 
-/// `payroll-app`'s own id for a `FinalizedPayroll` row (§4.1): a native
-/// `uuid`, minted only here, where the row itself is inserted. There is no
-/// public constructor from a bare string — the only way a caller ever holds
-/// one is by receiving it back from [`finalize_payroll_run`], the same
-/// discipline [`crate::PayrollRunId`] follows.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FinalizedPayrollId(String);
-
-impl FinalizedPayrollId {
-    fn new(id: impl Into<String>) -> Self {
-        FinalizedPayrollId(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for FinalizedPayrollId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
+app_id! {
+    /// `payroll-app`'s own id for a `FinalizedPayroll` row (§4.1): a native
+    /// `uuid`, minted only here, where the row itself is inserted. The only
+    /// way a caller ever holds one is by receiving it back from
+    /// [`finalize_payroll_run`], the same discipline [`crate::PayrollRunId`]
+    /// follows.
+    FinalizedPayrollId
 }
 
 /// One member's approved `WorkingPayrollCalculation`, read back so its three

@@ -30,10 +30,11 @@ use crate::finalize::FinalizedPayrollId;
 ///
 /// Refused when `finalized_payroll_id` does not exist, or already has a
 /// `Reversal` (§6.1) — a `FinalizedPayroll` can be reversed only once.
-/// `reversal.finalized_payroll_id` is UNIQUE (migration 0011); that
-/// constraint, not this check, is what resolves two genuinely concurrent
-/// reversals of the same row to one (§11) — the same split
-/// `finalize_payroll_run`'s own concurrency guarantee rests on.
+/// `reversal.finalized_payroll_id` is UNIQUE (migration 0011), and that one
+/// constraint answers both the everyday second attempt and two genuinely
+/// concurrent reversals of the same row (§11). The loser of either reads the
+/// same named refusal, so a race is never the caller's problem to tell apart
+/// from a repeat.
 pub async fn reverse_finalized_payroll(
     pool: &PgPool,
     finalized_payroll_id: &FinalizedPayrollId,
@@ -58,37 +59,49 @@ pub async fn reverse_finalized_payroll(
     };
     let employer_id = EmployerId::new(employer_id);
 
-    // The `NOT EXISTS` guard is what turns the common, single-threaded
-    // double-reversal into this named refusal rather than a raw constraint
-    // violation. The UNIQUE constraint on `reversal.finalized_payroll_id`
-    // stands regardless, and is what a genuine race between two reversals
-    // actually resolves on (§11).
-    let inserted = sqlx::query(
+    // "Reversed only once" is the UNIQUE constraint on
+    // `reversal.finalized_payroll_id`, and nothing else. An application-side
+    // `SELECT … WHERE NOT EXISTS` cannot see a concurrent transaction's
+    // uncommitted row, so it would refuse the everyday second attempt while
+    // leaving the loser of a genuine race with a raw constraint violation —
+    // two errors for one refusal. Reading the violation back into
+    // `FinalizedPayrollAlreadyReversed` gives both callers the same answer
+    // (§11).
+    let insert = sqlx::query(
         "INSERT INTO reversal (finalized_payroll_id, reversed_by, reason)
-         SELECT $1::uuid, $2, $3
-         WHERE NOT EXISTS (
-             SELECT 1 FROM reversal WHERE finalized_payroll_id = $1::uuid
-         )",
+         VALUES ($1::uuid, $2, $3)",
     )
     .bind(finalized_payroll_id.as_str())
     .bind(reversed_by)
     .bind(reason)
     .execute(&mut *tx)
-    .await?;
-    if inserted.rows_affected() == 0 {
-        return Err(PayrollAppError::FinalizedPayrollAlreadyReversed(
-            finalized_payroll_id.clone(),
-        ));
+    .await;
+    if let Err(err) = insert {
+        if is_unique_violation(&err, REVERSAL_ONE_PER_FINALIZED_PAYROLL) {
+            return Err(PayrollAppError::FinalizedPayrollAlreadyReversed(
+                finalized_payroll_id.clone(),
+            ));
+        }
+        return Err(err.into());
     }
 
     // The deleted liveness row is not history — the `Reversal` row just
     // inserted is (§6.2). This delete is the whole reason a later-built
     // `YearToDateContext` drops the period: "live" means joined through
     // this table, and that query never mentions `reversal` (§8).
-    sqlx::query("DELETE FROM live_finalized_payroll WHERE finalized_payroll_id = $1::uuid")
-        .bind(finalized_payroll_id.as_str())
-        .execute(&mut *tx)
-        .await?;
+    let deleted =
+        sqlx::query("DELETE FROM live_finalized_payroll WHERE finalized_payroll_id = $1::uuid")
+            .bind(finalized_payroll_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+    assert_eq!(
+        deleted.rows_affected(),
+        1,
+        "a FinalizedPayroll that has no Reversal is live: finalization inserts \
+         its liveness row, and only this function ever deletes one. Reaching \
+         here having deleted nothing means some later use case took liveness \
+         away without recording a Reversal, which §6.2 does not allow."
+    );
 
     write_action_log_entry(
         &mut tx,
@@ -105,4 +118,19 @@ pub async fn reverse_finalized_payroll(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// The name PostgreSQL gives migration 0011's `UNIQUE (finalized_payroll_id)`
+/// on `reversal` — the constraint that makes "reversed only once" true.
+const REVERSAL_ONE_PER_FINALIZED_PAYROLL: &str = "reversal_finalized_payroll_id_key";
+
+/// True when `err` is PostgreSQL's unique violation (SQLSTATE 23505) raised
+/// by `constraint`. Named rather than matched on the message text, so a
+/// different unique constraint failing here is still reported as the database
+/// error it is, never mistaken for this one.
+fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
+    let sqlx::Error::Database(db_err) = err else {
+        return false;
+    };
+    db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
 }

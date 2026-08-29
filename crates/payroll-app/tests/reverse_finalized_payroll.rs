@@ -151,21 +151,26 @@ async fn finalized_payroll_snapshot(
 struct ReversalRow {
     reversed_by: String,
     reason: String,
+    reversed_at: chrono::DateTime<chrono::Utc>,
 }
 
 async fn reversal_row(
     pool: &PgPool,
     finalized_payroll_id: &FinalizedPayrollId,
 ) -> Option<ReversalRow> {
-    sqlx::query("SELECT reversed_by, reason FROM reversal WHERE finalized_payroll_id = $1::uuid")
-        .bind(finalized_payroll_id.as_str())
-        .fetch_optional(pool)
-        .await
-        .unwrap()
-        .map(|row| ReversalRow {
-            reversed_by: row.get(0),
-            reason: row.get(1),
-        })
+    sqlx::query(
+        "SELECT reversed_by, reason, reversed_at FROM reversal
+         WHERE finalized_payroll_id = $1::uuid",
+    )
+    .bind(finalized_payroll_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .map(|row| ReversalRow {
+        reversed_by: row.get(0),
+        reason: row.get(1),
+        reversed_at: row.get(2),
+    })
 }
 
 async fn reversal_count(pool: &PgPool, finalized_payroll_id: &FinalizedPayrollId) -> i64 {
@@ -231,6 +236,15 @@ async fn reversing_a_finalized_payroll_records_the_reason_actor_and_deletes_live
         .expect("a Reversal row must exist");
     assert_eq!(reversal.reversed_by, "hr");
     assert_eq!(reversal.reason, "March rate captured wrong");
+    // And the time. `reversed_at` defaults to `now()` in the database rather
+    // than to a clock the application passes in, so the only honest
+    // assertion is that it sits around this test's own wall clock.
+    let elapsed = chrono::Utc::now() - reversal.reversed_at;
+    assert!(
+        elapsed >= chrono::TimeDelta::zero() && elapsed < chrono::TimeDelta::minutes(1),
+        "the Reversal must record when it happened, got {}",
+        reversal.reversed_at
+    );
 
     // The original FinalizedPayroll row is completely untouched.
     let after = finalized_payroll_snapshot(&pool, &finalized_payroll_id).await;
@@ -364,6 +378,68 @@ async fn reversing_an_already_reversed_finalized_payroll_is_refused(pool: PgPool
         .await,
         1,
         "a refused second reversal writes no second audit entry"
+    );
+}
+
+/// §11: two genuinely concurrent reversals of one `FinalizedPayroll` end
+/// with exactly one Reversal, and the loser reads the *same* named refusal a
+/// repeat attempt reads. The `UNIQUE (finalized_payroll_id)` constraint from
+/// migration 0011 is the whole mechanism — an application-side existence
+/// check cannot see the winner's uncommitted row, which is why the refusal is
+/// read back out of the constraint violation rather than decided before it.
+#[sqlx::test]
+async fn two_reversals_of_the_same_finalized_payroll_end_with_exactly_one_success(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let finalized_payroll_id = a_finalized_payroll(&pool, &employer_id, &employment_id).await;
+
+    // `tokio::join!` polls both futures in place rather than spawning them,
+    // so neither needs the `Send` bound this crate's async functions cannot
+    // prove — and each still takes its own connection from the pool, so this
+    // is two real PostgreSQL transactions racing for one row. Which one wins
+    // is PostgreSQL's to decide and this test does not care; that exactly one
+    // does is the invariant.
+    let (first, second) = tokio::join!(
+        reverse_finalized_payroll(&pool, &finalized_payroll_id, "reason-a", "hr-a"),
+        reverse_finalized_payroll(&pool, &finalized_payroll_id, "reason-b", "hr-b"),
+    );
+
+    let loser = match (&first, &second) {
+        (Ok(()), Err(_)) => &second,
+        (Err(_), Ok(())) => &first,
+        _ => panic!("exactly one reversal must succeed, got {first:?} and {second:?}"),
+    };
+    assert_eq!(
+        *loser,
+        Err(PayrollAppError::FinalizedPayrollAlreadyReversed(
+            finalized_payroll_id.clone()
+        )),
+        "the loser of a race must read the same refusal a repeat attempt reads, \
+         not a raw constraint violation"
+    );
+
+    assert_eq!(reversal_count(&pool, &finalized_payroll_id).await, 1);
+    assert_eq!(
+        action_log_count(
+            &pool,
+            "finalized_payroll_reversed",
+            finalized_payroll_id.as_str()
+        )
+        .await,
+        1,
+        "the loser's whole transaction rolls back, audit entry included"
+    );
+    assert!(
+        live_finalized_payroll_id(&pool, &employment_id, period().end())
+            .await
+            .is_none(),
+        "the winner still deleted the liveness row"
     );
 }
 
