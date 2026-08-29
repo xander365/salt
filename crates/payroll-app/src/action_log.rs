@@ -31,6 +31,24 @@ pub enum ActionType {
 }
 
 impl ActionType {
+    /// Every variant, so a test can walk the whole enum and compare it with
+    /// the database's own `action_type` CHECK.
+    pub const ALL: [ActionType; 13] = [
+        Self::PayrollRunCreated,
+        Self::EmploymentRemovedFromRun,
+        Self::EmploymentAddedToCorrectionRun,
+        Self::PayrollFinalized,
+        Self::FinalizedPayrollReversed,
+        Self::OpeningBalanceCreated,
+        Self::OpeningBalanceChanged,
+        Self::PriorEmploymentDeclared,
+        Self::PriorEmploymentChanged,
+        Self::CompensationTermsCorrected,
+        Self::UnsupportedDeductionStatusCorrected,
+        Self::PayScheduleChanged,
+        Self::EmploymentVoided,
+    ];
+
     /// The exact string `action_log_entry.action_type`'s CHECK accepts.
     fn as_db_str(self) -> &'static str {
         match self {
@@ -88,6 +106,8 @@ pub(crate) async fn write_action_log_entry(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// The thirteen strings the migration's CHECK constraint names
@@ -135,5 +155,47 @@ mod tests {
         for (action_type, expected_str) in expected {
             assert_eq!(action_type.as_db_str(), expected_str);
         }
+        assert_eq!(
+            expected.len(),
+            ActionType::ALL.len(),
+            "ActionType::ALL must list every variant"
+        );
+    }
+
+    #[test]
+    fn no_two_variants_share_a_string() {
+        let strings: BTreeSet<&str> = ActionType::ALL.iter().map(|a| a.as_db_str()).collect();
+
+        assert_eq!(
+            strings.len(),
+            ActionType::ALL.len(),
+            "two ActionTypes writing one string would be two acts an auditor cannot tell apart"
+        );
+    }
+
+    /// The enum and the database's CHECK are two statements of one list, so
+    /// the only useful test compares them against each other rather than
+    /// each against a copy of itself. Drift in either direction fails here:
+    /// a variant PostgreSQL would refuse, and an accepted string no Rust
+    /// caller can ever write.
+    #[sqlx::test]
+    async fn the_enum_and_the_check_constraint_name_the_same_acts(pool: sqlx::PgPool) {
+        let definition: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'action_log_entry'::regclass
+               AND contype = 'c'
+               AND conname = 'action_log_entry_action_type_check'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("action_log_entry.action_type carries a CHECK constraint");
+
+        // Every literal in the definition is one accepted action type, and
+        // `pg_get_constraintdef` renders each single-quoted, so the odd
+        // fragments of a split on the quote character are exactly that set.
+        let accepted: BTreeSet<&str> = definition.split('\'').skip(1).step_by(2).collect();
+        let produced: BTreeSet<&str> = ActionType::ALL.iter().map(|a| a.as_db_str()).collect();
+
+        assert_eq!(accepted, produced);
     }
 }

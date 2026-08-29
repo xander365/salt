@@ -1,4 +1,5 @@
-use payroll::{EmploymentId, PayrollError};
+use chrono::NaiveDate;
+use payroll::{EmployerId, EmploymentId, PayrollError};
 
 /// `payroll-app`'s own error type. It wraps [`PayrollError`] rather than
 /// re-exporting it, because "PostgreSQL unavailable" and "run already
@@ -22,8 +23,22 @@ pub enum PayrollAppError {
     ///
     /// [`Payroll`]: PayrollAppError::Payroll
     Database(String),
+    /// No Employer exists with this id.
+    EmployerNotFound(EmployerId),
     /// No Employment exists with this id.
     EmploymentNotFound(EmploymentId),
+    /// The Employment is void (§4.3). A voided Employment is a recorded
+    /// mistake: it never appears in run membership, so no standing fact may
+    /// be recorded against it and no calculation input may be read from it.
+    EmploymentIsVoid(EmploymentId),
+    /// The Employment's `end_date` falls before its `start_date`. A domain
+    /// refusal, stated here rather than left to the table's own CHECK, so a
+    /// caller is told the dates disagree instead of being handed a database
+    /// error.
+    EmploymentEndsBeforeItStarts {
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    },
     /// No `CompensationTerms` row is in force for this Employment as of the
     /// requested date.
     NoCompensationTermsInForce(EmploymentId),
@@ -34,7 +49,16 @@ impl std::fmt::Display for PayrollAppError {
         match self {
             Self::Payroll(err) => write!(f, "{err}"),
             Self::Database(message) => write!(f, "database error: {message}"),
+            Self::EmployerNotFound(id) => write!(f, "no Employer exists with id {id}"),
             Self::EmploymentNotFound(id) => write!(f, "no Employment exists with id {id}"),
+            Self::EmploymentIsVoid(id) => write!(f, "Employment {id} is void"),
+            Self::EmploymentEndsBeforeItStarts {
+                start_date,
+                end_date,
+            } => write!(
+                f,
+                "an Employment ending {end_date} cannot start later, on {start_date}"
+            ),
             Self::NoCompensationTermsInForce(id) => {
                 write!(f, "no CompensationTerms are in force for Employment {id}")
             }
@@ -55,7 +79,10 @@ impl std::error::Error for PayrollAppError {
         match self {
             Self::Payroll(err) => err.source(),
             Self::Database(_)
+            | Self::EmployerNotFound(_)
             | Self::EmploymentNotFound(_)
+            | Self::EmploymentIsVoid(_)
+            | Self::EmploymentEndsBeforeItStarts { .. }
             | Self::NoCompensationTermsInForce(_) => None,
         }
     }

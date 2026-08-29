@@ -327,3 +327,174 @@ async fn reading_a_missing_employment_is_refused(pool: PgPool) {
 
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 }
+
+/// §4.3 keeps a voided Employment out of every payroll, so the calculation
+/// input read for one is refused rather than handed to the pure crate.
+#[sqlx::test]
+async fn a_voided_employment_yields_no_snapshot_to_calculate_from(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        Money::from_cents(500000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let result = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1)).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentIsVoid(employment_id))
+    );
+}
+
+#[sqlx::test]
+async fn a_voided_employment_accepts_no_further_compensation_terms(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        Money::from_cents(500000).unwrap(),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()))
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM compensation_terms WHERE employment_id = $1")
+            .bind(employment_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+}
+
+/// The void already happened. A second `EmploymentVoided` entry would record
+/// an act that did not, in a log no role may afterwards correct.
+#[sqlx::test]
+async fn voiding_an_already_void_employment_writes_no_second_action_log_entry(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    let result = void_employment(&pool, &employment_id, "actor").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()))
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM action_log_entry WHERE target_id = $1")
+            .bind(employment_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "one void is one ActionLog entry");
+}
+
+#[sqlx::test]
+async fn an_employment_that_ends_before_it_starts_is_a_domain_refusal(pool: PgPool) {
+    let employer_id = create_employer(&pool, twenty_sixth_schedule(), "actor")
+        .await
+        .unwrap();
+
+    let result = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 6, 26),
+        Some(date(2026, 1, 25)),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmploymentEndsBeforeItStarts {
+            start_date: date(2026, 6, 26),
+            end_date: date(2026, 1, 25),
+        })
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM employment")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn an_employment_against_a_missing_employer_is_a_domain_refusal(pool: PgPool) {
+    let missing = payroll::EmployerId::new("does-not-exist");
+
+    let result = create_employment(
+        &pool,
+        &missing,
+        &PersonId::new("person-1"),
+        date(2026, 1, 26),
+        None,
+        "actor",
+    )
+    .await;
+
+    assert_eq!(result, Err(PayrollAppError::EmployerNotFound(missing)));
+}
+
+/// §10 makes the ActionLog "who did what and when", and no role may UPDATE
+/// it afterwards, so a blank actor is an unfixable row that answers "who"
+/// with nothing.
+#[sqlx::test]
+async fn an_unattributed_void_is_refused_by_the_database(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let result = void_employment(&pool, &employment_id, "").await;
+
+    assert!(
+        matches!(result, Err(PayrollAppError::Database(_))),
+        "expected a Database refusal, got {result:?}"
+    );
+    let row = sqlx::query("SELECT is_void FROM employment WHERE id = $1")
+        .bind(employment_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !row.get::<bool, _>(0),
+        "a refused void must leave the Employment untouched"
+    );
+}
+
+/// `get_employment_snapshot` rebuilds a `Money` from this column and can
+/// only `expect` that to succeed, so the column itself refuses the amount
+/// that would break it.
+#[sqlx::test]
+async fn a_negative_basic_pay_is_refused_by_the_database(pool: PgPool) {
+    let (_, employment_id) = an_employer_and_employment(&pool).await;
+
+    let result = sqlx::query(
+        "INSERT INTO compensation_terms (employment_id, effective_from, basic_pay, created_by)
+         VALUES ($1, '2026-01-26', -1, 'actor')",
+    )
+    .bind(employment_id.as_str())
+    .execute(&pool)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "basic_pay is a Money amount, never negative"
+    );
+}
