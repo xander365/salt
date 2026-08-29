@@ -209,8 +209,8 @@ pub(crate) async fn lock_run(
         return Err(PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()));
     };
     Ok(LockedRun {
-        kind,
-        status,
+        kind: RunKind::from_column(&kind),
+        status: RunStatus::from_column(&status),
         period: PayPeriod::new(period_start, period_end)
             .expect("payroll_run CHECK: period_end is never before period_start"),
         employer_id: EmployerId::new(employer_id),
@@ -219,10 +219,78 @@ pub(crate) async fn lock_run(
 
 /// One `payroll_run` row, read under its own `FOR UPDATE` lock.
 pub(crate) struct LockedRun {
-    pub kind: String,
-    pub status: String,
+    pub kind: RunKind,
+    pub status: RunStatus,
     pub period: PayPeriod,
     pub employer_id: EmployerId,
+}
+
+/// The two kinds of run §4.6 names, as a type rather than the `TEXT` the
+/// column holds — every lifecycle decision made on a bare string is one
+/// typo away from silently taking the wrong branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunKind {
+    Ordinary,
+    Correction,
+}
+
+impl RunKind {
+    /// Panics rather than returning a `Result`, exactly as
+    /// [`crate::employer::pay_schedule_from_columns`] does: `payroll_run`'s
+    /// own CHECK admits these two values only, so a third would mean the
+    /// schema no longer matches this code, not a fact about the run.
+    fn from_column(kind: &str) -> Self {
+        match kind {
+            "ordinary" => Self::Ordinary,
+            "correction" => Self::Correction,
+            other => {
+                panic!("payroll_run CHECK: kind is 'ordinary' or 'correction', found {other:?}")
+            }
+        }
+    }
+}
+
+/// The three states §4.7 names. `Draft → Calculated → Finalized`; there is
+/// no `Reviewed` (ADR-0010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunStatus {
+    Draft,
+    Calculated,
+    Finalized,
+}
+
+impl RunStatus {
+    /// Panics for the same reason [`RunKind::from_column`] does.
+    fn from_column(status: &str) -> Self {
+        match status {
+            "draft" => Self::Draft,
+            "calculated" => Self::Calculated,
+            "finalized" => Self::Finalized,
+            other => panic!(
+                "payroll_run CHECK: status is 'draft', 'calculated' or 'finalized', found {other:?}"
+            ),
+        }
+    }
+}
+
+/// The Employments still in `payroll_run_id`'s working membership, in a
+/// stable order. Read once per use case, by every caller that walks a run's
+/// members — recalculation and finalization must see exactly the same set,
+/// so they read it through the same query rather than two copies of it that
+/// can drift.
+pub(crate) async fn active_member_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<Vec<String>, PayrollAppError> {
+    let member_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT employment_id FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND removed_at IS NULL
+         ORDER BY employment_id",
+    )
+    .bind(payroll_run_id.as_str())
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(member_ids)
 }
 
 /// Locks a run, verifies working state may still change, and puts the run
@@ -248,9 +316,9 @@ pub(crate) struct LockedRun {
 async fn lock_and_reopen_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
-) -> Result<String, PayrollAppError> {
+) -> Result<RunKind, PayrollAppError> {
     let run = lock_run(tx, payroll_run_id).await?;
-    if run.status == "finalized" {
+    if run.status == RunStatus::Finalized {
         return Err(PayrollAppError::PayrollRunAlreadyFinalized(
             payroll_run_id.clone(),
         ));
@@ -300,7 +368,7 @@ pub async fn remove_employment_from_run(
 
     let mut tx = pool.begin().await?;
     let kind = lock_and_reopen_run(&mut tx, payroll_run_id).await?;
-    if kind != "ordinary" {
+    if kind != RunKind::Ordinary {
         return Err(PayrollAppError::PayrollRunIsNotOrdinary(
             payroll_run_id.clone(),
         ));

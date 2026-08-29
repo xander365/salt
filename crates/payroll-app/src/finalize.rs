@@ -26,7 +26,11 @@
 //! absent.** It arrives with the sequencing ticket. Every fixture this
 //! module's tests use is an Employment's first payable period, so they stay
 //! valid once that gate lands — approximating it here would be worse than
-//! leaving it out.
+//! leaving it out. A `Correction` run is refused outright for the same
+//! reason: §5.3 step 3's Correction column, and the
+//! `replaces_finalized_payroll_id` lineage §9 demands with it, are that
+//! ticket's work — and a run this path cannot finalize correctly must not be
+//! finalized here at all.
 //!
 //! Correctness rests on the run's own `FOR UPDATE` lock and the primary key
 //! on `live_finalized_payroll`, not on the isolation level or an
@@ -40,9 +44,9 @@ use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
-use crate::employer::pay_schedule_from_columns;
+use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
-use crate::payroll_run::{PayrollRunId, lock_run};
+use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run};
 
 /// One member's approved `WorkingPayrollCalculation`, read back so its three
 /// values can be compared against a fresh reassembly/re-resolution/recompute
@@ -60,7 +64,8 @@ struct WorkingCalculation {
 ///
 /// Refused outright when the run does not exist, is already `Finalized`, or
 /// is not yet `Calculated` (§4.7) — finalizing is only ever a move out of
-/// `Calculated`.
+/// `Calculated` — and when its kind is not `Ordinary`, because the
+/// Correction column of §5.3 step 3 belongs to the correction ticket.
 ///
 /// A run with no active members finalizes vacuously, for the same reason
 /// `calculate_payroll_run` lets one become `Calculated`: §4.7 defines the
@@ -78,26 +83,36 @@ pub async fn finalize_payroll_run(
     // re-reads `status` as `finalized` and refuses below — no
     // application-side `if status != Finalized` is doing that work.
     let run = lock_run(&mut tx, payroll_run_id).await?;
-    if run.status == "finalized" {
+    if run.status == RunStatus::Finalized {
         return Err(PayrollAppError::PayrollRunAlreadyFinalized(
             payroll_run_id.clone(),
         ));
     }
-    if run.status != "calculated" {
+    if run.status != RunStatus::Calculated {
         return Err(PayrollAppError::PayrollRunNotCalculated(
             payroll_run_id.clone(),
         ));
     }
+    // §5.3 step 2 verifies the kind as well as the status, and this path
+    // implements the Ordinary column of step 3 only. A Correction run must
+    // also copy `replaces_finalized_payroll_id` from its membership row and
+    // check its target is reversed and not live (§4.8, §6.3); finalizing one
+    // here would write a replacement with null lineage that §9 forbids. The
+    // refusal is what keeps that unreachable until the correction ticket
+    // lands, rather than a comment saying it should be.
+    if run.kind != RunKind::Ordinary {
+        return Err(PayrollAppError::PayrollRunIsNotOrdinary(
+            payroll_run_id.clone(),
+        ));
+    }
+    // The period needs no separate verification: it is read from the locked
+    // run itself and every rebuild below resolves rules, year-to-date and
+    // the snapshot from that one value, so there is no second period for it
+    // to disagree with.
     let period = run.period;
     let employer_id = run.employer_id;
 
-    let (schedule_kind, schedule_value): (String, Option<i16>) = sqlx::query_as(
-        "SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1",
-    )
-    .bind(employer_id.as_str())
-    .fetch_one(&mut *tx)
-    .await?;
-    let schedule = pay_schedule_from_columns(&schedule_kind, schedule_value);
+    let schedule = pay_schedule_for_employer(&mut tx, &employer_id).await?;
 
     // Resolved once, outside the per-member loop, for the same reason
     // `calculate_payroll_run` resolves it once: it depends only on the
@@ -105,14 +120,7 @@ pub async fn finalize_payroll_run(
     let rules = ruleset_for(period.end())?;
     let tax_year = TaxYear::for_period_end(period.end());
 
-    let member_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT employment_id FROM payroll_run_employment
-         WHERE payroll_run_id = $1::uuid AND removed_at IS NULL
-         ORDER BY employment_id",
-    )
-    .bind(payroll_run_id.as_str())
-    .fetch_all(&mut *tx)
-    .await?;
+    let member_ids = active_member_ids(&mut tx, payroll_run_id).await?;
 
     let mut earnings_by_member = run_earnings_by_member(&mut tx, payroll_run_id).await?;
 

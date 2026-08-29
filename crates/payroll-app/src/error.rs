@@ -256,7 +256,11 @@ impl std::fmt::Display for PayrollAppError {
             } => write!(
                 f,
                 "finalizing Employment {employment_id} refused: the reassembled PayrollInput no \
-                 longer equals what was approved (approved: {approved:?}, current: {current:?})"
+                 longer equals what was approved — {}",
+                describe_differences(
+                    serde_json::to_value(approved).ok(),
+                    serde_json::to_value(current).ok(),
+                )
             ),
             Self::FinalizationRulesMismatch {
                 employment_id,
@@ -265,7 +269,11 @@ impl std::fmt::Display for PayrollAppError {
             } => write!(
                 f,
                 "finalizing Employment {employment_id} refused: the re-resolved PayrollRules no \
-                 longer equal what was approved (approved: {approved:?}, current: {current:?})"
+                 longer equal what was approved — {}",
+                describe_differences(
+                    serde_json::to_value(approved).ok(),
+                    serde_json::to_value(current).ok(),
+                )
             ),
             Self::FinalizationCalculationMismatch {
                 employment_id,
@@ -274,8 +282,11 @@ impl std::fmt::Display for PayrollAppError {
             } => write!(
                 f,
                 "finalizing Employment {employment_id} refused: the recomputed \
-                 PayrollCalculation no longer equals what was approved (approved: {approved:?}, \
-                 current: {current:?})"
+                 PayrollCalculation no longer equals what was approved — {}",
+                describe_differences(
+                    serde_json::to_value(approved).ok(),
+                    serde_json::to_value(current).ok(),
+                )
             ),
         }
     }
@@ -318,6 +329,118 @@ impl std::error::Error for PayrollAppError {
             | Self::FinalizationCalculationMismatch { .. } => None,
         }
     }
+}
+
+/// At most this many differing fields are named. A refusal is read by a
+/// person deciding what to fix, and a list longer than this says "recalculate
+/// and look again" more usefully than an exhaustive dump does.
+const MAX_NAMED_DIFFERENCES: usize = 5;
+
+/// Longer values are cut to this many characters. A `PayrollRules` holds
+/// whole PAYE band tables, and an unbounded refusal message is one nobody
+/// reads.
+const MAX_VALUE_CHARS: usize = 60;
+
+/// Names the fields that differ between what finalization approved and what
+/// it rebuilt, for the three refusals §5.2 raises. ADR-0010 makes this the
+/// requirement it is: the refusal must name **which of the three** differed
+/// *and what changed inside it*, because "a refusal that says only
+/// 'something changed' is one users learn to click past".
+///
+/// The two values are walked as JSON rather than compared field by field in
+/// Rust. That is not a shortcut: JSON is exactly what a `FinalizedPayroll`
+/// freezes and what `working_payroll_calculation` stores, so every path named
+/// here is a path a reader of the stored snapshot can find, and a new field on
+/// any of the three types is described without this function being touched.
+///
+/// `None` means the value could not be serialized. That cannot happen for the
+/// three types this is called with — the same serialization is an `expect`
+/// wherever they are written — but `Display` must not panic, so it is reported
+/// rather than unwrapped.
+fn describe_differences(
+    approved: Option<serde_json::Value>,
+    current: Option<serde_json::Value>,
+) -> String {
+    let (Some(approved), Some(current)) = (approved, current) else {
+        return "the differing fields could not be described".to_string();
+    };
+
+    let mut differences = Vec::new();
+    collect_differences("", &approved, &current, &mut differences);
+
+    match differences.len() {
+        0 => "the differing fields could not be described".to_string(),
+        n if n > MAX_NAMED_DIFFERENCES => format!(
+            "{}, and further fields differ",
+            differences[..MAX_NAMED_DIFFERENCES].join("; ")
+        ),
+        _ => differences.join("; "),
+    }
+}
+
+/// Walks two JSON values in step, pushing `path: approved X, current Y` for
+/// every leaf that disagrees. Recurses into objects and into arrays of equal
+/// length; anything else that differs is reported at the level it differs on,
+/// so a changed Earning line reads as one difference rather than as every
+/// field of every line after it.
+///
+/// Stops one past [`MAX_NAMED_DIFFERENCES`] — enough for the caller to know
+/// the list was cut, without walking a whole PAYE table to say so.
+fn collect_differences(
+    path: &str,
+    approved: &serde_json::Value,
+    current: &serde_json::Value,
+    out: &mut Vec<String>,
+) {
+    if approved == current || out.len() > MAX_NAMED_DIFFERENCES {
+        return;
+    }
+
+    match (approved, current) {
+        (serde_json::Value::Object(approved), serde_json::Value::Object(current)) => {
+            let null = serde_json::Value::Null;
+            let keys = approved
+                .keys()
+                .chain(current.keys().filter(|key| !approved.contains_key(*key)));
+            for key in keys {
+                let child = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_differences(
+                    &child,
+                    approved.get(key).unwrap_or(&null),
+                    current.get(key).unwrap_or(&null),
+                    out,
+                );
+            }
+        }
+        (serde_json::Value::Array(approved), serde_json::Value::Array(current))
+            if approved.len() == current.len() =>
+        {
+            for (index, (approved, current)) in approved.iter().zip(current).enumerate() {
+                collect_differences(&format!("{path}[{index}]"), approved, current, out);
+            }
+        }
+        _ => out.push(format!(
+            "{}: approved {}, current {}",
+            if path.is_empty() { "the value" } else { path },
+            abbreviate(approved),
+            abbreviate(current)
+        )),
+    }
+}
+
+/// One JSON value as compact text, cut to [`MAX_VALUE_CHARS`] characters.
+/// Cut by characters rather than bytes: the cut must not land inside one.
+fn abbreviate(value: &serde_json::Value) -> String {
+    let text = value.to_string();
+    if text.chars().count() <= MAX_VALUE_CHARS {
+        return text;
+    }
+    let kept: String = text.chars().take(MAX_VALUE_CHARS).collect();
+    format!("{kept}…")
 }
 
 impl From<PayrollError> for PayrollAppError {
@@ -363,6 +486,65 @@ mod tests {
         }
 
         assert_eq!(chain, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_difference_is_named_by_its_path_through_the_frozen_snapshot() {
+        let approved = serde_json::json!({"employment": {"basic_pay": {"cents": 1500000}}});
+        let current = serde_json::json!({"employment": {"basic_pay": {"cents": 1600000}}});
+
+        assert_eq!(
+            describe_differences(Some(approved), Some(current)),
+            "employment.basic_pay.cents: approved 1500000, current 1600000"
+        );
+    }
+
+    #[test]
+    fn a_field_present_on_one_side_only_is_still_named() {
+        let approved = serde_json::json!({"effective_from": "2026-03-01"});
+        let current = serde_json::json!({});
+
+        assert_eq!(
+            describe_differences(Some(approved), Some(current)),
+            "effective_from: approved \"2026-03-01\", current null"
+        );
+    }
+
+    #[test]
+    fn a_long_list_of_differences_is_cut_and_says_so() {
+        let approved = serde_json::json!({
+            "a": 1, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1, "g": 1
+        });
+        let current = serde_json::json!({
+            "a": 2, "b": 2, "c": 2, "d": 2, "e": 2, "f": 2, "g": 2
+        });
+
+        let described = describe_differences(Some(approved), Some(current));
+
+        assert_eq!(described.matches("approved").count(), MAX_NAMED_DIFFERENCES);
+        assert!(
+            described.ends_with(", and further fields differ"),
+            "{described}"
+        );
+    }
+
+    #[test]
+    fn a_long_value_is_abbreviated_rather_than_dumped() {
+        let approved = serde_json::json!({"bands": "x".repeat(500)});
+        let current = serde_json::json!({"bands": "y".repeat(500)});
+
+        let described = describe_differences(Some(approved), Some(current));
+
+        assert!(described.contains('…'), "{described}");
+        assert!(described.chars().count() < 200, "{described}");
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_serialized_is_reported_rather_than_unwrapped() {
+        assert_eq!(
+            describe_differences(None, Some(serde_json::json!({}))),
+            "the differing fields could not be described"
+        );
     }
 
     #[test]

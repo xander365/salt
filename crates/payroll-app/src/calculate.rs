@@ -19,10 +19,10 @@ use payroll::{
 };
 use sqlx::PgPool;
 
-use crate::employer::pay_schedule_from_columns;
+use crate::employer::pay_schedule_for_employer;
 use crate::employment::get_employment_snapshot;
 use crate::error::PayrollAppError;
-use crate::payroll_run::{PayrollRunId, lock_run};
+use crate::payroll_run::{PayrollRunId, RunStatus, active_member_ids, lock_run};
 use crate::unsupported_deduction_status::get_unsupported_deduction_status;
 use crate::year_to_date::build_year_to_date_context;
 
@@ -84,20 +84,14 @@ pub async fn calculate_payroll_run(
     // recalculating a run that already calculated cleanly is the ordinary
     // way to pick up a corrected fact.
     let run = lock_run(&mut tx, payroll_run_id).await?;
-    if run.status == "finalized" {
+    if run.status == RunStatus::Finalized {
         return Err(PayrollAppError::PayrollRunAlreadyFinalized(
             payroll_run_id.clone(),
         ));
     }
     let period = run.period;
 
-    let (schedule_kind, schedule_value): (String, Option<i16>) = sqlx::query_as(
-        "SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1",
-    )
-    .bind(run.employer_id.as_str())
-    .fetch_one(&mut *tx)
-    .await?;
-    let schedule = pay_schedule_from_columns(&schedule_kind, schedule_value);
+    let schedule = pay_schedule_for_employer(&mut tx, &run.employer_id).await?;
 
     // Resolved once, outside the per-member loop: it depends only on the
     // period being calculated, so a missing or overlapping ruleset is a
@@ -105,14 +99,7 @@ pub async fn calculate_payroll_run(
     // per-member refusal to report and route around.
     let rules = ruleset_for(period.end())?;
 
-    let member_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT employment_id FROM payroll_run_employment
-         WHERE payroll_run_id = $1::uuid AND removed_at IS NULL
-         ORDER BY employment_id",
-    )
-    .bind(payroll_run_id.as_str())
-    .fetch_all(&mut *tx)
-    .await?;
+    let member_ids = active_member_ids(&mut tx, payroll_run_id).await?;
 
     let mut earnings_by_member = run_earnings_by_member(&mut tx, payroll_run_id).await?;
 

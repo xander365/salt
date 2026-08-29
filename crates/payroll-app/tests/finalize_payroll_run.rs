@@ -386,6 +386,48 @@ async fn finalizing_an_already_finalized_run_is_refused(pool: PgPool) {
     );
 }
 
+/// §5.3 step 2 verifies the run's **kind** as well as its status, and this
+/// use case implements the Ordinary column of step 3 only. A Correction run
+/// must also carry `replaces_finalized_payroll_id` into its
+/// `FinalizedPayroll` (§9) and check its target is reversed and not live
+/// (§4.8) — so finalizing one here would write a replacement with the null
+/// lineage §9 reserves for two other cases entirely.
+///
+/// No use case creates a Correction run yet, so the run's kind is changed
+/// directly. The run is left empty because a Correction run may hold at most
+/// one member (§4.8, migration 0016's trigger).
+#[sqlx::test]
+async fn finalizing_a_correction_run_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let run_id = a_calculated_run(&pool, &employer_id).await;
+    sqlx::query(
+        "UPDATE payroll_run SET kind = 'correction', correction_reason = 'a corrected March'
+         WHERE id = $1::uuid",
+    )
+    .bind(run_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayrollRunIsNotOrdinary(run_id.clone()))
+    );
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        action_log_count(&pool, "payroll_finalized", run_id.as_str()).await,
+        0,
+        "a refused finalization writes no audit entry either"
+    );
+}
+
 // ---- Three-way finalization equality (§5.2, §14 tests 30-33) ----
 
 /// The tempting simplification is comparing the `PayrollCalculation` alone.
@@ -500,6 +542,18 @@ async fn finalization_refuses_when_the_reassembled_input_differs_while_the_calcu
                 if *id == employment_id
         ),
         "expected a FinalizationInputMismatch, got {result:?}"
+    );
+    // §5.2 and ADR-0010: naming which of the three differed is half the
+    // requirement; the refusal must also say what changed inside it, or it
+    // is one users learn to click past.
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("effective_from"),
+        "the refusal must name the field that changed, got {message}"
+    );
+    assert!(
+        message.contains("2026-01-01"),
+        "the refusal must show what it changed to, got {message}"
     );
 
     // The calculation a fresh recompute would produce is still exactly what
@@ -617,19 +671,19 @@ async fn finalization_refuses_when_the_re_resolved_rules_differ_while_the_calcul
     assert_eq!(count, 0);
 }
 
-/// §5.1: one bad member blocks the whole run. A second, correctly declared
-/// member must not finalize either when the first's stored calculation has
-/// been tampered with.
+/// §5.1: one bad member blocks the whole run. A member that compared
+/// cleanly must not finalize either when a *later* member's stored
+/// calculation has been tampered with.
+///
+/// The order matters and is asserted, not assumed: members are rebuilt
+/// `ORDER BY employment_id` and ids are UUIDv7, so the Employment created
+/// first is compared first. Tampering the one created *second* is what makes
+/// this the hard case — a member already compared and found equal, and a
+/// refusal after it — rather than a refusal on the very first member, which
+/// would pass even if finalization wrote each member as it went.
 #[sqlx::test]
-async fn one_members_mismatch_leaves_no_finalized_payroll_for_any_member(pool: PgPool) {
+async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_one(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
-    let bad = a_fully_declared_employment(
-        &pool,
-        &employer_id,
-        "person-bad",
-        Money::from_cents(1500000).unwrap(),
-    )
-    .await;
     let good = a_fully_declared_employment(
         &pool,
         &employer_id,
@@ -637,6 +691,17 @@ async fn one_members_mismatch_leaves_no_finalized_payroll_for_any_member(pool: P
         Money::from_cents(900000).unwrap(),
     )
     .await;
+    let bad = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-bad",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    assert!(
+        good.as_str() < bad.as_str(),
+        "UUIDv7 ids order by creation, so the tampered member must be rebuilt second"
+    );
     let run_id = a_calculated_run(&pool, &employer_id).await;
 
     let calculation_json: serde_json::Value = sqlx::query_scalar(

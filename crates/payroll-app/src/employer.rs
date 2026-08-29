@@ -66,6 +66,24 @@ pub(crate) fn pay_schedule_from_columns(kind: &str, value: Option<i16>) -> PaySc
     PaySchedule::new(period_end_day)
 }
 
+/// The Employer's own `PaySchedule`, read on the caller's transaction —
+/// the one read every use case that must calculate against an Employer's
+/// periods starts with. One function rather than the same two-column
+/// `query_as` written out beside every caller of
+/// [`pay_schedule_from_columns`].
+pub(crate) async fn pay_schedule_for_employer(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    employer_id: &EmployerId,
+) -> Result<PaySchedule, PayrollAppError> {
+    let (kind, value): (String, Option<i16>) = sqlx::query_as(
+        "SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1",
+    )
+    .bind(employer_id.as_str())
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(pay_schedule_from_columns(&kind, value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
