@@ -11,7 +11,9 @@ use sqlx::{Acquire, PgPool, Postgres};
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
-use crate::freeze::{diverging_periods_json, live_finalized_periods_in_span};
+use crate::freeze::{
+    diverging_periods_json, live_finalized_periods_in_span, require_acknowledgement_of,
+};
 
 /// Records the `UnsupportedDeductionDeclaration` in force from
 /// `effective_from`, or replaces whichever one already governs that exact
@@ -37,10 +39,13 @@ use crate::freeze::{diverging_periods_json, live_finalized_periods_in_span};
 ///
 /// Demands a non-empty `reason` (refused before anything is touched) and
 /// returns every Live finalized `PayPeriod` this declaration now diverges
-/// from (§6.5) — every period in `[effective_from, next_effective_from)`
-/// that already has a live `FinalizedPayroll`, `next_effective_from` being
-/// whichever later row already exists for this Employment, or open-ended
-/// when none does. That span is exactly what this write is about to govern,
+/// from (§6.5), which `acknowledged_diverging_periods` must name exactly —
+/// the same acknowledgement `correct_compensation_terms` requires, refused
+/// with [`PayrollAppError::MasterDataDivergenceNotAcknowledged`] carrying
+/// the list, and pass `&[]` where nothing diverges. The list is every period
+/// in `[effective_from, next_effective_from)` that already has a live
+/// `FinalizedPayroll`, `next_effective_from` being whichever later row
+/// already exists for this Employment, or open-ended when none does. That span is exactly what this write is about to govern,
 /// whether the row at `effective_from` is new or already there: a first
 /// declaration takes a span away from whatever answered `Unknown` or an
 /// earlier row before it, and a later change takes it from itself. Computed
@@ -51,6 +56,7 @@ pub async fn declare_unsupported_deduction_status(
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     status: UnsupportedDeductionStatus,
+    acknowledged_diverging_periods: &[PayPeriod],
     reason: &str,
     declared_by: &str,
 ) -> Result<Vec<PayPeriod>, PayrollAppError> {
@@ -142,6 +148,15 @@ pub async fn declare_unsupported_deduction_status(
         live_finalized_periods_in_span(&mut tx, employment_id, effective_from, next_effective_from)
             .await?;
 
+    // Checked against the list this transaction has just computed, under the
+    // Employment lock, and before the write below, so a refusal leaves the
+    // declaration exactly as it was.
+    require_acknowledgement_of(
+        employment_id,
+        &diverging_periods,
+        acknowledged_diverging_periods,
+    )?;
+
     sqlx::query(
         "INSERT INTO unsupported_deduction_declaration
             (employment_id, effective_from, status, kinds, declared_by)
@@ -164,6 +179,8 @@ pub async fn declare_unsupported_deduction_status(
     // for this declaration (`UnsupportedDeductionStatusCorrected`): every
     // write against a period — first declaration or later change — is a
     // correction to what governs that period, not a distinct kind of act.
+    // The entry existing is also the record of the acknowledgement, since
+    // the call is refused above unless the caller named exactly this list.
     write_action_log_entry(
         &mut tx,
         ActionLogEntry {

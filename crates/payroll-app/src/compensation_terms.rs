@@ -14,7 +14,9 @@ use sqlx::PgPool;
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
-use crate::freeze::{diverging_periods_json, live_finalized_periods_in_span};
+use crate::freeze::{
+    diverging_periods_json, live_finalized_periods_in_span, require_acknowledgement_of,
+};
 
 /// Records a `CompensationTerms` row effective from `effective_from`. Refused
 /// as a domain refusal, not a database error, when `effective_from` is not a
@@ -26,6 +28,13 @@ use crate::freeze::{diverging_periods_json, live_finalized_periods_in_span};
 /// Refused too when the Employment is void (§4.3): a voided Employment is a
 /// recorded mistake that never reaches a payroll, so standing pay facts
 /// against it would describe an Employment nobody will ever pay.
+///
+/// This takes no reason and names no divergence, because stating a pay rise
+/// from a date nothing has been paid for yet is the ordinary act (spec
+/// stories 1 and 2), not a correction. The one place it *does* land on a
+/// live finalized span is the second half of a split (see
+/// [`correct_compensation_terms`]), where the move that precedes it already
+/// named and had that exact span acknowledged.
 pub async fn record_compensation_terms(
     pool: &PgPool,
     employment_id: &EmploymentId,
@@ -95,21 +104,35 @@ pub async fn record_compensation_terms(
 /// Returns every Live finalized `PayPeriod` whose governing
 /// `CompensationTerms` can differ after this correction: the row's old span
 /// and its new span. Computed before the row is updated, so the list names
-/// exactly what this correction is about to disagree with — never a refusal
-/// (§6.5 guard 2), and it reads `finalized_payroll` and
-/// `live_finalized_payroll` without writing either (§6.5 guard 3).
+/// exactly what this correction is about to disagree with, and it reads
+/// `finalized_payroll` and `live_finalized_payroll` without writing either
+/// (§6.5 guard 3).
+///
+/// That list must also be **acknowledged**: `acknowledged_diverging_periods`
+/// has to name exactly the same periods, or the call is refused with
+/// [`PayrollAppError::MasterDataDivergenceNotAcknowledged`] carrying the
+/// list, and nothing is written (§6.5 guard 2). Divergence is still a
+/// warning and never a refusal of the correction itself — acknowledging it
+/// carries the identical correction through — but a caller cannot log an
+/// acknowledgement of a list it was never shown. A correction that diverges
+/// from nothing acknowledges nothing: pass `&[]`.
 ///
 /// Splitting a row (§6.5's March/April/May case) is two separate calls, in
 /// this order: this call first moves the existing row's `effective_from`
 /// forward, then [`record_compensation_terms`] inserts the new earlier row.
 /// The move frees the original `(employment_id, effective_from)` key for the
 /// insert, while its divergence list still names the original wider span.
+// Eight facts, each named at the call site, and no two of them belong
+// together in a struct: a parameter object here would only be this list with
+// one more name in front of it.
+#[allow(clippy::too_many_arguments)]
 pub async fn correct_compensation_terms(
     pool: &PgPool,
     employment_id: &EmploymentId,
     current_effective_from: NaiveDate,
     new_effective_from: NaiveDate,
     new_basic_pay: Money,
+    acknowledged_diverging_periods: &[PayPeriod],
     reason: &str,
     corrected_by: &str,
 ) -> Result<Vec<PayPeriod>, PayrollAppError> {
@@ -217,6 +240,37 @@ pub async fn correct_compensation_terms(
 
     let diverging_periods: Vec<PayPeriod> = diverging_periods.into_iter().collect();
 
+    // Checked against the list this transaction has just computed, under the
+    // Employment lock, so what is acknowledged is what is about to be true —
+    // and refused before the UPDATE, so a refusal leaves the row untouched.
+    require_acknowledgement_of(
+        employment_id,
+        &diverging_periods,
+        acknowledged_diverging_periods,
+    )?;
+
+    // A move onto a date this Employment already has a row at collides with
+    // `UNIQUE (employment_id, effective_from)`. Named here as the domain
+    // refusal it is, rather than handed back as a database error.
+    if new_effective_from != current_effective_from {
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM compensation_terms
+                WHERE employment_id = $1 AND effective_from = $2
+            )",
+        )
+        .bind(employment_id.as_str())
+        .bind(new_effective_from)
+        .fetch_one(&mut *tx)
+        .await?;
+        if taken {
+            return Err(PayrollAppError::CompensationTermsAlreadyExistAt {
+                employment_id: employment_id.clone(),
+                effective_from: new_effective_from,
+            });
+        }
+    }
+
     sqlx::query(
         "UPDATE compensation_terms SET effective_from = $3, basic_pay = $4
          WHERE employment_id = $1 AND effective_from = $2",
@@ -246,6 +300,9 @@ pub async fn correct_compensation_terms(
                     "effective_from": new_effective_from,
                     "basic_pay_cents": new_basic_pay.cents(),
                 },
+                // This entry existing is the record of the acknowledgement:
+                // the call is refused above unless the caller named exactly
+                // this list, so §6.5's "nowhere else" needs no second table.
                 "diverging_live_finalized_periods": diverging_periods_json(&diverging_periods),
             })),
         },

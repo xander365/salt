@@ -74,6 +74,7 @@ async fn a_fully_declared_employment(
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
         "a reason",
         "actor",
     )

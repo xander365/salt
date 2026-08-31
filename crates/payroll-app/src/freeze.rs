@@ -7,11 +7,11 @@
 //! already counts Live and reversed alike, and a later reversal can never
 //! thaw a fact this once made frozen.
 //!
-//! The three queries below are deliberately written out rather than folded
-//! into one: they name two different columns and two different comparisons,
-//! and this crate builds no SQL by string interpolation. Three static
-//! statements behind three names that read at the call site cost less than a
-//! `match` that hands back a query string.
+//! The queries below are deliberately written out rather than folded into
+//! one: they name different columns and different comparisons, and this
+//! crate builds no SQL by string interpolation. Static statements behind
+//! names that read at the call site cost less than a `match` that hands back
+//! a query string.
 //!
 //! None of them takes a lock. Each is a *check*, and the lock that makes the
 //! check hold is the caller's own — `FOR UPDATE` on the `employment` or
@@ -21,8 +21,12 @@
 //! frozen fact can never interleave: whichever arrives second waits, then
 //! sees the other's committed result and refuses.
 
+use std::collections::BTreeSet;
+
 use chrono::NaiveDate;
 use payroll::{EmployerId, EmploymentId, PayPeriod, TaxYear};
+
+use crate::error::PayrollAppError;
 
 /// Whether `employment_id` has any `FinalizedPayroll` — Live or reversed —
 /// in `tax_year`. The freeze trigger for `OpeningBalance` and
@@ -132,8 +136,45 @@ pub(crate) async fn live_finalized_periods_in_span(
         .collect())
 }
 
+/// Refuses unless `acknowledged` names exactly the periods in
+/// `diverging_periods` — §6.5 guard 2's "requires the user to acknowledge",
+/// enforced rather than assumed.
+///
+/// Order and repetition in `acknowledged` are the caller's business, so it
+/// is compared as a set: a caller handing back the list it was given, in the
+/// order it was given, is the ordinary path.
+///
+/// The refusal carries the current list, which is what lets a caller learn
+/// it in the first place: ask with nothing acknowledged, be told what
+/// diverges, show it, ask again with it acknowledged. Because the
+/// recomputation happens inside the correction's own transaction, an
+/// acknowledgement that a concurrent write has since made stale is refused
+/// here rather than silently logged as agreement to a different list.
+///
+/// Divergence itself is never a refusal: an acknowledged list — including
+/// the empty list, when nothing diverges — carries the correction through.
+pub(crate) fn require_acknowledgement_of(
+    employment_id: &EmploymentId,
+    diverging_periods: &[PayPeriod],
+    acknowledged: &[PayPeriod],
+) -> Result<(), PayrollAppError> {
+    let acknowledged: BTreeSet<&PayPeriod> = acknowledged.iter().collect();
+    let diverging: BTreeSet<&PayPeriod> = diverging_periods.iter().collect();
+    if acknowledged == diverging {
+        return Ok(());
+    }
+
+    Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+        employment_id: employment_id.clone(),
+        diverging_periods: diverging_periods.to_vec(),
+    })
+}
+
 /// The ActionLog representation of a correction's named divergence. Both
 /// correctable master-data facts use this exact shape, so it has one owner.
+/// A `*Corrected` entry exists only where this list was acknowledged first
+/// (see [`require_acknowledgement_of`]), so the entry *is* the record of the
+/// acknowledgement and §6.5's "nowhere else" needs no second table.
 pub(crate) fn diverging_periods_json(periods: &[PayPeriod]) -> serde_json::Value {
     serde_json::Value::Array(
         periods

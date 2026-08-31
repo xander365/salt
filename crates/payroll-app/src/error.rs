@@ -370,6 +370,32 @@ pub enum PayrollAppError {
     /// correction §6.5 requires a reason for; the ActionType catalogue names
     /// only one act here (see `ActionType::UnsupportedDeductionStatusCorrected`).
     UnsupportedDeductionDeclarationReasonCannotBeEmpty,
+    /// A master-data correction was asked for without acknowledging exactly
+    /// the Live finalized `PayPeriod`s it now diverges from (§6.5 guard 2).
+    ///
+    /// This is not a refusal *of the correction*: divergence never blocks a
+    /// correction, and re-asking with `diverging_periods` acknowledged
+    /// carries the same correction through unchanged. It is the refusal that
+    /// makes the acknowledgement real, because the list reaches the caller
+    /// here — a list computed and dropped would leave the ActionLog
+    /// recording an acknowledgement nobody was ever shown.
+    ///
+    /// `diverging_periods` is the list as it stands *now*, recomputed inside
+    /// the correction's own transaction, so an acknowledgement of a list a
+    /// concurrent write has since changed is refused rather than honoured.
+    MasterDataDivergenceNotAcknowledged {
+        employment_id: EmploymentId,
+        diverging_periods: Vec<PayPeriod>,
+    },
+    /// A `CompensationTerms` correction would move a row onto a date where
+    /// this Employment already has one. Stated as a domain refusal rather
+    /// than left to the table's `UNIQUE (employment_id, effective_from)`, so
+    /// a caller is told which date collided instead of being handed a
+    /// database error for a rule Rust can name.
+    CompensationTermsAlreadyExistAt {
+        employment_id: EmploymentId,
+        effective_from: NaiveDate,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -703,6 +729,34 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "an UnsupportedDeductionStatus declaration reason must not be empty"
             ),
+            Self::MasterDataDivergenceNotAcknowledged {
+                employment_id,
+                diverging_periods,
+            } => {
+                write!(
+                    f,
+                    "correcting master data for Employment {employment_id} needs the \
+                     acknowledgement of every Live finalized PayPeriod it now diverges from: "
+                )?;
+                if diverging_periods.is_empty() {
+                    return write!(f, "none");
+                }
+                for (index, period) in diverging_periods.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} to {}", period.start(), period.end())?;
+                }
+                Ok(())
+            }
+            Self::CompensationTermsAlreadyExistAt {
+                employment_id,
+                effective_from,
+            } => write!(
+                f,
+                "Employment {employment_id} already has a CompensationTerms row effective \
+                 {effective_from}"
+            ),
         }
     }
 }
@@ -770,7 +824,9 @@ impl std::error::Error for PayrollAppError {
             | Self::CorrectionPeriodAlreadyHasALivePayroll { .. }
             | Self::CompensationTermsCorrectionReasonCannotBeEmpty
             | Self::NoCompensationTermsRowAt { .. }
-            | Self::UnsupportedDeductionDeclarationReasonCannotBeEmpty => None,
+            | Self::UnsupportedDeductionDeclarationReasonCannotBeEmpty
+            | Self::MasterDataDivergenceNotAcknowledged { .. }
+            | Self::CompensationTermsAlreadyExistAt { .. } => None,
         }
     }
 }

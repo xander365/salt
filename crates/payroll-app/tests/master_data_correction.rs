@@ -8,12 +8,15 @@
 use chrono::NaiveDate;
 use payroll::{
     EmployerId, EmploymentId, Money, PayPeriod, PayrollError, PeriodEndDay, PersonId,
-    PriorEmployment, TaxYear, UnsupportedDeductionStatus,
+    PriorEmployment, TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds,
+    UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, calculate_payroll_run, correct_compensation_terms, create_employer,
+    PayrollAppError, add_employment_to_correction_run, build_year_to_date_context,
+    calculate_payroll_run, correct_compensation_terms, create_correction_run, create_employer,
     create_employment, create_ordinary_payroll_run, declare_prior_employment,
-    declare_unsupported_deduction_status, finalize_payroll_run, record_compensation_terms,
+    declare_unsupported_deduction_status, finalize_payroll_run, get_unsupported_deduction_status,
+    record_compensation_terms, reverse_finalized_payroll,
 };
 use sqlx::{PgPool, Row};
 
@@ -83,6 +86,7 @@ async fn an_employment_with_basic_pay(
         &employment_id,
         march().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
         "no unsupported deductions",
         "actor",
     )
@@ -145,6 +149,52 @@ async fn live_finalized_payroll_fingerprint(
     .unwrap()
 }
 
+/// The `basic_pay` of the `CompensationTerms` row at `effective_from`, in
+/// cents. A refused correction must leave it exactly as it was.
+async fn basic_pay_cents_at(
+    pool: &PgPool,
+    employment_id: &EmploymentId,
+    effective_from: NaiveDate,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT basic_pay FROM compensation_terms
+         WHERE employment_id = $1 AND effective_from = $2",
+    )
+    .bind(employment_id.as_str())
+    .bind(effective_from)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// How many `CompensationTermsCorrected` entries this Employment has. A
+/// refused correction writes none, so the ActionLog can never record an
+/// acknowledgement of a correction that never happened.
+async fn correction_entry_count(pool: &PgPool, employment_id: &EmploymentId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM action_log_entry
+         WHERE action_type = 'compensation_terms_corrected' AND target_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Every frozen figure this Employment has, as `(period_end,
+/// taxable_remuneration, paye)` — the numeric columns year-to-date actually
+/// sums (ADR-0012), read in period order.
+async fn frozen_figures(pool: &PgPool, employment_id: &EmploymentId) -> Vec<(NaiveDate, i64, i64)> {
+    sqlx::query_as(
+        "SELECT period_end, taxable_remuneration, paye FROM finalized_payroll
+         WHERE employment_id = $1 ORDER BY period_end",
+    )
+    .bind(employment_id.as_str())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 async fn compensation_terms_row_count(pool: &PgPool, employment_id: &EmploymentId) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM compensation_terms WHERE employment_id = $1")
         .bind(employment_id.as_str())
@@ -170,6 +220,7 @@ async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool:
         march().start(),
         march().start(),
         Money::from_cents(600000).unwrap(),
+        &[],
         "typo in the original amount",
         "actor",
     )
@@ -219,6 +270,7 @@ async fn an_empty_reason_is_refused_and_nothing_is_touched(pool: PgPool) {
         march().start(),
         march().start(),
         Money::from_cents(600000).unwrap(),
+        &[],
         "   ",
         "actor",
     )
@@ -266,6 +318,7 @@ async fn correcting_a_row_that_does_not_exist_is_refused(pool: PgPool) {
         date(2026, 6, 1),
         date(2026, 6, 1),
         Money::from_cents(600000).unwrap(),
+        &[],
         "a reason",
         "actor",
     )
@@ -290,6 +343,7 @@ async fn correcting_against_a_missing_employment_is_refused(pool: PgPool) {
         march().start(),
         march().start(),
         Money::from_cents(600000).unwrap(),
+        &[],
         "a reason",
         "actor",
     )
@@ -310,6 +364,7 @@ async fn a_new_effective_from_that_is_not_a_period_start_is_a_domain_refusal(poo
         march().start(),
         date(2026, 3, 10),
         Money::from_cents(600000).unwrap(),
+        &[],
         "a reason",
         "actor",
     )
@@ -360,6 +415,7 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
         march().start(),
         april().start(),
         original_pay,
+        &[march(), april(), may()],
         "March rate captured wrong; the terms only took effect in April",
         "actor",
     )
@@ -461,6 +517,7 @@ async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPoo
         march().start(),
         june().start(),
         Money::from_cents(700000).unwrap(),
+        &[march(), april(), june()],
         "the earlier terms began in June",
         "actor",
     )
@@ -483,6 +540,7 @@ async fn an_empty_reason_is_refused_for_an_unsupported_deduction_declaration(poo
         &employment_id,
         april().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
         "  ",
         "actor",
     )
@@ -510,6 +568,7 @@ async fn redeclaring_over_a_live_finalized_period_names_it_as_diverging(pool: Pg
         &employment_id,
         march().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        &[march()],
         "found a provident fund deduction we missed",
         "actor",
     )
@@ -521,4 +580,432 @@ async fn redeclaring_over_a_live_finalized_period_names_it_as_diverging(pool: Pg
     let march_finalized_after =
         finalized_payroll_fingerprint(&pool, &employment_id, march().end()).await;
     assert!(!march_finalized_after.is_empty());
+}
+
+// ---- §6.5 guard 2: the divergence must be acknowledged ----
+
+/// The divergence list reaches the caller through the refusal itself: a
+/// correction that names no acknowledgement is refused, told exactly which
+/// Live finalized periods it diverges from, and leaves the row and the
+/// ActionLog untouched. Re-asking with that list acknowledged carries the
+/// identical correction through — divergence warns, it never refuses.
+#[sqlx::test]
+async fn an_unacknowledged_divergence_is_refused_and_names_the_periods(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let original_pay = Money::from_cents(500000).unwrap();
+    let employment_id = an_employment_with_basic_pay(&pool, &employer_id, original_pay).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&pool, &employer_id, april()).await;
+
+    let corrected_pay = Money::from_cents(550000).unwrap();
+    let result = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        march().start(),
+        corrected_pay,
+        &[],
+        "March rate captured wrong",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: vec![march(), april()],
+        })
+    );
+    assert_eq!(
+        basic_pay_cents_at(&pool, &employment_id, march().start()).await,
+        500000,
+        "a refused correction changes nothing"
+    );
+    assert_eq!(correction_entry_count(&pool, &employment_id).await, 0);
+
+    // The same correction, now acknowledging exactly what it was told.
+    let diverging = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        march().start(),
+        corrected_pay,
+        &[march(), april()],
+        "March rate captured wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(diverging, vec![march(), april()]);
+    assert_eq!(
+        basic_pay_cents_at(&pool, &employment_id, march().start()).await,
+        550000
+    );
+    assert_eq!(correction_entry_count(&pool, &employment_id).await, 1);
+}
+
+/// An acknowledgement is of *this* list, not of divergence in general: one
+/// that names only some of the periods is refused exactly as an empty one
+/// is, so a caller cannot acknowledge a shorter list than the user saw.
+#[sqlx::test]
+async fn an_acknowledgement_that_omits_a_diverging_period_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&pool, &employer_id, april()).await;
+
+    let result = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        march().start(),
+        Money::from_cents(550000).unwrap(),
+        &[march()],
+        "March rate captured wrong",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: vec![march(), april()],
+        })
+    );
+    assert_eq!(correction_entry_count(&pool, &employment_id).await, 0);
+}
+
+/// Acknowledging a period that does not diverge is refused too. The
+/// acknowledgement is the caller repeating back the list it was shown, so a
+/// list it was never shown is not an acknowledgement of anything.
+#[sqlx::test]
+async fn an_acknowledgement_of_a_period_that_does_not_diverge_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    let result = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        march().start(),
+        Money::from_cents(550000).unwrap(),
+        &[march()],
+        "March rate captured wrong",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: Vec::new(),
+        })
+    );
+}
+
+/// The `UnsupportedDeductionStatus` declaration gets the same treatment
+/// (§6.5, acceptance criterion 8): an unacknowledged change over a Live
+/// finalized period is refused, and nothing is written.
+#[sqlx::test]
+async fn an_unacknowledged_declaration_change_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+
+    let result = declare_unsupported_deduction_status(
+        &pool,
+        &employment_id,
+        march().start(),
+        UnsupportedDeductionStatus::Present(
+            UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::ProvidentFund]).unwrap(),
+        ),
+        &[],
+        "found a provident fund deduction we missed",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: vec![march()],
+        })
+    );
+    assert_eq!(
+        get_unsupported_deduction_status(&pool, &employment_id, march().end())
+            .await
+            .unwrap(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        "a refused declaration leaves the one already in force"
+    );
+}
+
+// ---- §6.5 guard 3: nothing arithmetic can move ----
+
+/// Acceptance criterion 6, asserted directly rather than trusted: a
+/// correction of the very row March, April and May all read moves neither
+/// their frozen figures nor June's `YearToDateContext`, because year-to-date
+/// sums frozen numeric columns and never master data (ADR-0012).
+#[sqlx::test]
+async fn a_correction_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    for period in [march(), april(), may()] {
+        finalize_period(&pool, &employer_id, period).await;
+    }
+
+    let june_context_before = build_year_to_date_context(&pool, &employment_id, june().end())
+        .await
+        .unwrap();
+    let fingerprints_before = frozen_figures(&pool, &employment_id).await;
+    assert_ne!(
+        june_context_before.prior_taxable_remuneration(),
+        Money::from_cents(0).unwrap(),
+        "the totals under test must be non-zero, or this proves nothing"
+    );
+
+    // Double the salary every one of those three periods was calculated
+    // from. Nothing already finalized may notice.
+    let diverging = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        march().start(),
+        Money::from_cents(1000000).unwrap(),
+        &[march(), april(), may()],
+        "the salary was captured at half its true value",
+        "actor",
+    )
+    .await
+    .unwrap();
+    assert_eq!(diverging, vec![march(), april(), may()]);
+
+    assert_eq!(
+        build_year_to_date_context(&pool, &employment_id, june().end())
+            .await
+            .unwrap(),
+        june_context_before,
+        "a master-data correction moves no year-to-date total"
+    );
+    assert_eq!(
+        frozen_figures(&pool, &employment_id).await,
+        fingerprints_before,
+        "a master-data correction moves no finalized figure"
+    );
+}
+
+/// A correction that would move a row onto a date this Employment already
+/// has one at is a domain refusal naming the collision, never a raw database
+/// error from `UNIQUE (employment_id, effective_from)`.
+#[sqlx::test]
+async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        may().start(),
+        Money::from_cents(600000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let result = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        may().start(),
+        Money::from_cents(550000).unwrap(),
+        &[],
+        "the terms began in May",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::CompensationTermsAlreadyExistAt {
+            employment_id: employment_id.clone(),
+            effective_from: may().start(),
+        })
+    );
+    assert_eq!(compensation_terms_row_count(&pool, &employment_id).await, 2);
+    assert_eq!(
+        basic_pay_cents_at(&pool, &employment_id, march().start()).await,
+        500000
+    );
+}
+
+/// §6.5's "March correction, end to end", as one test: correct the master
+/// data by splitting the row, reverse March, replace it through a
+/// CorrectionRun, and check what each step was for.
+///
+/// The point of the whole ticket is here. The correction is what lets the
+/// replacement calculate from a corrected fact (§6.5 step 4, spec 76), the
+/// split is what leaves April and May reading the `BasicPay` they always
+/// read (step 6, spec 82), and only the Reversal-plus-Replacement moves a
+/// figure — the correction in step 1 moved none (guard 3, spec 81).
+#[sqlx::test]
+async fn the_march_correction_end_to_end(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let wrong_pay = Money::from_cents(500000).unwrap();
+    let employment_id = an_employment_with_basic_pay(&pool, &employer_id, wrong_pay).await;
+
+    let march_run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, march(), march().end(), "actor")
+            .await
+            .unwrap();
+    calculate_payroll_run(&pool, &march_run_id, "calculator")
+        .await
+        .unwrap();
+    let march_original = finalize_payroll_run(&pool, &march_run_id, "finalizer")
+        .await
+        .unwrap()
+        .finalized
+        .into_iter()
+        .find(|(id, _)| id == &employment_id)
+        .expect("March must have finalized")
+        .1;
+    finalize_period(&pool, &employer_id, april()).await;
+    finalize_period(&pool, &employer_id, may()).await;
+
+    let april_before = finalized_payroll_fingerprint(&pool, &employment_id, april().end()).await;
+    let may_before = finalized_payroll_fingerprint(&pool, &employment_id, may().end()).await;
+    let june_context_before = build_year_to_date_context(&pool, &employment_id, june().end())
+        .await
+        .unwrap();
+
+    // 1. Correct master data: the terms only took effect in April, and March
+    //    was always a different, higher amount.
+    let diverging = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        april().start(),
+        wrong_pay,
+        &[march(), april(), may()],
+        "March rate captured wrong; these terms began in April",
+        "actor",
+    )
+    .await
+    .unwrap();
+    assert_eq!(diverging, vec![march(), april(), may()]);
+
+    let true_march_pay = Money::from_cents(550000).unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        true_march_pay,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // Nothing has moved yet. Correcting master data is not paying anybody.
+    assert_eq!(
+        build_year_to_date_context(&pool, &employment_id, june().end())
+            .await
+            .unwrap(),
+        june_context_before,
+    );
+
+    // 2, 3, 4, 5. Reverse March and replace it through a CorrectionRun,
+    //    which assembles its PayrollInput from the corrected master data.
+    reverse_finalized_payroll(
+        &pool,
+        &march_original,
+        "March was calculated wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+    let correction_run_id = create_correction_run(
+        &pool,
+        &employer_id,
+        march(),
+        date(2026, 6, 5),
+        "March salary was captured wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+    add_employment_to_correction_run(
+        &pool,
+        &correction_run_id,
+        &employment_id,
+        Some(&march_original),
+        "actor",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        calculate_payroll_run(&pool, &correction_run_id, "calculator")
+            .await
+            .unwrap(),
+        Vec::new(),
+    );
+    finalize_payroll_run(&pool, &correction_run_id, "finalizer")
+        .await
+        .unwrap();
+
+    // The replacement calculated from the corrected fact: March's only
+    // earning is its BasicPay, so its frozen TaxableRemuneration moved by
+    // exactly the amount the correction added to it.
+    let march_replacement_taxable: i64 = sqlx::query_scalar(
+        "SELECT finalized.taxable_remuneration
+         FROM live_finalized_payroll AS live
+         JOIN finalized_payroll AS finalized ON finalized.id = live.finalized_payroll_id
+         WHERE live.employment_id = $1 AND live.period_end = $2",
+    )
+    .bind(employment_id.as_str())
+    .bind(march().end())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let march_original_taxable: i64 = sqlx::query_scalar(
+        "SELECT taxable_remuneration FROM finalized_payroll WHERE id = $1::uuid",
+    )
+    .bind(march_original.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        march_replacement_taxable - march_original_taxable,
+        true_march_pay.cents() - wrong_pay.cents(),
+    );
+
+    // 6. April and May are untouched, and June's year-to-date now picks up
+    //    the Replacement rather than the reversed record.
+    assert_eq!(
+        finalized_payroll_fingerprint(&pool, &employment_id, april().end()).await,
+        april_before,
+    );
+    assert_eq!(
+        finalized_payroll_fingerprint(&pool, &employment_id, may().end()).await,
+        may_before,
+    );
+    let june_context_after = build_year_to_date_context(&pool, &employment_id, june().end())
+        .await
+        .unwrap();
+    assert!(
+        june_context_after.prior_taxable_remuneration()
+            > june_context_before.prior_taxable_remuneration(),
+        "only the Reversal plus Replacement moves a figure, and this one did"
+    );
 }

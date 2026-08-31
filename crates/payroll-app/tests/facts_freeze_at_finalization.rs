@@ -90,6 +90,7 @@ async fn a_fully_declared_employment(
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
         "a reason",
         "actor",
     )
@@ -388,6 +389,7 @@ async fn recording_a_present_provident_fund_status_after_finalization_leaves_ear
         &employment_id,
         date(2026, 8, 1),
         UnsupportedDeductionStatus::Present(kinds),
+        &[],
         "a reason",
         "actor",
     )
@@ -1070,6 +1072,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_de
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
         "a reason",
         "actor",
     )
