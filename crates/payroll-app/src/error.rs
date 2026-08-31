@@ -318,6 +318,17 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         period: PayPeriod,
     },
+    /// `FinalizePayrollRun` was asked to finalize a Correction run whose
+    /// single member names no target, while an unreplaced reversed
+    /// `FinalizedPayroll` for that Employment and period does exist. §4.8
+    /// sets lineage *exactly* when a reversed predecessor exists, so a null
+    /// target here would leave that predecessor unreplaced forever and fork
+    /// the chain ADR-0015 keeps linear. The predecessor to name is carried.
+    CorrectionLineageOmitsAReversedPredecessor {
+        employment_id: EmploymentId,
+        period: PayPeriod,
+        finalized_payroll_id: FinalizedPayrollId,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -613,6 +624,18 @@ impl std::fmt::Display for PayrollAppError {
                 period.start(),
                 period.end()
             ),
+            Self::CorrectionLineageOmitsAReversedPredecessor {
+                employment_id,
+                period,
+                finalized_payroll_id,
+            } => write!(
+                f,
+                "finalizing Correction for Employment {employment_id} refused: no target was \
+                 named, but reversed FinalizedPayroll {finalized_payroll_id} for the PayPeriod \
+                 {} to {} is still unreplaced and must be named as the target",
+                period.start(),
+                period.end()
+            ),
         }
     }
 }
@@ -675,7 +698,8 @@ impl std::error::Error for PayrollAppError {
             | Self::CorrectionTargetDoesNotMatch { .. }
             | Self::CorrectionTargetNotReversed(_)
             | Self::CorrectionTargetAlreadyReplaced(_)
-            | Self::CorrectionLineageNotLegitimate { .. } => None,
+            | Self::CorrectionLineageNotLegitimate { .. }
+            | Self::CorrectionLineageOmitsAReversedPredecessor { .. } => None,
         }
     }
 }

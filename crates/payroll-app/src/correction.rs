@@ -167,7 +167,12 @@ pub async fn add_employment_to_correction_run(
 /// Employer and this run's own period end, and carries a `Reversal` (§4.8)
 /// — and returns its frozen snapshot version and input for
 /// [`prepopulate_earnings`] to read.
-async fn validate_correction_target(
+///
+/// Run twice: here, so a caller learns at once that its target is wrong, and
+/// again inside the finalization transaction (§5.3 step 3), because that is
+/// where the spec puts it and where the run's `FOR UPDATE` lock makes the
+/// answer hold for the insert that follows.
+pub(crate) async fn validate_correction_target(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
@@ -232,11 +237,16 @@ async fn prepopulate_earnings(
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     }
 
+    // A snapshot at the current version is expected to deserialize, but the
+    // failure is degraded rather than panicked on: §9.1's promise is that an
+    // unreadable snapshot starts the run empty and says so, and a panic is
+    // the one shape that does neither. The version stamp is what the caller
+    // is told, because it is what identifies the shape that would not read.
     let earnings: Vec<Earning> = match input_json.get("earnings") {
-        Some(earnings_json) => serde_json::from_value(earnings_json.clone()).expect(
-            "a snapshot at the current SNAPSHOT_SCHEMA_VERSION always carries a readable \
-             earnings array",
-        ),
+        Some(earnings_json) => match serde_json::from_value(earnings_json.clone()) {
+            Ok(earnings) => earnings,
+            Err(_) => return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version }),
+        },
         None => Vec::new(),
     };
 
@@ -266,6 +276,24 @@ async fn prepopulate_earnings(
 /// removed with a reason from the finalized Ordinary run for `period`, or it
 /// was never a member of that run at all.
 ///
+/// §4.8 sets lineage **exactly when a reversed predecessor exists**, so both
+/// halves of that biconditional are checked here, in this order:
+///
+/// 1. No unreplaced reversed `FinalizedPayroll` for this Employment and
+///    period may exist. One that does is what a null target would strand:
+///    the predecessor would never be replaced, and a later correction would
+///    fork the chain ADR-0015 keeps linear (`F1 → F2 → F3`).
+/// 2. The finalized Ordinary run for the period must actually account for
+///    this Employment's absence — by not holding it at all, or by holding it
+///    removed with a reason.
+///
+/// Both of §4.8's cases presuppose that Ordinary run **has finalized**: they
+/// exist because §4.6 forbids a second one, which only bites once the first
+/// is history. Before then the Ordinary run is still the right way to pay
+/// the period, and a Correction that ran first would collide with it on the
+/// `live_finalized_payroll` primary key — turning a premature correction
+/// into a payroll nobody can finalize.
+///
 /// Called from `finalize_payroll_run`, not from
 /// [`add_employment_to_correction_run`] — nothing before finalization can
 /// promise a `Draft` run's answer will not change, so the check has to run
@@ -277,8 +305,54 @@ pub(crate) async fn verify_null_lineage_is_legitimate(
     employment_id: &EmploymentId,
     period: PayPeriod,
 ) -> Result<(), PayrollAppError> {
-    let membership: Option<(bool, String)> = sqlx::query_as(
-        "SELECT payroll_run_employment.removed_at IS NOT NULL, payroll_run.status
+    // A reversed record nothing has replaced yet is the "reversed
+    // predecessor exists" half of §4.8. An *already replaced* one is not:
+    // in `F1 → F2 → F3` both F1 and F2 are reversed, and only F2 — the one
+    // at the end of the chain — is still waiting to be named.
+    let unreplaced_predecessor: Option<String> = sqlx::query_scalar(
+        "SELECT predecessor.id::text
+         FROM finalized_payroll AS predecessor
+         JOIN reversal ON reversal.finalized_payroll_id = predecessor.id
+         WHERE predecessor.employment_id = $1
+           AND predecessor.employer_id = $2
+           AND predecessor.period_end = $3
+           AND NOT EXISTS (
+               SELECT 1 FROM finalized_payroll AS replacement
+               WHERE replacement.replaces_finalized_payroll_id = predecessor.id
+           )
+         ORDER BY predecessor.finalized_at
+         LIMIT 1",
+    )
+    .bind(employment_id.as_str())
+    .bind(employer_id.as_str())
+    .bind(period.end())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(predecessor) = unreplaced_predecessor {
+        return Err(
+            PayrollAppError::CorrectionLineageOmitsAReversedPredecessor {
+                employment_id: employment_id.clone(),
+                period,
+                finalized_payroll_id: FinalizedPayrollId::new(predecessor),
+            },
+        );
+    }
+
+    // §4.6 permits at most one Ordinary run per Employer and PayPeriod, so
+    // this is one row or none.
+    let ordinary_run_status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM payroll_run
+         WHERE employer_id = $1 AND period_end = $2 AND kind = 'ordinary'",
+    )
+    .bind(employer_id.as_str())
+    .bind(period.end())
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let ordinary_run_is_finalized = ordinary_run_status.as_deref() == Some("finalized");
+
+    let removed_with_a_reason: Option<bool> = sqlx::query_scalar(
+        "SELECT payroll_run_employment.removed_at IS NOT NULL
          FROM payroll_run_employment
          JOIN payroll_run ON payroll_run.id = payroll_run_employment.payroll_run_id
          WHERE payroll_run_employment.employment_id = $1
@@ -294,16 +368,13 @@ pub(crate) async fn verify_null_lineage_is_legitimate(
 
     // `None` — never a member of the Ordinary run for this period at all
     // (§4.8's second case). `Some` — a member of it; legitimate only when
-    // removed with a reason from a run that went on to finalize (§4.8's
-    // first case) — a removal from a run still Draft or Calculated says
-    // nothing yet, the same reason `sequencing.rs` gives for its own
-    // `removed_with_a_reason` read.
-    let legitimate = match membership {
-        None => true,
-        Some((removed_with_a_reason, status)) => removed_with_a_reason && status == "finalized",
-    };
+    // removed with a reason (§4.8's first case). A removal from a run still
+    // Draft or Calculated says nothing yet, which the finalized-run gate
+    // above already covers — the same reason `sequencing.rs` gives for its
+    // own `removed_with_a_reason` read.
+    let accounted_for = removed_with_a_reason.unwrap_or(true);
 
-    if legitimate {
+    if ordinary_run_is_finalized && accounted_for {
         Ok(())
     } else {
         Err(PayrollAppError::CorrectionLineageNotLegitimate {

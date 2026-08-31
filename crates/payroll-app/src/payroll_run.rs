@@ -5,8 +5,6 @@
 //! ADR-0015), so a single entry point taking a `kind` would branch on its
 //! first line and share nothing after it.
 
-use std::collections::HashMap;
-
 use chrono::NaiveDate;
 use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, TaxYear};
 use sqlx::PgPool;
@@ -422,26 +420,6 @@ pub(crate) async fn active_member_ids(
     .fetch_all(&mut **tx)
     .await?;
     Ok(member_ids)
-}
-
-/// The declared `replaces_finalized_payroll_id` for every active member of
-/// `payroll_run_id`, by `EmploymentId`. Always `None` for an Ordinary
-/// member — only a Correction run's single membership row ever carries one
-/// (§4.8) — so `finalize_payroll_run` reads it unconditionally, by kind,
-/// rather than branching to skip it for Ordinary.
-pub(crate) async fn declared_lineage_by_member(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    payroll_run_id: &PayrollRunId,
-) -> Result<HashMap<String, Option<String>>, PayrollAppError> {
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT employment_id, replaces_finalized_payroll_id::text
-         FROM payroll_run_employment
-         WHERE payroll_run_id = $1::uuid AND removed_at IS NULL",
-    )
-    .bind(payroll_run_id.as_str())
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rows.into_iter().collect())
 }
 
 /// Locks a run, verifies working state may still change, and puts the run

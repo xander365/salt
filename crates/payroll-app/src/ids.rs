@@ -14,8 +14,10 @@ pub(crate) fn new_id() -> String {
 /// exactly like the pure crate's `TEXT`-backed ids, with an explicit
 /// `::uuid`/`::text` cast in the SQL where the column type must be pinned
 /// down. There is no public constructor from a bare string — `new` is
-/// private to the module that mints the row, so the only way a caller holds
-/// one is by receiving it back from the use case that inserted it.
+/// `pub(crate)`, so the only way a caller *outside* this crate holds one is
+/// by receiving it back from the use case that inserted it. Inside the
+/// crate, any module that has read the id back out of its own column may
+/// wrap it: `correction.rs` names a reversed predecessor it found that way.
 ///
 /// The shape is written once here because it is the same shape every time;
 /// each type keeps its own doc comment at its own definition.
@@ -26,7 +28,7 @@ macro_rules! app_id {
         pub struct $name(String);
 
         impl $name {
-            fn new(id: impl Into<String>) -> Self {
+            pub(crate) fn new(id: impl Into<String>) -> Self {
                 $name(id.into())
             }
 

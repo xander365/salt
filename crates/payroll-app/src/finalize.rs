@@ -28,11 +28,14 @@
 //! (§7.1) for every member, converting what would otherwise be silent
 //! under-withholding into a visible refusal naming the Employment and the
 //! unresolved period (see [`crate::sequencing`]). The Correction column
-//! checks its own period only (§7.4): when its single member's declared
-//! target is `None`, [`verify_null_lineage_is_legitimate`] proves one of
-//! §4.8's two null-lineage cases actually holds; a named target is trusted
-//! from [`crate::correction::add_employment_to_correction_run`], which
-//! already checked it and cannot be undone since (no un-reversal exists).
+//! checks its own period only (§7.4): a named target is re-verified as
+//! reversed and matching by [`validate_correction_target`], and a `None`
+//! target must have [`verify_null_lineage_is_legitimate`] prove one of
+//! §4.8's two null-lineage cases actually holds. Both run here, inside the
+//! transaction and under the run's own lock, because that is where §5.3
+//! step 3 puts them — `add_employment_to_correction_run` checks a named
+//! target too, so a caller learns at once, but that earlier answer is not
+//! what the insert below relies on.
 //! `replaces_finalized_payroll_id` is then copied, unconditionally, from
 //! each member's own membership row into its new `FinalizedPayroll` — `None`
 //! for every Ordinary member, since only a Correction's row ever carries one
@@ -50,6 +53,8 @@
 //! on `live_finalized_payroll`, not on the isolation level or an
 //! application-side status check (§5.4): `READ COMMITTED` is sufficient.
 
+use std::collections::HashMap;
+
 use chrono::NaiveDate;
 use payroll::{
     EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollInput, PayrollRules, TaxYear,
@@ -59,13 +64,12 @@ use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
-use crate::correction::verify_null_lineage_is_legitimate;
+use crate::correction::{validate_correction_target, verify_null_lineage_is_legitimate};
 use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
 use crate::payroll_run::{
-    EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids,
-    declared_lineage_by_member, lock_run,
+    EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run,
 };
 use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
 
@@ -144,7 +148,7 @@ pub async fn finalize_payroll_run(
     // the snapshot from that one value, so there is no second period for it
     // to disagree with.
     let period = run.period;
-    let employer_id = run.employer_id;
+    let employer_id = run.employer_id.clone();
 
     let schedule = pay_schedule_for_employer(&mut tx, &employer_id).await?;
 
@@ -155,10 +159,15 @@ pub async fn finalize_payroll_run(
     let tax_year = TaxYear::for_period_end(period.end());
 
     let member_ids = active_member_ids(&mut tx, payroll_run_id).await?;
-    // Captured before `member_ids` is consumed below, for the later-periods
-    // warning a Correction returns (§6.4) — always `None` for Ordinary,
-    // where the warning stays empty.
-    let correction_employment_id = member_ids.first().cloned();
+    // A Correction run holds at most one member (§4.8), and both the
+    // null-lineage check below and the later-periods warning after it are
+    // about that one Employment. Read once, here, so the two never disagree
+    // about which member they mean. `None` for an Ordinary run, whatever its
+    // membership, and for a vacuous Correction.
+    let corrected_employment_id = match run.kind {
+        RunKind::Correction => member_ids.first().cloned().map(EmploymentId::new),
+        RunKind::Ordinary => None,
+    };
 
     // Every member's `employment` row is locked *before* any master data is
     // read (ADR-0013): `record_opening_balance` and `declare_prior_employment`
@@ -200,23 +209,34 @@ pub async fn finalize_payroll_run(
         }
         RunKind::Correction => {
             // §7.4: a Correction run checks its own period only — no walk
-            // back, no walk forward. Its one member's declared target, when
-            // `None`, must itself prove one of §4.8's two null-lineage
-            // cases; a named target was already checked by
-            // `add_employment_to_correction_run` and cannot have stopped
-            // being reversed since (no un-reversal exists), so it is not
-            // re-checked here.
-            if let Some(member_id) = member_ids.first() {
-                let target = lineage_by_member.get(member_id).cloned().flatten();
-                if target.is_none() {
-                    let employment_id = EmploymentId::new(member_id.clone());
-                    verify_null_lineage_is_legitimate(
-                        &mut tx,
-                        &employer_id,
-                        &employment_id,
-                        period,
-                    )
-                    .await?;
+            // back, no walk forward. §5.3 step 3 puts both halves of the
+            // check here, inside the transaction, under the run's own
+            // `FOR UPDATE` lock: a named target must (still) be reversed and
+            // matching, and a `None` target must itself prove one of §4.8's
+            // two null-lineage cases. `add_employment_to_correction_run`
+            // checks a named target too, so a caller learns at once, but
+            // that answer is not what this insert relies on.
+            if let Some(employment_id) = &corrected_employment_id {
+                match lineage_by_member.get(employment_id).cloned().flatten() {
+                    Some(target) => {
+                        validate_correction_target(
+                            &mut tx,
+                            payroll_run_id,
+                            employment_id,
+                            &run,
+                            &target,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        verify_null_lineage_is_legitimate(
+                            &mut tx,
+                            &employer_id,
+                            employment_id,
+                            period,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -270,7 +290,8 @@ pub async fn finalize_payroll_run(
             });
         }
 
-        let replaces_finalized_payroll_id = lineage_by_member.get(&member_id).cloned().flatten();
+        let replaces_finalized_payroll_id =
+            lineage_by_member.get(&employment_id).cloned().flatten();
         ready.push((
             employment_id,
             current_input,
@@ -291,7 +312,9 @@ pub async fn finalize_payroll_run(
             &input,
             &rules,
             &calculation,
-            replaces_finalized_payroll_id.as_deref(),
+            replaces_finalized_payroll_id
+                .as_ref()
+                .map(FinalizedPayrollId::as_str),
             finalized_by,
         )
         .await?;
@@ -335,17 +358,11 @@ pub async fn finalize_payroll_run(
     // untouched by this transaction. Read after everything else succeeds, on
     // the same connection, so it is a consistent account of what this
     // finalization actually left behind.
-    let later_finalized_periods = match (run.kind, &correction_employment_id) {
-        (RunKind::Correction, Some(employment_id)) => {
-            later_finalized_periods_for(
-                &mut tx,
-                &EmploymentId::new(employment_id.clone()),
-                tax_year,
-                period.end(),
-            )
-            .await?
+    let later_finalized_periods = match &corrected_employment_id {
+        Some(employment_id) => {
+            later_finalized_periods_for(&mut tx, employment_id, period.end()).await?
         }
-        _ => Vec::new(),
+        None => Vec::new(),
     };
 
     tx.commit().await?;
@@ -355,25 +372,29 @@ pub async fn finalize_payroll_run(
     })
 }
 
-/// Every already-finalized `PayPeriod` strictly after `period_end`, live and
-/// in the same TaxYear, for `employment_id` — the list a Correction's caller
-/// acts on (§6.4): later periods are never rewritten, and cumulative PAYE
-/// absorbs the difference at their own next calculation.
+/// Every already-finalized `PayPeriod` strictly after `period_end`, live,
+/// for `employment_id` — the list a Correction's caller acts on (§6.4):
+/// later periods are never rewritten, and cumulative PAYE absorbs the
+/// difference at their own next calculation.
+///
+/// Not narrowed to the corrected period's own TaxYear. §6.4 names "the later
+/// finalized periods" without qualification, and the caller is the one
+/// placed to judge: cumulative PAYE does restart each TaxYear (ADR-0001), so
+/// a period in the next one usually needs nothing — but "usually" is a
+/// judgement, and silently dropping the rows takes it away from them.
 async fn later_finalized_periods_for(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     employment_id: &EmploymentId,
-    tax_year: TaxYear,
     period_end: NaiveDate,
 ) -> Result<Vec<PayPeriod>, PayrollAppError> {
     let rows: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
         "SELECT finalized.period_start, finalized.period_end
          FROM live_finalized_payroll AS live
          JOIN finalized_payroll AS finalized ON finalized.id = live.finalized_payroll_id
-         WHERE live.employment_id = $1 AND finalized.tax_year = $2 AND live.period_end > $3
+         WHERE live.employment_id = $1 AND live.period_end > $2
          ORDER BY live.period_end",
     )
     .bind(employment_id.as_str())
-    .bind(tax_year.starting_year())
     .bind(period_end)
     .fetch_all(&mut **tx)
     .await?;
@@ -383,6 +404,39 @@ async fn later_finalized_periods_for(
         .map(|(start, end)| {
             PayPeriod::new(start, end)
                 .expect("finalized_payroll CHECK: period_end is never before period_start")
+        })
+        .collect())
+}
+
+/// The declared `replaces_finalized_payroll_id` of every active member of
+/// `payroll_run_id` (§4.8). Always `None` for an Ordinary member — only a
+/// Correction run's single membership row ever carries one — so
+/// [`finalize_payroll_run`] reads it unconditionally, for every kind, rather
+/// than branching to skip it.
+///
+/// Lives here rather than beside the other membership reads in
+/// `payroll_run.rs` because [`FinalizedPayrollId`] is minted here, and
+/// finalization is its only reader.
+async fn declared_lineage_by_member(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<HashMap<EmploymentId, Option<FinalizedPayrollId>>, PayrollAppError> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT employment_id, replaces_finalized_payroll_id::text
+         FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND removed_at IS NULL",
+    )
+    .bind(payroll_run_id.as_str())
+    .fetch_all(&mut **tx)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(employment_id, target)| {
+            (
+                EmploymentId::new(employment_id),
+                target.map(FinalizedPayrollId::new),
+            )
         })
         .collect())
 }

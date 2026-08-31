@@ -124,6 +124,42 @@ async fn finalize_and_reverse_march(
     finalized_payroll_id
 }
 
+/// Creates, calculates and finalizes a Correction run for `period()` holding
+/// `employment_id` alone, declaring `replaces`, and returns the
+/// `FinalizedPayrollId` it minted — one link of the chain.
+async fn finalize_a_correction(
+    pool: &PgPool,
+    employer_id: &EmployerId,
+    employment_id: &EmploymentId,
+    replaces: Option<&FinalizedPayrollId>,
+) -> FinalizedPayrollId {
+    let run_id = create_correction_run(
+        pool,
+        employer_id,
+        period(),
+        date(2026, 7, 5),
+        "the figure was wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+    add_employment_to_correction_run(pool, &run_id, employment_id, replaces, "actor")
+        .await
+        .unwrap();
+    calculate_payroll_run(pool, &run_id, "calculator")
+        .await
+        .unwrap();
+    let outcome = finalize_payroll_run(pool, &run_id, "finalizer")
+        .await
+        .unwrap();
+    outcome
+        .finalized
+        .into_iter()
+        .find(|(id, _)| id == employment_id)
+        .expect("the Correction's one member must have finalized")
+        .1
+}
+
 async fn run_status(pool: &PgPool, run_id: &PayrollRunId) -> String {
     sqlx::query_scalar("SELECT status FROM payroll_run WHERE id = $1::uuid")
         .bind(run_id.as_str())
@@ -481,9 +517,19 @@ async fn null_lineage_is_legitimate_after_a_reasoned_removal_from_the_finalized_
 #[sqlx::test]
 async fn null_lineage_is_legitimate_when_the_employment_was_never_a_member(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
-    // No Ordinary run is ever created for `period()`: this Employment was
-    // created too late — with a backdated start date, in the real scenario
-    // — to have ever been auto-proposed into one.
+    // March's Ordinary run happens first, for a colleague, and finalizes.
+    // Only then is this Employment created — with a backdated start date —
+    // so it was never auto-proposed into that run and §4.6 forbids a second
+    // one. That is §4.8's second null-lineage case.
+    let colleague_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-2",
+        Money::from_cents(1200000).unwrap(),
+    )
+    .await;
+    finalize_march(&pool, &employer_id, &colleague_id).await;
+
     let employment_id = a_fully_declared_employment(
         &pool,
         &employer_id,
@@ -563,6 +609,157 @@ async fn null_lineage_is_refused_for_an_employment_that_was_an_unremoved_finaliz
             employment_id,
             period: period(),
         })
+    );
+}
+
+/// §4.8 sets lineage *exactly* when a reversed predecessor exists, so the
+/// biconditional bites from the other side too: once a null-lineage
+/// correction has itself been reversed, the next correction must name it.
+/// Letting a second null target through would leave the first replacement
+/// unreplaced forever and fork the chain ADR-0015 keeps linear.
+#[sqlx::test]
+async fn null_lineage_is_refused_while_a_reversed_predecessor_is_unreplaced(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let colleague_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-2",
+        Money::from_cents(1200000).unwrap(),
+    )
+    .await;
+    finalize_march(&pool, &employer_id, &colleague_id).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+
+    // A legitimate null-lineage correction — the Employment was never a
+    // member — which is then found wrong in its turn and reversed.
+    let first = finalize_a_correction(&pool, &employer_id, &employment_id, None).await;
+    reverse_finalized_payroll(&pool, &first, "the backdated pay was wrong too", "actor")
+        .await
+        .unwrap();
+
+    let run_id = create_correction_run(
+        &pool,
+        &employer_id,
+        period(),
+        date(2026, 7, 5),
+        "should have named the first correction as its target",
+        "actor",
+    )
+    .await
+    .unwrap();
+    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+        .await
+        .unwrap();
+    calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::CorrectionLineageOmitsAReversedPredecessor {
+                employment_id,
+                period: period(),
+                finalized_payroll_id: first,
+            }
+        )
+    );
+}
+
+/// Both of §4.8's null-lineage cases presuppose the Ordinary run for the
+/// period has finalized — they exist because §4.6 forbids a second one, and
+/// that only bites once the first is history. A Correction that runs before
+/// it would collide with it on the `live_finalized_payroll` primary key.
+#[sqlx::test]
+async fn null_lineage_is_refused_before_the_ordinary_run_for_the_period_finalizes(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    // No Ordinary run for `period()` exists at all: March has simply not
+    // been run yet, and running it is still the right way to pay it.
+
+    let run_id = create_correction_run(
+        &pool,
+        &employer_id,
+        period(),
+        date(2026, 6, 5),
+        "jumping the gun on March",
+        "actor",
+    )
+    .await
+    .unwrap();
+    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+        .await
+        .unwrap();
+    calculate_payroll_run(&pool, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::CorrectionLineageNotLegitimate {
+            employment_id,
+            period: period(),
+        })
+    );
+}
+
+/// ADR-0015's chain, walked twice through the public API:
+/// `F1 → reversed → F2 (replaces F1) → reversed → F3 (replaces F2)`.
+#[sqlx::test]
+async fn repeated_corrections_form_a_chain_rather_than_a_tree(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+
+    let f1 = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let f2 = finalize_a_correction(&pool, &employer_id, &employment_id, Some(&f1)).await;
+    reverse_finalized_payroll(&pool, &f2, "the first correction was wrong too", "actor")
+        .await
+        .unwrap();
+    let f3 = finalize_a_correction(&pool, &employer_id, &employment_id, Some(&f2)).await;
+
+    // Each link names exactly one predecessor, and F1 is named once only.
+    let lineage: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id::text, replaces_finalized_payroll_id::text
+         FROM finalized_payroll WHERE employment_id = $1 ORDER BY finalized_at",
+    )
+    .bind(employment_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        lineage,
+        vec![
+            (f1.to_string(), None),
+            (f2.to_string(), Some(f1.to_string())),
+            (f3.to_string(), Some(f2.to_string())),
+        ]
+    );
+    assert_eq!(
+        live_finalized_payroll_id(&pool, &employment_id, period().end()).await,
+        Some(f3.to_string())
     );
 }
 
