@@ -27,7 +27,7 @@ mod year_to_date;
 
 pub use action_log::ActionType;
 pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
-pub use compensation_terms::record_compensation_terms;
+pub use compensation_terms::{correct_compensation_terms, record_compensation_terms};
 pub use correction::{EarningPrePopulation, add_employment_to_correction_run};
 pub use employer::{change_pay_schedule, create_employer};
 pub use employment::{create_employment, get_employment_snapshot, void_employment};

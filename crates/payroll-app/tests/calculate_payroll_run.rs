@@ -86,6 +86,7 @@ async fn a_fully_declared_employment(
         &employment_id,
         well_before_the_period(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await
@@ -392,6 +393,7 @@ async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
         &blocked,
         well_before_the_period(),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await
@@ -532,6 +534,7 @@ async fn a_member_that_starts_failing_has_its_stale_working_calculation_cleared(
             ])
             .unwrap(),
         ),
+        "a reason",
         "actor",
     )
     .await

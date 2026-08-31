@@ -351,6 +351,25 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         period: PayPeriod,
     },
+    /// `CorrectCompensationTerms` was given a reason that is empty or only
+    /// whitespace — the same up-front demand every other mandatory reason in
+    /// this crate makes (§6.5 guard 1).
+    CompensationTermsCorrectionReasonCannotBeEmpty,
+    /// `CorrectCompensationTerms` was asked to correct a `CompensationTerms`
+    /// row that does not exist at the given `(employment_id, effective_from)`
+    /// — the pair that identifies one, since the table exposes no id to a
+    /// caller (`UNIQUE (employment_id, effective_from)`, migration 0003).
+    NoCompensationTermsRowAt {
+        employment_id: EmploymentId,
+        effective_from: NaiveDate,
+    },
+    /// `DeclareUnsupportedDeductionStatus` was given a reason that is empty
+    /// or only whitespace — the same up-front demand as
+    /// [`Self::CompensationTermsCorrectionReasonCannotBeEmpty`]. Every write
+    /// against this fact, first declaration or later change, is a
+    /// correction §6.5 requires a reason for; the ActionType catalogue names
+    /// only one act here (see `ActionType::UnsupportedDeductionStatusCorrected`).
+    UnsupportedDeductionDeclarationReasonCannotBeEmpty,
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -669,6 +688,21 @@ impl std::fmt::Display for PayrollAppError {
                 period.start(),
                 period.end()
             ),
+            Self::CompensationTermsCorrectionReasonCannotBeEmpty => {
+                write!(f, "a CompensationTerms correction reason must not be empty")
+            }
+            Self::NoCompensationTermsRowAt {
+                employment_id,
+                effective_from,
+            } => write!(
+                f,
+                "no CompensationTerms row exists for Employment {employment_id} effective \
+                 {effective_from}"
+            ),
+            Self::UnsupportedDeductionDeclarationReasonCannotBeEmpty => write!(
+                f,
+                "an UnsupportedDeductionStatus declaration reason must not be empty"
+            ),
         }
     }
 }
@@ -733,7 +767,10 @@ impl std::error::Error for PayrollAppError {
             | Self::CorrectionTargetAlreadyReplaced(_)
             | Self::CorrectionLineageNotLegitimate { .. }
             | Self::CorrectionLineageOmitsAReversedPredecessor { .. }
-            | Self::CorrectionPeriodAlreadyHasALivePayroll { .. } => None,
+            | Self::CorrectionPeriodAlreadyHasALivePayroll { .. }
+            | Self::CompensationTermsCorrectionReasonCannotBeEmpty
+            | Self::NoCompensationTermsRowAt { .. }
+            | Self::UnsupportedDeductionDeclarationReasonCannotBeEmpty => None,
         }
     }
 }

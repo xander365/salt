@@ -296,6 +296,7 @@ async fn a_confirmed_none_unsupported_deduction_status_is_recorded_with_no_kinds
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await
@@ -327,6 +328,7 @@ async fn a_present_unsupported_deduction_status_is_recorded_with_its_named_kinds
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::Present(kinds),
+        "a reason",
         "actor",
     )
     .await
@@ -357,6 +359,7 @@ async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(po
         &employment_id,
         date(2026, 1, 10),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await;
@@ -385,6 +388,7 @@ async fn declaring_unsupported_deduction_status_as_unknown_is_refused(pool: PgPo
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::Unknown,
+        "a reason",
         "actor",
     )
     .await;
@@ -414,6 +418,7 @@ async fn declaring_unsupported_deduction_status_against_a_missing_employment_is_
         &missing,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await;
@@ -433,6 +438,7 @@ async fn a_voided_employment_accepts_no_unsupported_deduction_status_declaration
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await;
@@ -461,6 +467,7 @@ async fn a_later_effective_from_adds_a_second_row_rather_than_rewriting_the_firs
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await
@@ -473,6 +480,7 @@ async fn a_later_effective_from_adds_a_second_row_rather_than_rewriting_the_firs
         &employment_id,
         date(2026, 2, 26),
         UnsupportedDeductionStatus::Present(kinds),
+        "a reason",
         "actor",
     )
     .await
@@ -508,6 +516,7 @@ async fn redeclaring_the_same_effective_from_replaces_the_row_and_logs_a_correct
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await
@@ -521,6 +530,7 @@ async fn redeclaring_the_same_effective_from_replaces_the_row_and_logs_a_correct
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::Present(kinds),
+        "a reason",
         "actor",
     )
     .await
@@ -572,6 +582,7 @@ async fn an_unattributed_unsupported_deduction_declaration_is_refused_by_the_dat
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "",
     )
     .await;
@@ -712,6 +723,7 @@ async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: P
         &employment_id,
         date(2026, 2, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await
@@ -723,6 +735,7 @@ async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: P
         &employment_id,
         date(2026, 7, 26),
         UnsupportedDeductionStatus::Present(kinds.clone()),
+        "a reason",
         "actor",
     )
     .await
@@ -768,6 +781,7 @@ async fn reading_unsupported_deduction_status_for_a_voided_employment_is_refused
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
+        "a reason",
         "actor",
     )
     .await

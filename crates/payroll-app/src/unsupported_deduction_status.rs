@@ -3,7 +3,7 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    EmploymentId, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    EmploymentId, PayPeriod, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
     validate_effective_from_is_a_period_start,
 };
 use sqlx::{Acquire, PgPool, Postgres};
@@ -11,6 +11,7 @@ use sqlx::{Acquire, PgPool, Postgres};
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
+use crate::freeze::live_finalized_periods_in_span;
 
 /// Records the `UnsupportedDeductionDeclaration` in force from
 /// `effective_from`, or replaces whichever one already governs that exact
@@ -33,13 +34,30 @@ use crate::error::PayrollAppError;
 /// This writes no pre-finalization gate: `calculate` already refuses
 /// `Unknown`, so a period with no declaration in force can never reach
 /// `Calculated` (§4.5c).
+///
+/// Demands a non-empty `reason` (refused before anything is touched) and
+/// returns every Live finalized `PayPeriod` this declaration now diverges
+/// from (§6.5) — every period in `[effective_from, next_effective_from)`
+/// that already has a live `FinalizedPayroll`, `next_effective_from` being
+/// whichever later row already exists for this Employment, or open-ended
+/// when none does. That span is exactly what this write is about to govern,
+/// whether the row at `effective_from` is new or already there: a first
+/// declaration takes a span away from whatever answered `Unknown` or an
+/// earlier row before it, and a later change takes it from itself. Computed
+/// *before* the write, on the same connection, so the read is consistent
+/// with the value about to replace it.
 pub async fn declare_unsupported_deduction_status(
     pool: &PgPool,
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     status: UnsupportedDeductionStatus,
+    reason: &str,
     declared_by: &str,
-) -> Result<(), PayrollAppError> {
+) -> Result<Vec<PayPeriod>, PayrollAppError> {
+    if reason.trim().is_empty() {
+        return Err(PayrollAppError::UnsupportedDeductionDeclarationReasonCannotBeEmpty);
+    }
+
     let (db_status, kinds) = match status {
         UnsupportedDeductionStatus::Unknown => {
             return Err(PayrollAppError::UnsupportedDeductionDeclarationCannotBeUnknown);
@@ -86,6 +104,44 @@ pub async fn declare_unsupported_deduction_status(
 
     validate_effective_from_is_a_period_start(schedule, effective_from)?;
 
+    // `FOR UPDATE` holds the row (if any) against a concurrent correction of
+    // the same fact, and is also this call's "before" read — `None` for a
+    // first declaration at this `effective_from`, `Some` for a later change.
+    let before: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT status, kinds FROM unsupported_deduction_declaration
+         WHERE employment_id = $1 AND effective_from = $2
+         FOR UPDATE",
+    )
+    .bind(employment_id.as_str())
+    .bind(effective_from)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let before_json = before.map(|(status, kinds)| {
+        serde_json::json!({
+            "status": status,
+            "kinds": kinds,
+        })
+    });
+
+    // The same "next row's effective_from" derivation `get_employment_snapshot`
+    // and `get_unsupported_deduction_status` make: whatever this write
+    // decides, it governs `effective_from` up to whichever later row already
+    // exists, or open-ended. Read before the write below, so it names
+    // exactly the span this call is about to take over — whether from an
+    // earlier row's tail (a first declaration) or from itself (a change).
+    let next_effective_from: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT MIN(effective_from) FROM unsupported_deduction_declaration
+         WHERE employment_id = $1 AND effective_from > $2",
+    )
+    .bind(employment_id.as_str())
+    .bind(effective_from)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let diverging_periods =
+        live_finalized_periods_in_span(&mut tx, employment_id, effective_from, next_effective_from)
+            .await?;
+
     sqlx::query(
         "INSERT INTO unsupported_deduction_declaration
             (employment_id, effective_from, status, kinds, declared_by)
@@ -99,7 +155,7 @@ pub async fn declare_unsupported_deduction_status(
     .bind(employment_id.as_str())
     .bind(effective_from)
     .bind(db_status)
-    .bind(kinds)
+    .bind(kinds.clone())
     .bind(declared_by)
     .execute(&mut *tx)
     .await?;
@@ -116,13 +172,30 @@ pub async fn declare_unsupported_deduction_status(
             action_type: ActionType::UnsupportedDeductionStatusCorrected,
             target_type: "employment",
             target_id: employment_id.as_str(),
-            context: None,
+            context: Some(serde_json::json!({
+                "reason": reason,
+                "before": before_json,
+                "after": {
+                    "effective_from": effective_from,
+                    "status": db_status,
+                    "kinds": kinds,
+                },
+                "diverging_live_finalized_periods": diverging_periods
+                    .iter()
+                    .map(|period| {
+                        serde_json::json!({
+                            "period_start": period.start(),
+                            "period_end": period.end(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            })),
         },
     )
     .await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(diverging_periods)
 }
 
 /// Reads back the `UnsupportedDeductionStatus` **in force** at `as_of`:
