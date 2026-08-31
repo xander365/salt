@@ -11,10 +11,10 @@ use payroll::{
 use payroll_app::{
     EarningPrePopulation, FinalizedPayrollId, PayrollAppError, PayrollRunId,
     SNAPSHOT_SCHEMA_VERSION, add_employment_to_correction_run, calculate_payroll_run,
-    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
-    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    record_compensation_terms, remove_employment_from_run, reverse_finalized_payroll,
-    set_run_earnings,
+    correct_compensation_terms, create_correction_run, create_employer, create_employment,
+    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
+    finalize_payroll_run, record_compensation_terms, remove_employment_from_run,
+    reverse_finalized_payroll, set_run_earnings,
 };
 use sqlx::PgPool;
 
@@ -1219,23 +1219,28 @@ async fn a_corrected_compensation_terms_reaches_the_replacement_calculation(pool
     .await;
     let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
 
-    // Master data is corrected after the reversal — the true March rate,
-    // per §6.5's "split the row" repair. `CorrectCompensationTerms` (§12) is
-    // its own, separate later use case — `record_compensation_terms` only
-    // ever inserts a fresh row (`compensation_terms.rs`'s own module doc) —
-    // so this reaches the row directly, the same way
-    // `tests/finalize_payroll_run.rs` does for the one scenario the public
-    // API cannot yet produce.
-    sqlx::query(
-        "UPDATE compensation_terms SET basic_pay = $1
-         WHERE employment_id = $2 AND effective_from = $3",
+    // Master data is corrected after the reversal — the true March rate, per
+    // §6.5's "split the row" repair, through `CorrectCompensationTerms`
+    // (§12, issue #36) rather than raw SQL. March's `FinalizedPayroll` was
+    // just reversed, so it is no longer Live and the correction diverges from
+    // nothing: `&[]` is the whole acknowledgement it owes.
+    let diverging = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        period().start(),
+        period().start(),
+        Money::from_cents(1600000).unwrap(),
+        &[],
+        "March rate captured wrong",
+        "actor",
     )
-    .bind(Money::from_cents(1600000).unwrap().cents())
-    .bind(employment_id.as_str())
-    .bind(period().start())
-    .execute(&pool)
     .await
     .unwrap();
+    assert_eq!(
+        diverging,
+        Vec::new(),
+        "the reversed March record is not Live, so this correction diverges from nothing"
+    );
 
     let run_id = create_correction_run(
         &pool,

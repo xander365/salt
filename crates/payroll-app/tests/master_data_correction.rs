@@ -1,9 +1,10 @@
-//! Proves the use cases issue #36 introduces: `correct_compensation_terms`,
-//! and the reason/divergence treatment added to
-//! `declare_unsupported_deduction_status` —
-//! `docs/domain/payroll-run-persistence.md` §6.5, ADR-0013 as amended — all
-//! reached through the public API, never raw SQL, except to read back
-//! stored rows and prove they were left untouched.
+//! Proves every §6.5 write that can make master data disagree with paid
+//! history: `correct_compensation_terms` and the reason/divergence treatment
+//! added to `declare_unsupported_deduction_status` (issue #36), and the same
+//! treatment on the one `record_compensation_terms` path that diverges
+//! (issue #37) — `docs/domain/payroll-run-persistence.md` §6.5, ADR-0013 as
+//! amended. All reached through the public API, never raw SQL, except to
+//! read back stored rows and prove they were left untouched.
 
 use chrono::NaiveDate;
 use payroll::{
@@ -12,11 +13,11 @@ use payroll::{
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, add_employment_to_correction_run, build_year_to_date_context,
-    calculate_payroll_run, correct_compensation_terms, create_correction_run, create_employer,
-    create_employment, create_ordinary_payroll_run, declare_prior_employment,
-    declare_unsupported_deduction_status, finalize_payroll_run, get_unsupported_deduction_status,
-    record_compensation_terms, reverse_finalized_payroll,
+    FinalizedPayrollId, PayrollAppError, add_employment_to_correction_run,
+    build_year_to_date_context, calculate_payroll_run, correct_compensation_terms,
+    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
+    get_unsupported_deduction_status, record_compensation_terms, reverse_finalized_payroll,
 };
 use sqlx::{PgPool, Row};
 
@@ -117,6 +118,31 @@ async fn finalize_period(pool: &PgPool, employer_id: &EmployerId, period: PayPer
     finalize_payroll_run(pool, &run_id, "finalizer")
         .await
         .unwrap();
+}
+
+/// As [`finalize_period`], but hands back the `FinalizedPayrollId` written
+/// for `employment_id`, for a test that has to reverse that exact record.
+async fn finalize_period_returning_id(
+    pool: &PgPool,
+    employer_id: &EmployerId,
+    employment_id: &EmploymentId,
+    period: PayPeriod,
+) -> FinalizedPayrollId {
+    let run_id = create_ordinary_payroll_run(pool, employer_id, period, period.end(), "actor")
+        .await
+        .unwrap();
+    let refusals = calculate_payroll_run(pool, &run_id, "calculator")
+        .await
+        .unwrap();
+    assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
+    finalize_payroll_run(pool, &run_id, "finalizer")
+        .await
+        .unwrap()
+        .finalized
+        .into_iter()
+        .find(|(id, _)| id == employment_id)
+        .expect("the period must have finalized for this Employment")
+        .1
 }
 
 /// An MD5 fingerprint of the whole `finalized_payroll` row for
@@ -1322,4 +1348,95 @@ async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgP
         figures_before,
         "an insert over live finalized periods moves no finalized figure"
     );
+}
+
+/// Acceptance criterion 1's word is **Live**. A period whose
+/// `FinalizedPayroll` has been reversed is no longer live, so an insert over
+/// it disagrees with nothing anybody is still relying on and must not name
+/// it — nor demand it be acknowledged.
+///
+/// The helper reads `live_finalized_payroll` and never `finalized_payroll`,
+/// so this holds structurally; it is asserted here because the insert path
+/// is where the claim is newly made.
+#[sqlx::test]
+async fn an_insert_never_names_a_reversed_period_it_covers(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+    let april_original =
+        finalize_period_returning_id(&pool, &employer_id, &employment_id, april()).await;
+    finalize_period(&pool, &employer_id, may()).await;
+
+    reverse_finalized_payroll(&pool, &april_original, "April was paid wrong", "actor")
+        .await
+        .unwrap();
+
+    // The insert governs 1 April onwards. April's record is reversed and May's
+    // is not, so exactly one of the two periods it covers is a divergence.
+    let diverging = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(600000).unwrap(),
+        &[may()],
+        "the April rise was never recorded",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        diverging,
+        vec![may()],
+        "a reversed period is not Live, so the insert diverges from May alone"
+    );
+
+    let contexts = correction_contexts(&pool, &employment_id).await;
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        contexts[0]["diverging_live_finalized_periods"],
+        serde_json::json!([{ "period_start": "2026-05-01", "period_end": "2026-05-31" }]),
+        "the ActionLog records the same Live-only list the caller acknowledged"
+    );
+}
+
+/// Acknowledging a reversed period is refused for the same reason
+/// acknowledging any non-diverging period is: the entry would record
+/// agreement to a list that was never true.
+#[sqlx::test]
+async fn an_insert_acknowledging_a_reversed_period_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+    let april_original =
+        finalize_period_returning_id(&pool, &employer_id, &employment_id, april()).await;
+
+    reverse_finalized_payroll(&pool, &april_original, "April was paid wrong", "actor")
+        .await
+        .unwrap();
+
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(600000).unwrap(),
+        &[april()],
+        "the April rise was never recorded",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: Vec::new(),
+        }),
+    );
+    assert_eq!(compensation_terms_row_count(&pool, &employment_id).await, 1);
+    assert_eq!(correction_entry_count(&pool, &employment_id).await, 0);
 }

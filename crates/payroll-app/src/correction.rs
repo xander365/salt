@@ -40,7 +40,10 @@ pub enum EarningPrePopulation {
 /// declaring `replaces` as the `FinalizedPayroll` it names as its target —
 /// or `None` for the two null-lineage cases §4.8 allows. Whether the run may
 /// actually *finalize* with a null target is checked later, in
-/// `finalize_payroll_run` — see [`verify_null_lineage_is_legitimate`].
+/// `finalize_payroll_run`, by this module's own
+/// `verify_null_lineage_is_legitimate`. That function is crate-private, so
+/// it is named here rather than linked: a public doc page must not carry a
+/// link only `--document-private-items` can resolve.
 ///
 /// Refused when the run is not a Correction, already has a member (§4.8,
 /// ADR-0015 — "one Employment rather than several"), or when
