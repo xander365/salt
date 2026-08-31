@@ -253,6 +253,12 @@ pub enum PayrollAppError {
         fact: ScheduleBoundedFact,
         boundary: NaiveDate,
     },
+    /// A TaxYear whose own 1 March is not a representable `NaiveDate`, so the
+    /// `PayPeriod` every reader locates from it (ADR-0005) cannot be derived.
+    /// Refused rather than panicked on, and named as the TaxYear it is rather
+    /// than as some substitute date, so the refusal points at what the caller
+    /// actually supplied.
+    TaxYearOutsideRepresentableCalendar { tax_year: TaxYear },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -484,6 +490,12 @@ impl std::fmt::Display for PayrollAppError {
                 "Employer {employer_id}'s new PaySchedule does not generate {boundary}, which is \
                  already recorded as {fact}: the change would leave that boundary mid-period"
             ),
+            Self::TaxYearOutsideRepresentableCalendar { tax_year } => write!(
+                f,
+                "TaxYear {} has no representable 1 March, so its first PayPeriod cannot be \
+                 derived",
+                tax_year.starting_year()
+            ),
         }
     }
 }
@@ -536,7 +548,8 @@ impl std::error::Error for PayrollAppError {
             | Self::PayScheduleFrozenByFinalization { .. }
             | Self::PayScheduleChangeBlockedByAnOpenRun { .. }
             | Self::PayScheduleMovedWithinTaxYear { .. }
-            | Self::PayScheduleChangeWouldStrandAStoredBoundary { .. } => None,
+            | Self::PayScheduleChangeWouldStrandAStoredBoundary { .. }
+            | Self::TaxYearOutsideRepresentableCalendar { .. } => None,
         }
     }
 }

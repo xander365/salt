@@ -713,9 +713,14 @@ async fn a_pay_schedule_change_is_refused_while_a_run_in_that_tax_year_is_open(p
     );
 }
 
-/// An open run in a *different* TaxYear does not block the change.
+/// An open run blocks the change whatever TaxYear it falls in, and whatever
+/// TaxYear the caller claims to be changing the schedule in. Letting a change
+/// past a run in an *earlier* TaxYear would strand it: finalization re-derives
+/// the period from the current schedule (§5.1) and would refuse, and
+/// `create_ordinary_payroll_run` would refuse the old period too, so the run
+/// could be neither finished nor re-made.
 #[sqlx::test]
-async fn an_open_run_in_another_tax_year_does_not_block_the_change(pool: PgPool) {
+async fn an_open_run_in_an_earlier_tax_year_also_blocks_the_change(pool: PgPool) {
     let employer_id = an_employer(&pool).await;
     a_fully_declared_employment(
         &pool,
@@ -728,15 +733,22 @@ async fn an_open_run_in_another_tax_year_does_not_block_the_change(pool: PgPool)
         .await
         .unwrap();
 
-    change_pay_schedule(
+    let result = change_pay_schedule(
         &pool,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2027),
         "actor",
     )
-    .await
-    .unwrap();
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayScheduleChangeBlockedByAnOpenRun {
+            employer_id: employer_id.clone(),
+            period_end: period().end(),
+        })
+    );
 }
 
 #[sqlx::test]

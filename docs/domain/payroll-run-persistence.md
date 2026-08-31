@@ -207,10 +207,13 @@ every other use case here — so the refusal is stated twice, from two direction
   schedule moved under a part-finalized TaxYear therefore buys nothing — no
   further period of that year can be run at all.
 
-An **unfinalized `PayrollRun`** in that TaxYear also refuses the change. Its
-period was cut by the schedule in force when it was created, and finalization
-re-derives everything from the current one (§5.1), so the alternative is a
-`FinalizationInputMismatch` later that names no cause.
+An **unfinalized `PayrollRun`** also refuses the change, in *any* TaxYear — the
+claim does not narrow this one. Its period was cut by the schedule in force when
+it was created, and finalization re-derives everything from the current one
+(§5.1), so a change under it would strand the run outright: finalization would
+refuse, and `CreateOrdinaryPayrollRun` would refuse the old period too, leaving
+a run that can be neither finished nor re-made. A run that exists is a fact, so
+this refusal rests on a fact rather than on the caller's account of the date.
 
 ### 4.3 Employment
 

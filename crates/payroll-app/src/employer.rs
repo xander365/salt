@@ -67,17 +67,20 @@ pub async fn create_employer(
 ///   moved mid-year therefore buys nothing — no further period of that
 ///   TaxYear can be run under it.
 ///
-/// An unfinalized `PayrollRun` in `current_tax_year` also refuses. That run's
-/// period was built from the schedule in force when it was created, and
-/// finalization re-derives everything from the *current* schedule (§5.1), so
-/// letting the change through would trade a clear refusal now for a confusing
-/// `FinalizationInputMismatch` later.
+/// An unfinalized `PayrollRun` also refuses, **whatever TaxYear its period
+/// falls in**. That run's period was cut by the schedule in force when it was
+/// created, and finalization re-derives everything from the *current* one
+/// (§5.1), so a change under it leaves a run that can neither be finalized
+/// nor re-created — `create_ordinary_payroll_run` refuses the old period too.
+/// `current_tax_year` deliberately does not narrow this check: it is the
+/// caller's claim, and a run that exists is a fact, so resting a stranding on
+/// the claim would be the one place this use case trusts it.
 ///
-/// So does a stored boundary the new schedule would strand — see
+/// A stored boundary the new schedule would strand also refuses — see
 /// `validate_the_new_schedule_strands_no_stored_boundary` below. Refusing
-/// nothing else is deliberate: an Employer who has finalized nothing and
-/// recorded no boundary in `current_tax_year` is exactly the one who set the
-/// schedule up wrong on Monday and wants it right on Tuesday.
+/// nothing else is deliberate: an Employer who has finalized nothing, has no
+/// run open, and recorded no boundary in `current_tax_year` is exactly the one
+/// who set the schedule up wrong on Monday and wants it right on Tuesday.
 pub async fn change_pay_schedule(
     pool: &PgPool,
     employer_id: &EmployerId,
@@ -113,21 +116,19 @@ pub async fn change_pay_schedule(
         });
     }
 
-    // The TaxYear of an unfinalized run is decided in Rust, by the same
-    // `TaxYear::for_period_end` every other reader of a period end uses,
-    // rather than as a date range in SQL — one statement of where a TaxYear
-    // begins, not two.
-    let open_run_period_ends: Vec<NaiveDate> = sqlx::query_scalar(
+    // Any unfinalized run at all, in any TaxYear — see the docstring. The
+    // earliest is named because it is the one an Employer resolves first,
+    // and because naming a stable one keeps the refusal reproducible.
+    let open_run_period_end: Option<NaiveDate> = sqlx::query_scalar(
         "SELECT period_end FROM payroll_run
-         WHERE employer_id = $1 AND status <> 'finalized'",
+         WHERE employer_id = $1 AND status <> 'finalized'
+         ORDER BY period_end
+         LIMIT 1",
     )
     .bind(employer_id.as_str())
-    .fetch_all(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if let Some(period_end) = open_run_period_ends
-        .into_iter()
-        .find(|period_end| TaxYear::for_period_end(*period_end) == current_tax_year)
-    {
+    if let Some(period_end) = open_run_period_end {
         return Err(PayrollAppError::PayScheduleChangeBlockedByAnOpenRun {
             employer_id: employer_id.clone(),
             period_end,
@@ -208,14 +209,6 @@ async fn validate_the_new_schedule_strands_no_stored_boundary(
     new_schedule: PaySchedule,
     current_tax_year: TaxYear,
 ) -> Result<(), PayrollAppError> {
-    let strands = |boundary: NaiveDate, fact: ScheduleBoundedFact| {
-        PayrollAppError::PayScheduleChangeWouldStrandAStoredBoundary {
-            employer_id: employer_id.clone(),
-            fact,
-            boundary,
-        }
-    };
-
     let salt_coverage_starts: Vec<NaiveDate> = sqlx::query_scalar(
         "SELECT opening_balance.first_salt_period_end
          FROM opening_balance
@@ -229,11 +222,12 @@ async fn validate_the_new_schedule_strands_no_stored_boundary(
     .bind(current_tax_year.starting_year())
     .fetch_all(&mut **tx)
     .await?;
-    for boundary in salt_coverage_starts {
-        if !generates_the_period_end(new_schedule, boundary) {
-            return Err(strands(boundary, ScheduleBoundedFact::SaltCoverageStart));
-        }
-    }
+    refuse_any_stranded_boundary(
+        employer_id,
+        ScheduleBoundedFact::SaltCoverageStart,
+        salt_coverage_starts,
+        |boundary| generates_the_period_end(new_schedule, boundary),
+    )?;
 
     let tax_year_first_period_start = first_period_start_of(current_schedule, current_tax_year)?;
 
@@ -253,14 +247,12 @@ async fn validate_the_new_schedule_strands_no_stored_boundary(
     .bind(tax_year_first_period_start)
     .fetch_all(&mut **tx)
     .await?;
-    for boundary in compensation_effective_froms {
-        if validate_effective_from_is_a_period_start(new_schedule, boundary).is_err() {
-            return Err(strands(
-                boundary,
-                ScheduleBoundedFact::CompensationTermsEffectiveFrom,
-            ));
-        }
-    }
+    refuse_any_stranded_boundary(
+        employer_id,
+        ScheduleBoundedFact::CompensationTermsEffectiveFrom,
+        compensation_effective_froms,
+        |boundary| validate_effective_from_is_a_period_start(new_schedule, boundary).is_ok(),
+    )?;
 
     let declaration_effective_froms: Vec<NaiveDate> = sqlx::query_scalar(
         "SELECT unsupported_deduction_declaration.effective_from
@@ -276,22 +268,45 @@ async fn validate_the_new_schedule_strands_no_stored_boundary(
     .bind(tax_year_first_period_start)
     .fetch_all(&mut **tx)
     .await?;
-    for boundary in declaration_effective_froms {
-        if validate_effective_from_is_a_period_start(new_schedule, boundary).is_err() {
-            return Err(strands(
-                boundary,
-                ScheduleBoundedFact::UnsupportedDeductionEffectiveFrom,
-            ));
-        }
-    }
+    refuse_any_stranded_boundary(
+        employer_id,
+        ScheduleBoundedFact::UnsupportedDeductionEffectiveFrom,
+        declaration_effective_froms,
+        |boundary| validate_effective_from_is_a_period_start(new_schedule, boundary).is_ok(),
+    )?;
 
     Ok(())
+}
+
+/// Refuses the first of `boundaries` the new schedule does not place, naming
+/// it as `fact`. The three queries above stay written out — this crate builds
+/// no SQL by string interpolation — but what they *mean* is one thing said
+/// once: find a boundary the schedule no longer places, and refuse it.
+fn refuse_any_stranded_boundary(
+    employer_id: &EmployerId,
+    fact: ScheduleBoundedFact,
+    boundaries: Vec<NaiveDate>,
+    is_placed_by_the_new_schedule: impl Fn(NaiveDate) -> bool,
+) -> Result<(), PayrollAppError> {
+    match boundaries
+        .into_iter()
+        .find(|boundary| !is_placed_by_the_new_schedule(*boundary))
+    {
+        Some(boundary) => Err(
+            PayrollAppError::PayScheduleChangeWouldStrandAStoredBoundary {
+                employer_id: employer_id.clone(),
+                fact,
+                boundary,
+            },
+        ),
+        None => Ok(()),
+    }
 }
 
 /// Whether `schedule` generates a `PayPeriod` ending exactly on `date` — the
 /// same question §4.5 guard 1 asks of a `SaltCoverageStart`, and the one
 /// `create_ordinary_payroll_run` asks of an already finalized period end.
-fn generates_the_period_end(schedule: PaySchedule, date: NaiveDate) -> bool {
+pub(crate) fn generates_the_period_end(schedule: PaySchedule, date: NaiveDate) -> bool {
     schedule
         .period_containing(date)
         .is_some_and(|period| period.end() == date)
@@ -303,18 +318,20 @@ fn generates_the_period_end(schedule: PaySchedule, date: NaiveDate) -> bool {
 /// of the starting year always falls inside it; the start may be in the
 /// February before. Refused rather than panicked on at the very edge of the
 /// representable calendar, exactly as every other date derivation in this
-/// crate is.
+/// crate is — and the two edges are refused separately, so the refusal always
+/// names something the caller actually supplied: a TaxYear with no 1 March,
+/// or a schedule that cannot reach back from one.
 fn first_period_start_of(
     schedule: PaySchedule,
     tax_year: TaxYear,
 ) -> Result<NaiveDate, PayrollAppError> {
-    let march_first = NaiveDate::from_ymd_opt(tax_year.starting_year(), 3, 1);
-    let period = march_first.and_then(|date| schedule.period_containing(date));
-    period.map(|period| period.start()).ok_or_else(|| {
-        PayrollAppError::from(PayrollError::PayScheduleOutsideRepresentableCalendar {
-            date: march_first.unwrap_or(NaiveDate::MAX),
-        })
-    })
+    let march_first = NaiveDate::from_ymd_opt(tax_year.starting_year(), 3, 1)
+        .ok_or(PayrollAppError::TaxYearOutsideRepresentableCalendar { tax_year })?;
+    schedule
+        .period_containing(march_first)
+        .map(|period| period.start())
+        .ok_or(PayrollError::PayScheduleOutsideRepresentableCalendar { date: march_first })
+        .map_err(PayrollAppError::from)
 }
 
 fn period_end_day_columns(period_end_day: PeriodEndDay) -> (&'static str, Option<i16>) {

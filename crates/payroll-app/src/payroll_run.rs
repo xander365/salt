@@ -10,7 +10,7 @@ use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, Payroll
 use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
-use crate::employer::pay_schedule_from_columns;
+use crate::employer::{generates_the_period_end, pay_schedule_from_columns};
 use crate::error::PayrollAppError;
 use crate::freeze::finalized_period_ends_in;
 use crate::ids::app_id;
@@ -168,10 +168,7 @@ async fn validate_the_schedule_still_describes_the_tax_year(
     tax_year: TaxYear,
 ) -> Result<(), PayrollAppError> {
     for finalized_period_end in finalized_period_ends_in(tx, employer_id, tax_year).await? {
-        let generated = schedule
-            .period_containing(finalized_period_end)
-            .is_some_and(|period| period.end() == finalized_period_end);
-        if !generated {
+        if !generates_the_period_end(schedule, finalized_period_end) {
             return Err(PayrollAppError::PayScheduleMovedWithinTaxYear {
                 employer_id: employer_id.clone(),
                 tax_year,
