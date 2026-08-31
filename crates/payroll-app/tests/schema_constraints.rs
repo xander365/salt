@@ -321,6 +321,226 @@ async fn a_reversed_finalized_payroll_can_be_replaced_at_most_once(pool: PgPool)
     );
 }
 
+/// The Ordinary March run, its membership for `emp-1`, and the
+/// `FinalizedPayroll` it produced — the row every replacement below names as
+/// its target. Returns `(run id, finalized payroll id)`.
+async fn a_finalized_march_for_emp_1(conn: &mut sqlx::PgConnection) -> (String, String) {
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'finalized',
+             'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert ordinary run");
+
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1'), ($1::uuid, 'emp-2')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("both Employments are members of the Ordinary run");
+
+    let finalized_payroll_id: String = sqlx::query_scalar(
+        "INSERT INTO finalized_payroll
+            (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
+             payroll_input_json, payroll_rules_json, payroll_calculation_json,
+             taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version, finalized_by)
+         VALUES
+            ($1::uuid, 'emp-1', 'employer-1', '2026-03-01', '2026-03-31', 2026,
+             '{}', '{}', '{}', 15000, 1200, 'paye-1', 'ssc-1', '0.1.0+gdeadbeef', 'actor')
+         RETURNING id::text",
+    )
+    .bind(&run_id)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert the original finalized payroll");
+
+    (run_id, finalized_payroll_id)
+}
+
+/// A Correction run for `period`, holding `employment_id` alone, already
+/// marked finalized so a `FinalizedPayroll` may be written against it.
+async fn a_correction_run_holding(
+    conn: &mut sqlx::PgConnection,
+    employment_id: &str,
+    period_start: &str,
+    period_end: &str,
+    replaces: Option<&str>,
+) -> Result<String, sqlx::Error> {
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, correction_reason,
+             created_by)
+         VALUES
+            ('employer-1', $1::date, $2::date, '2026-07-05', 'correction', 'finalized',
+             'fix march', 'actor')
+         RETURNING id::text",
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO payroll_run_employment
+            (payroll_run_id, employment_id, replaces_finalized_payroll_id)
+         VALUES ($1::uuid, $2, $3::uuid)",
+    )
+    .bind(&run_id)
+    .bind(employment_id)
+    .bind(replaces)
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(run_id)
+}
+
+/// §4.8: a replacement and the record it replaces are one Employment's
+/// payroll. Rust checks this before a Correction run is even calculated, but
+/// `finalized_payroll` is the table no role may correct — a replacement
+/// pointing at someone else's record would be a permanent lie about what was
+/// replaced.
+#[sqlx::test]
+async fn a_replacement_names_a_target_for_its_own_employment(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+    let (_, march_for_emp_1) = a_finalized_march_for_emp_1(&mut conn).await;
+
+    let other_employments_run =
+        a_correction_run_holding(&mut conn, "emp-2", "2026-03-01", "2026-03-31", None)
+            .await
+            .expect("a Correction run for emp-2's own March");
+
+    let result = sqlx::query(
+        "INSERT INTO finalized_payroll
+            (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
+             replaces_finalized_payroll_id,
+             payroll_input_json, payroll_rules_json, payroll_calculation_json,
+             taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version, finalized_by)
+         VALUES
+            ($1::uuid, 'emp-2', 'employer-1', '2026-03-01', '2026-03-31', 2026, $2::uuid,
+             '{}', '{}', '{}', 16000, 1300, 'paye-1', 'ssc-1', '0.1.0+gdeadbeef', 'actor')",
+    )
+    .bind(&other_employments_run)
+    .bind(&march_for_emp_1)
+    .execute(&mut *conn)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a replacement cannot name another Employment's FinalizedPayroll"
+    );
+}
+
+/// §4.8, the other half of the same pair: one Employment, but the record it
+/// replaces must be that Employment's payroll for *this* PayPeriod. A
+/// correction is per period, and ADR-0002's chain is per period with it.
+#[sqlx::test]
+async fn a_replacement_names_a_target_for_its_own_period(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+    let (_, march_for_emp_1) = a_finalized_march_for_emp_1(&mut conn).await;
+
+    let april_run = a_correction_run_holding(&mut conn, "emp-1", "2026-04-01", "2026-04-30", None)
+        .await
+        .expect("a Correction run for emp-1's April");
+
+    let result = sqlx::query(
+        "INSERT INTO finalized_payroll
+            (payroll_run_id, employment_id, employer_id, period_start, period_end, tax_year,
+             replaces_finalized_payroll_id,
+             payroll_input_json, payroll_rules_json, payroll_calculation_json,
+             taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version, finalized_by)
+         VALUES
+            ($1::uuid, 'emp-1', 'employer-1', '2026-04-01', '2026-04-30', 2026, $2::uuid,
+             '{}', '{}', '{}', 16000, 1300, 'paye-1', 'ssc-1', '0.1.0+gdeadbeef', 'actor')",
+    )
+    .bind(&april_run)
+    .bind(&march_for_emp_1)
+    .execute(&mut *conn)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a replacement cannot name a FinalizedPayroll for another PayPeriod"
+    );
+}
+
+/// §4.8: on membership, `replaces_finalized_payroll_id` is the declared
+/// target and it is Correction-only. The period it must match lives on
+/// `payroll_run`, so the database holds the half it can — the Employment.
+#[sqlx::test]
+async fn a_declared_target_belongs_to_the_declaring_employment(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+    let (_, march_for_emp_1) = a_finalized_march_for_emp_1(&mut conn).await;
+
+    let result = a_correction_run_holding(
+        &mut conn,
+        "emp-2",
+        "2026-03-01",
+        "2026-03-31",
+        Some(&march_for_emp_1),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a Correction run cannot declare another Employment's FinalizedPayroll as its target"
+    );
+}
+
+/// §4.8: only a Correction run declares a target. Finalization copies each
+/// member's declared target into its `FinalizedPayroll` by kind, and an
+/// Ordinary member's is always NULL — so a membership row that carried one
+/// anyway would put recorded lineage on a row that replaced nothing.
+#[sqlx::test]
+async fn only_a_correction_run_declares_a_replacement_target(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+    let (ordinary_run_id, march_for_emp_1) = a_finalized_march_for_emp_1(&mut conn).await;
+
+    let declared_on_an_ordinary_run = sqlx::query(
+        "UPDATE payroll_run_employment SET replaces_finalized_payroll_id = $2::uuid
+         WHERE payroll_run_id = $1::uuid AND employment_id = 'emp-1'",
+    )
+    .bind(&ordinary_run_id)
+    .bind(&march_for_emp_1)
+    .execute(&mut *conn)
+    .await;
+    assert!(
+        declared_on_an_ordinary_run.is_err(),
+        "an Ordinary run's membership row cannot declare a replacement target"
+    );
+
+    // The other direction: a Correction run holding a declared target,
+    // reclassified as Ordinary.
+    let correction_run_id = a_correction_run_holding(
+        &mut conn,
+        "emp-1",
+        "2026-03-01",
+        "2026-03-31",
+        Some(&march_for_emp_1),
+    )
+    .await
+    .expect("a Correction run may declare emp-1's own March record");
+
+    let reclassified = sqlx::query("UPDATE payroll_run SET kind = 'ordinary' WHERE id = $1::uuid")
+        .bind(&correction_run_id)
+        .execute(&mut *conn)
+        .await;
+    assert!(
+        reclassified.is_err(),
+        "a run holding a declared target cannot become Ordinary"
+    );
+}
+
 #[sqlx::test]
 async fn concurrent_membership_additions_leave_a_correction_run_with_one_member(pool: PgPool) {
     let mut setup_connection = pool.acquire().await.expect("acquire setup connection");

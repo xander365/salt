@@ -242,12 +242,18 @@ async fn prepopulate_earnings(
     // unreadable snapshot starts the run empty and says so, and a panic is
     // the one shape that does neither. The version stamp is what the caller
     // is told, because it is what identifies the shape that would not read.
-    let earnings: Vec<Earning> = match input_json.get("earnings") {
-        Some(earnings_json) => match serde_json::from_value(earnings_json.clone()) {
-            Ok(earnings) => earnings,
-            Err(_) => return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version }),
-        },
-        None => Vec::new(),
+    //
+    // An absent `earnings` field degrades the same way a malformed one
+    // does, rather than being read as an empty list: a `PayrollInput` at
+    // this version always serializes the field, so its absence says the
+    // snapshot is not the shape this build reads — and answering "no
+    // allowances" to that is the guess §9.1 forbids, not a degradation.
+    let Some(earnings_json) = input_json.get("earnings") else {
+        return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
+    };
+    let Ok(earnings): Result<Vec<Earning>, _> = serde_json::from_value(earnings_json.clone())
+    else {
+        return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     };
 
     for (index, earning) in earnings.iter().enumerate() {
@@ -286,6 +292,10 @@ async fn prepopulate_earnings(
 /// 2. The finalized Ordinary run for the period must actually account for
 ///    this Employment's absence — by not holding it at all, or by holding it
 ///    removed with a reason.
+/// 3. The period must not already be paid. Both of §4.8's cases are
+///    statements about the Ordinary run, so a *second* null-lineage
+///    Correction satisfies them both again — only the liveness row (§6.2)
+///    records that a first one has since paid the period.
 ///
 /// Both of §4.8's cases presuppose that Ordinary run **has finalized**: they
 /// exist because §4.6 forbids a second one, which only bites once the first
@@ -374,12 +384,39 @@ pub(crate) async fn verify_null_lineage_is_legitimate(
     // own `removed_with_a_reason` read.
     let accounted_for = removed_with_a_reason.unwrap_or(true);
 
-    if ordinary_run_is_finalized && accounted_for {
-        Ok(())
-    } else {
-        Err(PayrollAppError::CorrectionLineageNotLegitimate {
+    if !(ordinary_run_is_finalized && accounted_for) {
+        return Err(PayrollAppError::CorrectionLineageNotLegitimate {
             employment_id: employment_id.clone(),
             period,
-        })
+        });
     }
+
+    // Both of §4.8's cases are statements about the *Ordinary* run, and a
+    // second null-lineage Correction satisfies them both again: the removal
+    // is still reasoned, or the Employment is still not a member, and step 1
+    // above sees no unreplaced reversed predecessor because the first
+    // Correction's record was never reversed. What has changed is that the
+    // period is now paid, and only the liveness row says so.
+    //
+    // Refused here rather than left to the `live_finalized_payroll` primary
+    // key, which does catch it (§6.2) but as a raw constraint violation: an
+    // Employer told "duplicate key" has been told nothing they can act on,
+    // and what they must actually do — reverse the live record and name it,
+    // so the chain stays linear — is the thing this refusal says.
+    let period_is_already_paid: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM live_finalized_payroll
+         WHERE employment_id = $1 AND period_end = $2",
+    )
+    .bind(employment_id.as_str())
+    .bind(period.end())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if period_is_already_paid.is_some() {
+        return Err(PayrollAppError::CorrectionPeriodAlreadyHasALivePayroll {
+            employment_id: employment_id.clone(),
+            period,
+        });
+    }
+
+    Ok(())
 }

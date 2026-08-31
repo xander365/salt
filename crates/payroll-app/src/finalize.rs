@@ -321,8 +321,16 @@ pub async fn finalize_payroll_run(
 
         // The concurrency guard (§5.4, §6.2): a second live row for this
         // `(employment_id, period_end)` is unrepresentable, whatever the
-        // `FOR UPDATE` lock above believed.
-        sqlx::query(
+        // `FOR UPDATE` lock above believed — the run lock serialises two
+        // finalizers of one run, and this key serialises two runs that would
+        // pay one Employment for one period.
+        //
+        // Its violation is read back as a domain refusal for the same reason
+        // the `replaces_finalized_payroll_id` UNIQUE violation is: the two
+        // guard the same act from the two sides §4.8 names, and a caller who
+        // lost one race must not be told "duplicate key" while a caller who
+        // lost the other is told what to do next.
+        let live_insert = sqlx::query(
             "INSERT INTO live_finalized_payroll (employment_id, period_end, finalized_payroll_id)
              VALUES ($1, $2, $3::uuid)",
         )
@@ -330,7 +338,16 @@ pub async fn finalize_payroll_run(
         .bind(period.end())
         .bind(finalized_payroll_id.as_str())
         .execute(&mut *tx)
-        .await?;
+        .await;
+        if let Err(err) = live_insert {
+            if is_unique_violation(&err, ONE_LIVE_PAYROLL_PER_EMPLOYMENT_AND_PERIOD) {
+                return Err(PayrollAppError::CorrectionPeriodAlreadyHasALivePayroll {
+                    employment_id: employment_id.clone(),
+                    period,
+                });
+            }
+            return Err(err.into());
+        }
 
         finalized_ids.push((employment_id, finalized_payroll_id));
     }
@@ -614,6 +631,12 @@ async fn insert_finalized_payroll(
 /// same target.
 const CORRECTION_TARGET_REPLACED_AT_MOST_ONCE: &str =
     "finalized_payroll_replaces_finalized_payroll_id_key";
+
+/// The name PostgreSQL gives migration 0010's primary key on
+/// `live_finalized_payroll` — the constraint that makes "one live
+/// FinalizedPayroll per Employment and PayPeriod" true (§6.2), and decides
+/// between two runs that would both pay one Employment for one period.
+const ONE_LIVE_PAYROLL_PER_EMPLOYMENT_AND_PERIOD: &str = "live_finalized_payroll_pkey";
 
 /// True when `err` is PostgreSQL's unique violation (SQLSTATE 23505) raised
 /// by `constraint` — the same check `reversal.rs` makes of its own UNIQUE

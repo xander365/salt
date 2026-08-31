@@ -194,6 +194,27 @@ async fn live_finalized_payroll_id(
     .unwrap()
 }
 
+async fn finalized_payroll_count(pool: &PgPool, employment_id: &EmploymentId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM finalized_payroll WHERE employment_id = $1")
+        .bind(employment_id.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The whole `finalized_payroll` row, as JSON, so a test can say "untouched"
+/// about every column rather than about the two it thought to name.
+async fn finalized_payroll_row(
+    pool: &PgPool,
+    finalized_payroll_id: &FinalizedPayrollId,
+) -> serde_json::Value {
+    sqlx::query_scalar("SELECT to_jsonb(f) FROM finalized_payroll AS f WHERE f.id = $1::uuid")
+        .bind(finalized_payroll_id.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 async fn action_log_context(
     pool: &PgPool,
     action_type: &str,
@@ -719,6 +740,177 @@ async fn null_lineage_is_refused_before_the_ordinary_run_for_the_period_finalize
     );
 }
 
+/// §4.8's two null-lineage cases are both statements about the *Ordinary*
+/// run, and a second null-lineage Correction satisfies them both again: the
+/// removal is still reasoned, and the first Correction's own record was
+/// never reversed, so no predecessor is waiting to be named. Only the
+/// liveness row (§6.2) records that the period has since been paid.
+///
+/// Refused as a domain refusal naming the way forward — reverse the live
+/// record and name it — rather than as the `live_finalized_payroll` primary
+/// key violation that would otherwise be the first thing to notice.
+#[sqlx::test]
+async fn a_second_null_lineage_correction_for_an_already_paid_period_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let ordinary_run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    remove_employment_from_run(
+        &pool,
+        &ordinary_run_id,
+        &employment_id,
+        "on unpaid leave",
+        "actor",
+    )
+    .await
+    .unwrap();
+    calculate_payroll_run(&pool, &ordinary_run_id, "calculator")
+        .await
+        .unwrap();
+    finalize_payroll_run(&pool, &ordinary_run_id, "finalizer")
+        .await
+        .unwrap();
+
+    // Both Corrections are drafted and calculated before either finalizes,
+    // so neither can have seen the other's record when it was added.
+    let mut run_ids = Vec::new();
+    for _ in 0..2 {
+        let run_id = create_correction_run(
+            &pool,
+            &employer_id,
+            period(),
+            date(2026, 6, 5),
+            "the removal was a mistake; pay March after all",
+            "actor",
+        )
+        .await
+        .unwrap();
+        add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+            .await
+            .unwrap();
+        calculate_payroll_run(&pool, &run_id, "calculator")
+            .await
+            .unwrap();
+        run_ids.push(run_id);
+    }
+
+    let first = finalize_payroll_run(&pool, &run_ids[0], "finalizer")
+        .await
+        .unwrap();
+    let second = finalize_payroll_run(&pool, &run_ids[1], "finalizer").await;
+
+    assert_eq!(
+        second,
+        Err(PayrollAppError::CorrectionPeriodAlreadyHasALivePayroll {
+            employment_id: employment_id.clone(),
+            period: period(),
+        })
+    );
+    // The refused run left nothing behind, and March is still paid once.
+    assert_eq!(
+        live_finalized_payroll_id(&pool, &employment_id, period().end()).await,
+        Some(first.finalized[0].1.to_string())
+    );
+    assert_eq!(
+        finalized_payroll_count(&pool, &employment_id).await,
+        1,
+        "a refused finalization writes no history"
+    );
+    assert_eq!(run_status(&pool, &run_ids[1]).await, "calculated");
+}
+
+/// Two null-lineage Corrections finalizing at the same moment: exactly one
+/// wins, and the loser is told the same thing the sequential case is told.
+///
+/// Which guard fires is deliberately not asserted. The read in
+/// `verify_null_lineage_is_legitimate` sees the winner's liveness row only
+/// once it has committed; before that, the `live_finalized_payroll` primary
+/// key is what decides (§5.4, §6.2) — the same shape as two Corrections
+/// naming one target, and the reason both are read back as one refusal.
+#[sqlx::test]
+async fn two_null_lineage_corrections_finalizing_at_once_end_with_only_the_first_finalized(
+    pool: PgPool,
+) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let ordinary_run_id =
+        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    remove_employment_from_run(
+        &pool,
+        &ordinary_run_id,
+        &employment_id,
+        "on unpaid leave",
+        "actor",
+    )
+    .await
+    .unwrap();
+    calculate_payroll_run(&pool, &ordinary_run_id, "calculator")
+        .await
+        .unwrap();
+    finalize_payroll_run(&pool, &ordinary_run_id, "finalizer")
+        .await
+        .unwrap();
+
+    let mut run_ids = Vec::new();
+    for _ in 0..2 {
+        let run_id = create_correction_run(
+            &pool,
+            &employer_id,
+            period(),
+            date(2026, 6, 5),
+            "the removal was a mistake; pay March after all",
+            "actor",
+        )
+        .await
+        .unwrap();
+        add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+            .await
+            .unwrap();
+        calculate_payroll_run(&pool, &run_id, "calculator")
+            .await
+            .unwrap();
+        run_ids.push(run_id);
+    }
+
+    let (first, second) = tokio::join!(
+        finalize_payroll_run(&pool, &run_ids[0], "finalizer"),
+        finalize_payroll_run(&pool, &run_ids[1], "finalizer"),
+    );
+
+    let refusal = match (first, second) {
+        (Ok(_), Err(refusal)) | (Err(refusal), Ok(_)) => refusal,
+        (first, second) => panic!("exactly one must finalize, got {first:?} and {second:?}"),
+    };
+    assert_eq!(
+        refusal,
+        PayrollAppError::CorrectionPeriodAlreadyHasALivePayroll {
+            employment_id: employment_id.clone(),
+            period: period(),
+        }
+    );
+    assert_eq!(
+        finalized_payroll_count(&pool, &employment_id).await,
+        1,
+        "March is paid exactly once"
+    );
+}
+
 /// ADR-0015's chain, walked twice through the public API:
 /// `F1 → reversed → F2 (replaces F1) → reversed → F3 (replaces F2)`.
 #[sqlx::test]
@@ -860,6 +1052,53 @@ async fn no_target_prepopulates_no_earnings(pool: PgPool) {
             .unwrap();
 
     assert_eq!(pre_population, EarningPrePopulation::NoTarget);
+}
+
+/// A snapshot stamped with a version this build *does* read, whose frozen
+/// input has no `earnings` field at all, is unreadable in the same way and
+/// says so in the same words. A `PayrollInput` at this version always
+/// serializes the field, so its absence says the shape is not the one this
+/// build reads — and answering "no allowances" to that would be the guess
+/// §9.1 forbids, dressed up as a degradation.
+#[sqlx::test]
+async fn a_snapshot_missing_its_earnings_field_degrades_to_no_earnings_and_says_so(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    sqlx::query("UPDATE finalized_payroll SET payroll_input_json = '{}' WHERE id = $1::uuid")
+        .bind(target.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let run_id = create_correction_run(
+        &pool,
+        &employer_id,
+        period(),
+        date(2026, 6, 5),
+        "March pay was wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let pre_population =
+        add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+            .await
+            .unwrap();
+
+    assert_eq!(
+        pre_population,
+        EarningPrePopulation::UnreadableSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION
+        }
+    );
 }
 
 #[sqlx::test]
@@ -1058,13 +1297,7 @@ async fn a_correction_checks_its_own_period_only_and_warns_about_later_finalized
         .await
         .unwrap();
     let april_finalized_payroll_id = april_outcome.finalized[0].1.clone();
-    let april_taxable_remuneration_before: i64 = sqlx::query_scalar(
-        "SELECT taxable_remuneration FROM finalized_payroll WHERE id = $1::uuid",
-    )
-    .bind(april_finalized_payroll_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let april_row_before = finalized_payroll_row(&pool, &april_finalized_payroll_id).await;
 
     let run_id = create_correction_run(
         &pool,
@@ -1092,16 +1325,11 @@ async fn a_correction_checks_its_own_period_only_and_warns_about_later_finalized
 
     assert_eq!(outcome.later_finalized_periods, vec![next_period()]);
 
-    // April's own row is byte-for-byte untouched.
-    let april_taxable_remuneration_after: i64 = sqlx::query_scalar(
-        "SELECT taxable_remuneration FROM finalized_payroll WHERE id = $1::uuid",
-    )
-    .bind(april_finalized_payroll_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    // April's whole row is untouched — not only the figures year-to-date
+    // reads, but the frozen snapshots that explain them.
     assert_eq!(
-        april_taxable_remuneration_before, april_taxable_remuneration_after,
+        april_row_before,
+        finalized_payroll_row(&pool, &april_finalized_payroll_id).await,
         "later periods are never rewritten"
     );
     assert_eq!(

@@ -329,6 +329,28 @@ pub enum PayrollAppError {
         period: PayPeriod,
         finalized_payroll_id: FinalizedPayrollId,
     },
+    /// `FinalizePayrollRun` was asked to write a `FinalizedPayroll` for an
+    /// Employment and `PayPeriod` that already has a live one (§6.2).
+    ///
+    /// Reachable two ways, and both mean the same thing to a caller. A
+    /// second null-lineage Correction run for a period a first one has
+    /// already paid passes §4.8's two cases — the Ordinary run still
+    /// accounts for the Employment's absence, and no reversed predecessor
+    /// is unreplaced — and only the live record itself says the period has
+    /// since been paid. And where two such runs finalize at the same
+    /// moment, the `live_finalized_payroll` primary key is what decides
+    /// between them (§5.4), exactly as the `replaces_finalized_payroll_id`
+    /// UNIQUE constraint decides between two Corrections naming one target.
+    ///
+    /// The way forward is the same in both: reverse the live record and
+    /// name it as this Correction's target, so the chain stays linear
+    /// (ADR-0015). The record is not carried here because
+    /// `(employment_id, period_end)` *is* the liveness primary key — one
+    /// lookup names it, and a stale id would not.
+    CorrectionPeriodAlreadyHasALivePayroll {
+        employment_id: EmploymentId,
+        period: PayPeriod,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -636,6 +658,17 @@ impl std::fmt::Display for PayrollAppError {
                 period.start(),
                 period.end()
             ),
+            Self::CorrectionPeriodAlreadyHasALivePayroll {
+                employment_id,
+                period,
+            } => write!(
+                f,
+                "finalizing Correction for Employment {employment_id} refused: the PayPeriod {} \
+                 to {} already has a live FinalizedPayroll, which must be reversed and named as \
+                 this Correction's target",
+                period.start(),
+                period.end()
+            ),
         }
     }
 }
@@ -699,7 +732,8 @@ impl std::error::Error for PayrollAppError {
             | Self::CorrectionTargetNotReversed(_)
             | Self::CorrectionTargetAlreadyReplaced(_)
             | Self::CorrectionLineageNotLegitimate { .. }
-            | Self::CorrectionLineageOmitsAReversedPredecessor { .. } => None,
+            | Self::CorrectionLineageOmitsAReversedPredecessor { .. }
+            | Self::CorrectionPeriodAlreadyHasALivePayroll { .. } => None,
         }
     }
 }
