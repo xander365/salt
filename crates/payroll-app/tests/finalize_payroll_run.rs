@@ -390,48 +390,6 @@ async fn finalizing_an_already_finalized_run_is_refused(pool: PgPool) {
     );
 }
 
-/// §5.3 step 2 verifies the run's **kind** as well as its status, and this
-/// use case implements the Ordinary column of step 3 only. A Correction run
-/// must also carry `replaces_finalized_payroll_id` into its
-/// `FinalizedPayroll` (§9) and check its target is reversed and not live
-/// (§4.8) — so finalizing one here would write a replacement with the null
-/// lineage §9 reserves for two other cases entirely.
-///
-/// No use case creates a Correction run yet, so the run's kind is changed
-/// directly. The run is left empty because a Correction run may hold at most
-/// one member (§4.8, migration 0016's trigger).
-#[sqlx::test]
-async fn finalizing_a_correction_run_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
-    sqlx::query(
-        "UPDATE payroll_run SET kind = 'correction', correction_reason = 'a corrected March'
-         WHERE id = $1::uuid",
-    )
-    .bind(run_id.as_str())
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
-
-    assert_eq!(
-        result,
-        Err(PayrollAppError::PayrollRunIsNotOrdinary(run_id.clone()))
-    );
-    assert_eq!(run_status(&pool, &run_id).await, "calculated");
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
-    assert_eq!(
-        action_log_count(&pool, "payroll_finalized", run_id.as_str()).await,
-        0,
-        "a refused finalization writes no audit entry either"
-    );
-}
-
 // ---- Three-way finalization equality (§5.2, §14 tests 30-33) ----
 
 /// The tempting simplification is comparing the `PayrollCalculation` alone.
@@ -876,7 +834,7 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
         _ => panic!("exactly one finalization must succeed, got {first:?} and {second:?}"),
     };
     assert_eq!(
-        winner.as_ref().ok().map(Vec::len),
+        winner.as_ref().ok().map(|outcome| outcome.finalized.len()),
         Some(1),
         "the winner finalizes the run's one member"
     );

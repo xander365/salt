@@ -126,7 +126,8 @@ async fn finalize_the_period(
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
     let finalized = finalize_payroll_run(pool, &run_id, "finalizer")
         .await
-        .unwrap();
+        .unwrap()
+        .finalized;
     let (_, finalized_payroll_id) = finalized
         .into_iter()
         .find(|(id, _)| id == employment_id)

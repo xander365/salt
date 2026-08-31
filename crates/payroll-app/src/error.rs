@@ -271,6 +271,53 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         period: PayPeriod,
     },
+    /// `CreateCorrectionRun` was given a reason that is empty or only
+    /// whitespace — the same up-front demand `RemovalReasonCannotBeEmpty`
+    /// and `ReversalReasonCannotBeEmpty` make of their own mandatory
+    /// reasons (§4.6).
+    CorrectionReasonCannotBeEmpty,
+    /// `AddEmploymentToCorrectionRun` was given a run that is not a
+    /// Correction run — the opposite of [`Self::PayrollRunIsNotOrdinary`]
+    /// (§4.8).
+    PayrollRunIsNotCorrection(PayrollRunId),
+    /// `AddEmploymentToCorrectionRun` was asked to add a second Employment.
+    /// A Correction run holds exactly one (§4.8, ADR-0015); the trigger
+    /// from migration 0012 would refuse this too, but this is the named
+    /// domain refusal a caller can match on rather than a raw database
+    /// exception.
+    CorrectionRunAlreadyHasAnEmployment(PayrollRunId),
+    /// `AddEmploymentToCorrectionRun` was given an Employment that does not
+    /// belong to the Correction run's own Employer.
+    CorrectionEmploymentBelongsToADifferentEmployer {
+        employment_id: EmploymentId,
+        employer_id: EmployerId,
+    },
+    /// `AddEmploymentToCorrectionRun` was given a `replaces` target that
+    /// does not name this Employment, this Employer and this run's own
+    /// period end (§4.8).
+    CorrectionTargetDoesNotMatch {
+        payroll_run_id: PayrollRunId,
+        finalized_payroll_id: FinalizedPayrollId,
+    },
+    /// `AddEmploymentToCorrectionRun` was given a `replaces` target with no
+    /// `Reversal` — only a reversed `FinalizedPayroll` has anything for a
+    /// replacement to replace (§4.8, §6.3).
+    CorrectionTargetNotReversed(FinalizedPayrollId),
+    /// `FinalizePayrollRun` lost the race the `replaces_finalized_payroll_id`
+    /// UNIQUE constraint on `finalized_payroll` decides (§4.8, §9): another
+    /// Correction run finalized against the same target first. Two draft
+    /// Correction runs may legitimately name the same target; only the
+    /// first to finalize wins.
+    CorrectionTargetAlreadyReplaced(FinalizedPayrollId),
+    /// `FinalizePayrollRun` was asked to finalize a Correction run whose
+    /// single member names no target, and neither of §4.8's two
+    /// null-lineage cases holds: the Employment was not removed with a
+    /// reason from the finalized Ordinary run for this `period`, and it was
+    /// a member of one.
+    CorrectionLineageNotLegitimate {
+        employment_id: EmploymentId,
+        period: PayPeriod,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -519,6 +566,53 @@ impl std::fmt::Display for PayrollAppError {
                 period.start(),
                 period.end()
             ),
+            Self::CorrectionReasonCannotBeEmpty => {
+                write!(f, "a correction reason must not be empty")
+            }
+            Self::PayrollRunIsNotCorrection(id) => {
+                write!(f, "PayrollRun {id} is not a Correction run")
+            }
+            Self::CorrectionRunAlreadyHasAnEmployment(id) => write!(
+                f,
+                "Correction PayrollRun {id} already holds an Employment; a Correction run holds \
+                 exactly one"
+            ),
+            Self::CorrectionEmploymentBelongsToADifferentEmployer {
+                employment_id,
+                employer_id,
+            } => write!(
+                f,
+                "Employment {employment_id} does not belong to Employer {employer_id}"
+            ),
+            Self::CorrectionTargetDoesNotMatch {
+                payroll_run_id,
+                finalized_payroll_id,
+            } => write!(
+                f,
+                "FinalizedPayroll {finalized_payroll_id} does not match the Employment, Employer \
+                 and period of Correction PayrollRun {payroll_run_id}"
+            ),
+            Self::CorrectionTargetNotReversed(id) => write!(
+                f,
+                "FinalizedPayroll {id} has not been reversed, so there is nothing for a \
+                 Correction to replace"
+            ),
+            Self::CorrectionTargetAlreadyReplaced(id) => write!(
+                f,
+                "FinalizedPayroll {id} has already been replaced by another Correction"
+            ),
+            Self::CorrectionLineageNotLegitimate {
+                employment_id,
+                period,
+            } => write!(
+                f,
+                "finalizing Correction for Employment {employment_id} refused: no target was \
+                 named, but the PayPeriod {} to {} was neither an omission (the Employment was \
+                 never a member of the finalized Ordinary run for it) nor a reasoned removal \
+                 from it",
+                period.start(),
+                period.end()
+            ),
         }
     }
 }
@@ -573,7 +667,15 @@ impl std::error::Error for PayrollAppError {
             | Self::PayScheduleMovedWithinTaxYear { .. }
             | Self::PayScheduleChangeWouldStrandAStoredBoundary { .. }
             | Self::TaxYearOutsideRepresentableCalendar { .. }
-            | Self::PrecedingPeriodUnresolved { .. } => None,
+            | Self::PrecedingPeriodUnresolved { .. }
+            | Self::CorrectionReasonCannotBeEmpty
+            | Self::PayrollRunIsNotCorrection(_)
+            | Self::CorrectionRunAlreadyHasAnEmployment(_)
+            | Self::CorrectionEmploymentBelongsToADifferentEmployer { .. }
+            | Self::CorrectionTargetDoesNotMatch { .. }
+            | Self::CorrectionTargetNotReversed(_)
+            | Self::CorrectionTargetAlreadyReplaced(_)
+            | Self::CorrectionLineageNotLegitimate { .. } => None,
         }
     }
 }

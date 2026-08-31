@@ -99,7 +99,8 @@ async fn a_finalized_payroll(
 
     let finalized = finalize_payroll_run(pool, &run_id, "finalizer")
         .await
-        .unwrap();
+        .unwrap()
+        .finalized;
     let (_, finalized_payroll_id) = finalized
         .into_iter()
         .find(|(id, _)| id == employment_id)
@@ -602,7 +603,8 @@ async fn reversing_one_finalized_payroll_leaves_the_others_in_the_run_live(pool:
     );
     let finalized = finalize_payroll_run(&pool, &run_id, "finalizer")
         .await
-        .unwrap();
+        .unwrap()
+        .finalized;
     let finalized_payroll_id = |employment: &EmploymentId| {
         finalized
             .iter()

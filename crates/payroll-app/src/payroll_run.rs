@@ -5,6 +5,8 @@
 //! ADR-0015), so a single entry point taking a `kind` would branch on its
 //! first line and share nothing after it.
 
+use std::collections::HashMap;
+
 use chrono::NaiveDate;
 use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, TaxYear};
 use sqlx::PgPool;
@@ -155,6 +157,79 @@ pub async fn create_ordinary_payroll_run(
     Ok(run_id)
 }
 
+/// Creates a Draft Correction `PayrollRun` for `employer_id` and `period`,
+/// with its own `pay_date` and a mandatory, non-empty `correction_reason`
+/// (§4.6, §4.8, ADR-0015). Proposes nobody: unlike an Ordinary run, nothing
+/// is auto-included — `add_employment_to_correction_run` is the only way a
+/// member joins, and it accepts exactly one.
+///
+/// `correction_reason` is checked here, before anything is written, though
+/// `payroll_run`'s own CHECK (migration 0007) would refuse an empty one
+/// regardless — the same belt-and-braces `remove_employment_from_run` and
+/// `reverse_finalized_payroll` already apply to their own mandatory reasons.
+///
+/// Unlike [`create_ordinary_payroll_run`], `period` is not checked against
+/// the Employer's `PaySchedule`: a Correction run corrects a period that was
+/// already run once, under whatever schedule was in force then, and nothing
+/// downstream — no walk-back (§7.4), no uniqueness index keyed on it — needs
+/// it to be one the *current* schedule still generates.
+pub async fn create_correction_run(
+    pool: &PgPool,
+    employer_id: &EmployerId,
+    period: PayPeriod,
+    pay_date: NaiveDate,
+    correction_reason: &str,
+    created_by: &str,
+) -> Result<PayrollRunId, PayrollAppError> {
+    if correction_reason.trim().is_empty() {
+        return Err(PayrollAppError::CorrectionReasonCannotBeEmpty);
+    }
+
+    let mut tx = pool.begin().await?;
+
+    let employer_exists: Option<bool> =
+        sqlx::query_scalar("SELECT TRUE FROM employer WHERE id = $1")
+            .bind(employer_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    if employer_exists.is_none() {
+        return Err(PayrollAppError::EmployerNotFound(employer_id.clone()));
+    }
+
+    let id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status,
+             correction_reason, created_by)
+         VALUES ($1, $2, $3, $4, 'correction', 'draft', $5, $6)
+         RETURNING id::text",
+    )
+    .bind(employer_id.as_str())
+    .bind(period.start())
+    .bind(period.end())
+    .bind(pay_date)
+    .bind(correction_reason)
+    .bind(created_by)
+    .fetch_one(&mut *tx)
+    .await?;
+    let run_id = PayrollRunId::new(id);
+
+    write_action_log_entry(
+        &mut tx,
+        ActionLogEntry {
+            employer_id,
+            actor: created_by,
+            action_type: ActionType::PayrollRunCreated,
+            target_type: "payroll_run",
+            target_id: run_id.as_str(),
+            context: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(run_id)
+}
+
 /// Refuses a run in a TaxYear whose already finalized periods `schedule` no
 /// longer generates — proof the Employer's `PaySchedule` moved inside a
 /// TaxYear that had already finalized payroll. Only the finalized periods
@@ -245,15 +320,16 @@ pub(crate) async fn lock_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<LockedRun, PayrollAppError> {
-    let run: Option<(String, String, NaiveDate, NaiveDate, String)> = sqlx::query_as(
-        "SELECT kind, status, period_start, period_end, employer_id
+    let run: Option<(String, String, NaiveDate, NaiveDate, String, Option<String>)> =
+        sqlx::query_as(
+            "SELECT kind, status, period_start, period_end, employer_id, correction_reason
          FROM payroll_run WHERE id = $1::uuid FOR UPDATE",
-    )
-    .bind(payroll_run_id.as_str())
-    .fetch_optional(&mut **tx)
-    .await?;
+        )
+        .bind(payroll_run_id.as_str())
+        .fetch_optional(&mut **tx)
+        .await?;
 
-    let Some((kind, status, period_start, period_end, employer_id)) = run else {
+    let Some((kind, status, period_start, period_end, employer_id, correction_reason)) = run else {
         return Err(PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()));
     };
     Ok(LockedRun {
@@ -262,6 +338,7 @@ pub(crate) async fn lock_run(
         period: PayPeriod::new(period_start, period_end)
             .expect("payroll_run CHECK: period_end is never before period_start"),
         employer_id: EmployerId::new(employer_id),
+        correction_reason,
     })
 }
 
@@ -271,6 +348,12 @@ pub(crate) struct LockedRun {
     pub status: RunStatus,
     pub period: PayPeriod,
     pub employer_id: EmployerId,
+    /// `payroll_run.correction_reason` — always `Some` for a Correction run
+    /// and always `None` for an Ordinary one (§4.6's CHECK). Read here so
+    /// `add_employment_to_correction_run` can carry it into its own
+    /// `ActionLog` entry without a second read of a row this lock already
+    /// holds.
+    pub correction_reason: Option<String>,
 }
 
 /// The two kinds of run §4.6 names, as a type rather than the `TEXT` the
@@ -341,6 +424,26 @@ pub(crate) async fn active_member_ids(
     Ok(member_ids)
 }
 
+/// The declared `replaces_finalized_payroll_id` for every active member of
+/// `payroll_run_id`, by `EmploymentId`. Always `None` for an Ordinary
+/// member — only a Correction run's single membership row ever carries one
+/// (§4.8) — so `finalize_payroll_run` reads it unconditionally, by kind,
+/// rather than branching to skip it for Ordinary.
+pub(crate) async fn declared_lineage_by_member(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<HashMap<String, Option<String>>, PayrollAppError> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT employment_id, replaces_finalized_payroll_id::text
+         FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND removed_at IS NULL",
+    )
+    .bind(payroll_run_id.as_str())
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Locks a run, verifies working state may still change, and puts the run
 /// back into `Draft` so the edit about to happen is reflected in its status.
 ///
@@ -361,10 +464,10 @@ pub(crate) async fn active_member_ids(
 ///
 /// The lock is taken before the status is judged, so a finalizer cannot
 /// move the same run to `Finalized` between this check and the mutation.
-async fn lock_and_reopen_run(
+pub(crate) async fn lock_and_reopen_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
-) -> Result<RunKind, PayrollAppError> {
+) -> Result<LockedRun, PayrollAppError> {
     let run = lock_run(tx, payroll_run_id).await?;
     if run.status == RunStatus::Finalized {
         return Err(PayrollAppError::PayrollRunAlreadyFinalized(
@@ -379,7 +482,7 @@ async fn lock_and_reopen_run(
     .execute(&mut **tx)
     .await?;
 
-    Ok(run.kind)
+    Ok(run)
 }
 
 /// Removes `employment_id` from `payroll_run_id`'s working membership.
@@ -415,8 +518,8 @@ pub async fn remove_employment_from_run(
     }
 
     let mut tx = pool.begin().await?;
-    let kind = lock_and_reopen_run(&mut tx, payroll_run_id).await?;
-    if kind != RunKind::Ordinary {
+    let run = lock_and_reopen_run(&mut tx, payroll_run_id).await?;
+    if run.kind != RunKind::Ordinary {
         return Err(PayrollAppError::PayrollRunIsNotOrdinary(
             payroll_run_id.clone(),
         ));

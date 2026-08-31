@@ -322,7 +322,8 @@ async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool:
     assert_eq!(refusals, Vec::new());
     let finalized = finalize_payroll_run(&pool, &march_run_id, "finalizer")
         .await
-        .unwrap();
+        .unwrap()
+        .finalized;
     let (_, finalized_payroll_id) = finalized
         .into_iter()
         .find(|(id, _)| *id == employment_id)

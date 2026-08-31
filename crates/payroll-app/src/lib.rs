@@ -10,6 +10,7 @@
 mod action_log;
 mod calculate;
 mod compensation_terms;
+mod correction;
 mod employer;
 mod employment;
 mod error;
@@ -27,13 +28,17 @@ mod year_to_date;
 pub use action_log::ActionType;
 pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
 pub use compensation_terms::record_compensation_terms;
+pub use correction::{EarningPrePopulation, add_employment_to_correction_run};
 pub use employer::{change_pay_schedule, create_employer};
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::{PayrollAppError, ScheduleBoundedFact};
-pub use finalize::{FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run};
+pub use finalize::{
+    FinalizationOutcome, FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run,
+};
 pub use opening_balance::record_opening_balance;
 pub use payroll_run::{
-    PayrollRunId, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
+    PayrollRunId, create_correction_run, create_ordinary_payroll_run, remove_employment_from_run,
+    set_run_earnings,
 };
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use reversal::reverse_finalized_payroll;
