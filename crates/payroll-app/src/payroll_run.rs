@@ -207,16 +207,30 @@ fn validate_period_is_one_the_schedule_generates(
 /// Whether an Employment spanning `[start_date, end_date]` overlaps
 /// `period`. `end_date` of `None` means still employed, so it overlaps
 /// everything from `start_date` onward.
+fn overlaps(period: PayPeriod, start_date: NaiveDate, end_date: Option<NaiveDate>) -> bool {
+    start_date <= period.end() && end_date.is_none_or(|end| end >= period.start())
+}
+
+/// One member's Employment span, read once under the `FOR SHARE` lock
+/// `finalize_payroll_run` takes over every member's `employment` row (§5.4)
+/// and passed on from there, so no later step re-reads a row it is already
+/// holding.
 ///
-/// `pub(crate)`, not private: [`crate::sequencing`] decides §7.1 branch 1 —
-/// "P does not overlap the Employment" — with this exact same predicate,
-/// because it is the same question membership itself is decided by.
-pub(crate) fn overlaps(
-    period: PayPeriod,
+/// [`crate::sequencing`] decides §7.1 branch 1 — "P does not overlap the
+/// Employment" — from this, with the same [`overlaps`] predicate membership
+/// itself is decided by.
+#[derive(sqlx::FromRow)]
+pub(crate) struct EmploymentSpan {
+    pub(crate) id: String,
     start_date: NaiveDate,
     end_date: Option<NaiveDate>,
-) -> bool {
-    start_date <= period.end() && end_date.is_none_or(|end| end >= period.start())
+}
+
+impl EmploymentSpan {
+    /// Whether this Employment overlaps `period` — see [`overlaps`].
+    pub(crate) fn overlaps(&self, period: PayPeriod) -> bool {
+        overlaps(period, self.start_date, self.end_date)
+    }
 }
 
 /// Takes the run's `FOR UPDATE` lock and reads back the columns every

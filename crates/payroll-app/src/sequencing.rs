@@ -44,14 +44,16 @@
 //! (ADR-0001), so a TaxYear Salt never touched cannot block the one it
 //! does.
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::NaiveDate;
 use payroll::{EmployerId, EmploymentId, PayPeriod, PaySchedule, TaxYear};
 
 use crate::error::PayrollAppError;
-use crate::payroll_run::overlaps;
+use crate::payroll_run::EmploymentSpan;
 
 /// Refuses unless `period`'s immediately preceding `PayPeriod` — in the same
-/// TaxYear — is resolved (§7.1) for every one of `member_ids`. This is
+/// TaxYear — is resolved (§7.1) for every one of `members`. This is
 /// §5.3 step 3's Ordinary column; a Correction run checks its own period
 /// alone and never walks back (§7.4), so it does not call this.
 ///
@@ -60,6 +62,11 @@ use crate::payroll_run::overlaps;
 /// schedule's `preceding_period` may find nothing at the very edge of the
 /// representable calendar. Either way there is nothing before `period` this
 /// check is responsible for.
+///
+/// `tax_year` is `period`'s own, passed in rather than re-derived, because
+/// the caller has already resolved the run's rules from it — one TaxYear
+/// governs the whole finalization, and two derivations of it could only
+/// ever disagree by accident.
 ///
 /// Takes no lock of its own. The `FOR SHARE` `finalize_payroll_run` has
 /// already taken on every member's `employment` row before calling this is
@@ -76,13 +83,13 @@ pub(crate) async fn verify_the_preceding_period_is_resolved_for_every_member(
     employer_id: &EmployerId,
     schedule: PaySchedule,
     period: PayPeriod,
-    member_ids: &[String],
+    tax_year: TaxYear,
+    members: &[EmploymentSpan],
 ) -> Result<(), PayrollAppError> {
     let Some(preceding) = schedule.preceding_period(period) else {
         return Ok(());
     };
 
-    let tax_year = TaxYear::for_period_end(period.end());
     if TaxYear::for_period_end(preceding.end()) != tax_year {
         // The walk stops at the TaxYear boundary (§7.2): `period` is that
         // TaxYear's own first period under this schedule, so nothing before
@@ -90,13 +97,15 @@ pub(crate) async fn verify_the_preceding_period_is_resolved_for_every_member(
         return Ok(());
     }
 
-    for member_id in member_ids {
-        let employment_id = EmploymentId::new(member_id.clone());
-        if !preceding_period_is_resolved(tx, &employment_id, employer_id, tax_year, preceding)
-            .await?
-        {
+    let member_ids: Vec<String> = members.iter().map(|member| member.id.clone()).collect();
+    let records =
+        RecordsForThePrecedingPeriod::read(tx, employer_id, tax_year, preceding.end(), &member_ids)
+            .await?;
+
+    for member in members {
+        if !records.resolve(member, preceding) {
             return Err(PayrollAppError::PrecedingPeriodUnresolved {
-                employment_id,
+                employment_id: EmploymentId::new(member.id.clone()),
                 period: preceding,
             });
         }
@@ -104,99 +113,138 @@ pub(crate) async fn verify_the_preceding_period_is_resolved_for_every_member(
     Ok(())
 }
 
-/// Whether `preceding` is resolved for `employment_id` — §7.1's four
-/// branches, checked in the order the section states them. The branches are
-/// not mutually exclusive; whichever is found first is why this stops
-/// looking, not a claim that the others do not also hold.
-async fn preceding_period_is_resolved(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    employment_id: &EmploymentId,
-    employer_id: &EmployerId,
-    tax_year: TaxYear,
-    preceding: PayPeriod,
-) -> Result<bool, PayrollAppError> {
-    // Branch 1: outside the Employment. The exact predicate
-    // `create_ordinary_payroll_run` uses to decide membership itself.
-    let (start_date, end_date): (NaiveDate, Option<NaiveDate>) =
-        sqlx::query_as("SELECT start_date, end_date FROM employment WHERE id = $1")
-            .bind(employment_id.as_str())
-            .fetch_one(&mut **tx)
-            .await?;
-    if !overlaps(preceding, start_date, end_date) {
-        return Ok(true);
+/// Every record §7.1 branches 2-4 ask about, for the whole membership at
+/// once: four statements, whatever the member count, rather than up to four
+/// per member inside the finalization transaction.
+///
+/// Reading all four up front — instead of stopping at the first branch that
+/// answers for a given member — costs nothing a run of any size notices, and
+/// keeps the branch order a property of [`Self::resolve`] alone, where §7.1
+/// states it.
+struct RecordsForThePrecedingPeriod {
+    /// Branch 2: `(E, Y)`'s `SaltCoverageStart`, for the members that have
+    /// an `OpeningBalance` for this TaxYear at all.
+    salt_coverage_start: HashMap<String, NaiveDate>,
+    /// Branch 3: the members with a live `FinalizedPayroll` for the period.
+    paid: HashSet<String>,
+    /// Branch 4, first half: the members removed with a mandatory reason
+    /// from the finalized Ordinary run for the period.
+    removed_with_a_reason: HashSet<String>,
+    /// Branch 4, second half: the members Salt holds at least one
+    /// `FinalizedPayroll` for, every one of which carries a `Reversal`.
+    every_payroll_reversed: HashSet<String>,
+}
+
+impl RecordsForThePrecedingPeriod {
+    async fn read(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        employer_id: &EmployerId,
+        tax_year: TaxYear,
+        period_end: NaiveDate,
+        member_ids: &[String],
+    ) -> Result<Self, PayrollAppError> {
+        let salt_coverage_start: Vec<(String, NaiveDate)> = sqlx::query_as(
+            "SELECT employment_id, first_salt_period_end FROM opening_balance
+             WHERE employment_id = ANY($1) AND tax_year = $2",
+        )
+        .bind(member_ids)
+        .bind(tax_year.starting_year())
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let paid: Vec<String> = sqlx::query_scalar(
+            "SELECT employment_id FROM live_finalized_payroll
+             WHERE employment_id = ANY($1) AND period_end = $2",
+        )
+        .bind(member_ids)
+        .bind(period_end)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        // A removal from a run that has not itself finalized says nothing
+        // yet — the run could still be recalculated with the member added
+        // back, or never finalized at all — so `status = 'finalized'` is
+        // part of the question, not an incidental filter.
+        let removed_with_a_reason: Vec<String> = sqlx::query_scalar(
+            "SELECT payroll_run_employment.employment_id
+             FROM payroll_run_employment
+             JOIN payroll_run ON payroll_run.id = payroll_run_employment.payroll_run_id
+             WHERE payroll_run_employment.employment_id = ANY($1)
+               AND payroll_run.employer_id = $2
+               AND payroll_run.period_end = $3
+               AND payroll_run.kind = 'ordinary'
+               AND payroll_run.status = 'finalized'
+               AND payroll_run_employment.removed_at IS NOT NULL",
+        )
+        .bind(member_ids)
+        .bind(employer_id.as_str())
+        .bind(period_end)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        // §7.1 branch 4 says *every* `FinalizedPayroll` for the period has
+        // been reversed, so the `Reversal` rows are what this asks for. The
+        // absence of a `live_finalized_payroll` row would be a cheaper
+        // stand-in and is one today, but it is an absence — and an absence
+        // never resolves a period (§7.1). `reversal` holds at most one row
+        // per `FinalizedPayroll` (migration 0011), so the join cannot fan
+        // out and the count is exactly "payrolls still unreversed".
+        let every_payroll_reversed: Vec<String> = sqlx::query_scalar(
+            "SELECT finalized_payroll.employment_id
+             FROM finalized_payroll
+             LEFT JOIN reversal ON reversal.finalized_payroll_id = finalized_payroll.id
+             WHERE finalized_payroll.employment_id = ANY($1)
+               AND finalized_payroll.period_end = $2
+             GROUP BY finalized_payroll.employment_id
+             HAVING count(*) FILTER (WHERE reversal.id IS NULL) = 0",
+        )
+        .bind(member_ids)
+        .bind(period_end)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        Ok(Self {
+            salt_coverage_start: salt_coverage_start.into_iter().collect(),
+            paid: paid.into_iter().collect(),
+            removed_with_a_reason: removed_with_a_reason.into_iter().collect(),
+            every_payroll_reversed: every_payroll_reversed.into_iter().collect(),
+        })
     }
 
-    // Branch 2: before Salt. An `OpeningBalance` for (E, Y) puts `preceding`
-    // inside the figures it carries, once its boundary is at or after
-    // `preceding`'s own end.
-    let salt_coverage_start: Option<NaiveDate> = sqlx::query_scalar(
-        "SELECT first_salt_period_end FROM opening_balance
-         WHERE employment_id = $1 AND tax_year = $2",
-    )
-    .bind(employment_id.as_str())
-    .bind(tax_year.starting_year())
-    .fetch_optional(&mut **tx)
-    .await?;
-    if salt_coverage_start.is_some_and(|coverage_start| preceding.end() < coverage_start) {
-        return Ok(true);
+    /// Whether `preceding` is resolved for `member` — §7.1's four branches,
+    /// asked in the order the section states them. The branches are not
+    /// mutually exclusive; whichever answers first is why this stops
+    /// looking, not a claim that the others do not also hold.
+    fn resolve(&self, member: &EmploymentSpan, preceding: PayPeriod) -> bool {
+        // Branch 1: outside the Employment. The exact predicate
+        // `create_ordinary_payroll_run` uses to decide membership itself.
+        if !member.overlaps(preceding) {
+            return true;
+        }
+
+        // Branch 2: before Salt. An `OpeningBalance` for (E, Y) puts
+        // `preceding` inside the figures it carries, once its boundary
+        // falls strictly after `preceding`'s own end — a boundary *on* that
+        // end makes `preceding` Salt's own first period, which branch 3 or
+        // branch 4 answers for, not this one.
+        if self
+            .salt_coverage_start
+            .get(&member.id)
+            .is_some_and(|coverage_start| preceding.end() < *coverage_start)
+        {
+            return true;
+        }
+
+        // Branch 3: paid.
+        if self.paid.contains(&member.id) {
+            return true;
+        }
+
+        // Branch 4: explicitly not paid — a reasoned removal from the
+        // finalized Ordinary run, or every `FinalizedPayroll` for the period
+        // reversed with none live. A bare reversal resolves its period; it
+        // is not a gap (§7.1).
+        self.removed_with_a_reason.contains(&member.id)
+            || (self.every_payroll_reversed.contains(&member.id) && !self.paid.contains(&member.id))
     }
-
-    // Branch 3: paid. A live `FinalizedPayroll` for (E, preceding.end()).
-    let live: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM live_finalized_payroll
-            WHERE employment_id = $1 AND period_end = $2
-         )",
-    )
-    .bind(employment_id.as_str())
-    .bind(preceding.end())
-    .fetch_one(&mut **tx)
-    .await?;
-    if live {
-        return Ok(true);
-    }
-
-    // Branch 4, second half: every `FinalizedPayroll` Salt holds for
-    // (E, preceding.end()) has been reversed. `live` is already known false
-    // above, so any row found here is necessarily reversed — a bare
-    // reversal resolves its period; it is not a gap (§7.1).
-    let ever_finalized: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM finalized_payroll
-            WHERE employment_id = $1 AND period_end = $2
-         )",
-    )
-    .bind(employment_id.as_str())
-    .bind(preceding.end())
-    .fetch_one(&mut **tx)
-    .await?;
-    if ever_finalized {
-        return Ok(true);
-    }
-
-    // Branch 4, first half: E was removed with a mandatory reason from the
-    // finalized Ordinary run for `preceding`. A removal from a run that has
-    // not itself finalized says nothing yet — the run could still be
-    // recalculated with the member added back, or never finalized at all —
-    // so `payroll_run.status = 'finalized'` is part of the question, not an
-    // incidental filter.
-    let removed_with_reason: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM payroll_run_employment
-            JOIN payroll_run ON payroll_run.id = payroll_run_employment.payroll_run_id
-            WHERE payroll_run_employment.employment_id = $1
-              AND payroll_run.employer_id = $2
-              AND payroll_run.period_end = $3
-              AND payroll_run.kind = 'ordinary'
-              AND payroll_run.status = 'finalized'
-              AND payroll_run_employment.removed_at IS NOT NULL
-         )",
-    )
-    .bind(employment_id.as_str())
-    .bind(employer_id.as_str())
-    .bind(preceding.end())
-    .fetch_one(&mut **tx)
-    .await?;
-
-    Ok(removed_with_reason)
 }

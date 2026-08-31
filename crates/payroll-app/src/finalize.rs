@@ -48,7 +48,9 @@ use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
 use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
-use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run};
+use crate::payroll_run::{
+    EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run,
+};
 use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
 
 /// The shape of the three JSONB snapshots this code freezes (§9, §9.1).
@@ -158,20 +160,22 @@ pub async fn finalize_payroll_run(
     // finalizing figures nobody approved. `ORDER BY id` fixes one acquisition
     // order for every finalizer, so two overlapping runs queue rather than
     // deadlock.
-    lock_member_employments(&mut tx, &member_ids).await?;
+    let members = lock_member_employments(&mut tx, &member_ids).await?;
 
     // §5.3 step 3, §7.2: an Ordinary run refuses unless the immediately
     // preceding PayPeriod of the same TaxYear is resolved for every member.
     // Run after the lock above, for the same reason master data is read
     // after it: a concurrent `OpeningBalance` or `PriorEmployment` write on
     // one of these same `employment` rows must not interleave with this
-    // read (§5.4).
+    // read (§5.4). It is handed the spans the lock itself already read,
+    // rather than reading those same locked rows a second time.
     verify_the_preceding_period_is_resolved_for_every_member(
         &mut tx,
         &employer_id,
         schedule,
         period,
-        &member_ids,
+        tax_year,
+        &members,
     )
     .await?;
 
@@ -281,19 +285,26 @@ pub async fn finalize_payroll_run(
 }
 
 /// Takes `FOR SHARE` on each member's `employment` row, in one statement and
-/// in a fixed order. Reading the ids back is what proves the lock was taken:
-/// a member whose Employment vanished between the membership read and this
-/// one is impossible — `employment` is never physically deleted (§4.3) — so
-/// a short result would mean the schema no longer matches this code.
+/// in a fixed order, and returns the span each locked row carries. Reading
+/// the rows back is what proves the lock was taken: a member whose
+/// Employment vanished between the membership read and this one is
+/// impossible — `employment` is never physically deleted (§4.3) — so a short
+/// result would mean the schema no longer matches this code.
+///
+/// The spans come back rather than being discarded because the caller's very
+/// next step needs them (§7.1 branch 1), and re-reading a row this statement
+/// is already holding would be a second read of the same locked fact.
 async fn lock_member_employments(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     member_ids: &[String],
-) -> Result<(), PayrollAppError> {
-    let locked: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM employment WHERE id = ANY($1) ORDER BY id FOR SHARE")
-            .bind(member_ids)
-            .fetch_all(&mut **tx)
-            .await?;
+) -> Result<Vec<EmploymentSpan>, PayrollAppError> {
+    let locked: Vec<EmploymentSpan> = sqlx::query_as(
+        "SELECT id, start_date, end_date FROM employment
+         WHERE id = ANY($1) ORDER BY id FOR SHARE",
+    )
+    .bind(member_ids)
+    .fetch_all(&mut **tx)
+    .await?;
 
     assert_eq!(
         locked.len(),
@@ -301,7 +312,7 @@ async fn lock_member_employments(
         "an Employment is never physically deleted (§4.3), so every active \
          member of a run still has a row to lock"
     );
-    Ok(())
+    Ok(locked)
 }
 
 /// Reads back one member's approved `WorkingPayrollCalculation`. A missing

@@ -242,6 +242,57 @@ async fn branch_4a_a_reasoned_removal_from_the_finalized_ordinary_run_resolves_i
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 }
 
+/// The other side of branch 4's first half: a reasoned removal only resolves
+/// the period once the run it was made in has itself **finalized** (§4.8). A
+/// removal from a run still sitting in `Draft` or `Calculated` says nothing
+/// yet — that run may still be recalculated with the member added back, or
+/// never finalized at all — so April must still refuse.
+#[sqlx::test]
+async fn branch_4a_a_removal_from_a_run_that_never_finalized_does_not_resolve_it(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        date(2026, 3, 1),
+        TaxYear::starting(2026),
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+
+    // March is created and the member removed with a reason, exactly as in
+    // the test above — but March is left open, never finalized.
+    let march_run_id = create_ordinary_payroll_run(
+        &pool,
+        &employer_id,
+        month_period(2026, 3),
+        date(2026, 4, 5),
+        "actor",
+    )
+    .await
+    .unwrap();
+    remove_employment_from_run(
+        &pool,
+        &march_run_id,
+        &employment_id,
+        "on unpaid leave all of March",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let result =
+        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PrecedingPeriodUnresolved {
+            employment_id,
+            period: month_period(2026, 3),
+        })
+    );
+}
+
 // ---- §7.1 branch 4, second half: bare reversal ----
 
 #[sqlx::test]
