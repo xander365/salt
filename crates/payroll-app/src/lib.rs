@@ -20,6 +20,7 @@ mod opening_balance;
 mod payroll_run;
 mod prior_employment;
 mod reversal;
+mod sequencing;
 mod unsupported_deduction_status;
 mod year_to_date;
 

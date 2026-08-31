@@ -259,6 +259,18 @@ pub enum PayrollAppError {
     /// than as some substitute date, so the refusal points at what the caller
     /// actually supplied.
     TaxYearOutsideRepresentableCalendar { tax_year: TaxYear },
+    /// `FinalizePayrollRun` was asked to finalize an Ordinary run whose
+    /// immediately preceding `PayPeriod`, in the same `TaxYear`, is not
+    /// resolved (§5.3 step 3, §7.1) for `employment_id` — no live
+    /// `FinalizedPayroll`, no reasoned removal or reversal, no
+    /// `OpeningBalance` boundary before it, and the Employment did overlap
+    /// it. Converts what would otherwise be silent under-withholding into a
+    /// visible refusal naming both the Employment and the unresolved
+    /// `period`.
+    PrecedingPeriodUnresolved {
+        employment_id: EmploymentId,
+        period: PayPeriod,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -496,6 +508,17 @@ impl std::fmt::Display for PayrollAppError {
                  derived",
                 tax_year.starting_year()
             ),
+            Self::PrecedingPeriodUnresolved {
+                employment_id,
+                period,
+            } => write!(
+                f,
+                "finalizing Employment {employment_id} refused: the immediately preceding \
+                 PayPeriod {} to {} is not resolved — no live FinalizedPayroll, no reasoned \
+                 removal or reversal, and no OpeningBalance boundary covers it",
+                period.start(),
+                period.end()
+            ),
         }
     }
 }
@@ -549,7 +572,8 @@ impl std::error::Error for PayrollAppError {
             | Self::PayScheduleChangeBlockedByAnOpenRun { .. }
             | Self::PayScheduleMovedWithinTaxYear { .. }
             | Self::PayScheduleChangeWouldStrandAStoredBoundary { .. }
-            | Self::TaxYearOutsideRepresentableCalendar { .. } => None,
+            | Self::TaxYearOutsideRepresentableCalendar { .. }
+            | Self::PrecedingPeriodUnresolved { .. } => None,
         }
     }
 }

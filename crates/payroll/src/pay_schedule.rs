@@ -222,6 +222,23 @@ impl PaySchedule {
         }
         None
     }
+
+    /// The `PayPeriod` immediately before `period`, under this same
+    /// schedule, or `None` at the very edge of the representable calendar.
+    ///
+    /// `generate_periods` builds every period's start as the previous
+    /// period's own end plus one day, with no gap and no overlap, so the
+    /// period containing the day before `period`'s own start **is** its
+    /// predecessor — [`period_containing`](Self::period_containing), walked
+    /// back one day. This is the one date primitive an Ordinary run's
+    /// finalization needs to find "the immediately preceding PayPeriod"
+    /// (`docs/domain/payroll-run-persistence.md` §7): the caller compares
+    /// its own `TaxYear` against the predecessor's own to decide whether the
+    /// walk has crossed a TaxYear boundary, where it stops.
+    pub fn preceding_period(self, period: PayPeriod) -> Option<PayPeriod> {
+        let day_before_start = period.start().pred_opt()?;
+        self.period_containing(day_before_start)
+    }
 }
 
 /// How many periods `generate_periods` reserves space for up front. A
@@ -461,5 +478,46 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn preceding_period_is_the_one_immediately_before() {
+        let schedule = PaySchedule::new(PeriodEndDay::Day(day(25)));
+        let april = PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap();
+
+        assert_eq!(
+            schedule.preceding_period(april),
+            Some(PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap())
+        );
+    }
+
+    #[test]
+    fn preceding_period_works_for_a_calendar_month_schedule_too() {
+        let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
+        let march = PayPeriod::new(date(2026, 3, 1), date(2026, 3, 31)).unwrap();
+
+        assert_eq!(
+            schedule.preceding_period(march),
+            Some(PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap())
+        );
+    }
+
+    #[test]
+    fn preceding_period_crosses_a_year_boundary() {
+        let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
+        let january = PayPeriod::new(date(2027, 1, 1), date(2027, 1, 31)).unwrap();
+
+        assert_eq!(
+            schedule.preceding_period(january),
+            Some(PayPeriod::new(date(2026, 12, 1), date(2026, 12, 31)).unwrap())
+        );
+    }
+
+    #[test]
+    fn preceding_period_is_none_at_the_very_start_of_the_representable_calendar() {
+        let schedule = PaySchedule::new(PeriodEndDay::LastDayOfMonth);
+        let earliest = PayPeriod::new(NaiveDate::MIN, NaiveDate::MIN).unwrap();
+
+        assert_eq!(schedule.preceding_period(earliest), None);
     }
 }

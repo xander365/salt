@@ -22,15 +22,16 @@
 //! `ActionLog` entry and the run's status change all commit in the one
 //! transaction below.
 //!
-//! **The Ordinary preceding-period check (§5.3 step 3, §7) is deliberately
-//! absent.** It arrives with the sequencing ticket. Every fixture this
-//! module's tests use is an Employment's first payable period, so they stay
-//! valid once that gate lands — approximating it here would be worse than
-//! leaving it out. A `Correction` run is refused outright for the same
-//! reason: §5.3 step 3's Correction column, and the
-//! `replaces_finalized_payroll_id` lineage §9 demands with it, are that
-//! ticket's work — and a run this path cannot finalize correctly must not be
-//! finalized here at all.
+//! **The Ordinary preceding-period check (§5.3 step 3, §7)** runs once every
+//! member's `employment` row is locked and before anything is rebuilt: it
+//! refuses unless the immediately preceding `PayPeriod` of the same TaxYear
+//! is resolved (§7.1) for every member, converting what would otherwise be
+//! silent under-withholding into a visible refusal naming the Employment and
+//! the unresolved period (see [`crate::sequencing`]). A `Correction` run is
+//! refused outright rather than given the equivalent Correction-column check:
+//! §5.3 step 3's Correction column, and the `replaces_finalized_payroll_id`
+//! lineage §9 demands with it, are a later ticket's work — and a run this
+//! path cannot finalize correctly must not be finalized here at all.
 //!
 //! Correctness rests on the run's own `FOR UPDATE` lock and the primary key
 //! on `live_finalized_payroll`, not on the isolation level or an
@@ -48,6 +49,7 @@ use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
 use crate::payroll_run::{PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run};
+use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
 
 /// The shape of the three JSONB snapshots this code freezes (§9, §9.1).
 ///
@@ -157,6 +159,21 @@ pub async fn finalize_payroll_run(
     // order for every finalizer, so two overlapping runs queue rather than
     // deadlock.
     lock_member_employments(&mut tx, &member_ids).await?;
+
+    // §5.3 step 3, §7.2: an Ordinary run refuses unless the immediately
+    // preceding PayPeriod of the same TaxYear is resolved for every member.
+    // Run after the lock above, for the same reason master data is read
+    // after it: a concurrent `OpeningBalance` or `PriorEmployment` write on
+    // one of these same `employment` rows must not interleave with this
+    // read (§5.4).
+    verify_the_preceding_period_is_resolved_for_every_member(
+        &mut tx,
+        &employer_id,
+        schedule,
+        period,
+        &member_ids,
+    )
+    .await?;
 
     let mut earnings_by_member = run_earnings_by_member(&mut tx, payroll_run_id).await?;
 
