@@ -11,7 +11,7 @@ use sqlx::{Acquire, PgPool, Postgres};
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
-use crate::freeze::live_finalized_periods_in_span;
+use crate::freeze::{diverging_periods_json, live_finalized_periods_in_span};
 
 /// Records the `UnsupportedDeductionDeclaration` in force from
 /// `effective_from`, or replaces whichever one already governs that exact
@@ -87,12 +87,12 @@ pub async fn declare_unsupported_deduction_status(
         return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
     };
 
-    // `FOR SHARE OF employment` holds the row against a concurrent
-    // `void_employment`, so a void committing between this read and the
-    // insert cannot leave a declaration recorded against a now-voided
-    // Employment.
+    // This exclusive Employment lock holds the row against a concurrent
+    // `void_employment` and serializes effective-dated master-data writes.
+    // A sibling declaration must not change the span after it is read for
+    // this correction's divergence list.
     let is_void: Option<bool> =
-        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR SHARE")
+        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR UPDATE")
             .bind(employment_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
@@ -180,15 +180,7 @@ pub async fn declare_unsupported_deduction_status(
                     "status": db_status,
                     "kinds": kinds,
                 },
-                "diverging_live_finalized_periods": diverging_periods
-                    .iter()
-                    .map(|period| {
-                        serde_json::json!({
-                            "period_start": period.start(),
-                            "period_end": period.end(),
-                        })
-                    })
-                    .collect::<Vec<_>>(),
+                "diverging_live_finalized_periods": diverging_periods_json(&diverging_periods),
             })),
         },
     )

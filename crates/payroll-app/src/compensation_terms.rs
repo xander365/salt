@@ -5,6 +5,8 @@
 //! gathers a reason and computes a divergence list against live finalized
 //! periods, not something a bare record call can do.
 
+use std::collections::BTreeSet;
+
 use chrono::NaiveDate;
 use payroll::{EmploymentId, Money, PayPeriod, validate_effective_from_is_a_period_start};
 use sqlx::PgPool;
@@ -12,7 +14,7 @@ use sqlx::PgPool;
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
-use crate::freeze::live_finalized_periods_in_span;
+use crate::freeze::{diverging_periods_json, live_finalized_periods_in_span};
 
 /// Records a `CompensationTerms` row effective from `effective_from`. Refused
 /// as a domain refusal, not a database error, when `effective_from` is not a
@@ -90,22 +92,18 @@ pub async fn record_compensation_terms(
 /// divergence list below — the three things §6.5 guard 1 requires of every
 /// correction.
 ///
-/// Returns every Live finalized `PayPeriod` the row **currently** governs:
-/// from `current_effective_from` up to whichever later row's own
-/// `effective_from` already bounds it, or open-ended when none exists.
-/// Computed *before* the row is updated, so the list names exactly what this
-/// correction is about to disagree with — never a refusal (§6.5 guard 2),
-/// and it reads `finalized_payroll` and `live_finalized_payroll` without
-/// writing either (§6.5 guard 3).
+/// Returns every Live finalized `PayPeriod` whose governing
+/// `CompensationTerms` can differ after this correction: the row's old span
+/// and its new span. Computed before the row is updated, so the list names
+/// exactly what this correction is about to disagree with — never a refusal
+/// (§6.5 guard 2), and it reads `finalized_payroll` and
+/// `live_finalized_payroll` without writing either (§6.5 guard 3).
 ///
 /// Splitting a row (§6.5's March/April/May case) is two separate calls, in
-/// this order: [`record_compensation_terms`] inserts the new row first
-/// (unconstrained, since it is new data, not a correction of a fact live
-/// payroll relied on), then this call corrects the *existing* row's
-/// `effective_from` forward. Read in that order, this function's divergence
-/// list still names every period the *original*, wider span covered — an
-/// insert never narrows another row's already-computed "next effective_from"
-/// answer for a call already past that read.
+/// this order: this call first moves the existing row's `effective_from`
+/// forward, then [`record_compensation_terms`] inserts the new earlier row.
+/// The move frees the original `(employment_id, effective_from)` key for the
+/// insert, while its divergence list still names the original wider span.
 pub async fn correct_compensation_terms(
     pool: &PgPool,
     employment_id: &EmploymentId,
@@ -130,8 +128,12 @@ pub async fn correct_compensation_terms(
         return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
     };
 
+    // This exclusive Employment lock serializes every effective-dated
+    // master-data write for the Employment. A sibling insert would otherwise
+    // be able to change the row's span after the divergence list is read but
+    // before this correction commits.
     let is_void: Option<bool> =
-        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR SHARE")
+        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR UPDATE")
             .bind(employment_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
@@ -165,10 +167,10 @@ pub async fn correct_compensation_terms(
         "compensation_terms.basic_pay CHECK: the column holds no negative amount, so it is a Money",
     );
 
-    // The same "next row's effective_from" derivation `get_employment_snapshot`
-    // makes: the row being corrected is in force until whichever later row
-    // already exists, or open-ended.
-    let next_effective_from: Option<NaiveDate> = sqlx::query_scalar(
+    // A correction can move a row across sibling boundaries. Name the union
+    // of its old and new spans so every finalized period whose governing
+    // terms can change reaches both the caller and ActionLog.
+    let old_next_effective_from: Option<NaiveDate> = sqlx::query_scalar(
         "SELECT MIN(effective_from) FROM compensation_terms
          WHERE employment_id = $1 AND effective_from > $2",
     )
@@ -177,13 +179,43 @@ pub async fn correct_compensation_terms(
     .fetch_one(&mut *tx)
     .await?;
 
-    let diverging_periods = live_finalized_periods_in_span(
+    let mut diverging_periods: BTreeSet<PayPeriod> = live_finalized_periods_in_span(
         &mut tx,
         employment_id,
         current_effective_from,
-        next_effective_from,
+        old_next_effective_from,
     )
-    .await?;
+    .await?
+    .into_iter()
+    .collect();
+
+    if new_effective_from != current_effective_from {
+        // Exclude the old row because the UPDATE below removes it. This gives
+        // the first row that will bound the corrected row after the move.
+        let new_next_effective_from: Option<NaiveDate> = sqlx::query_scalar(
+            "SELECT MIN(effective_from) FROM compensation_terms
+             WHERE employment_id = $1
+               AND effective_from > $2
+               AND effective_from <> $3",
+        )
+        .bind(employment_id.as_str())
+        .bind(new_effective_from)
+        .bind(current_effective_from)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        diverging_periods.extend(
+            live_finalized_periods_in_span(
+                &mut tx,
+                employment_id,
+                new_effective_from,
+                new_next_effective_from,
+            )
+            .await?,
+        );
+    }
+
+    let diverging_periods: Vec<PayPeriod> = diverging_periods.into_iter().collect();
 
     sqlx::query(
         "UPDATE compensation_terms SET effective_from = $3, basic_pay = $4
@@ -214,15 +246,7 @@ pub async fn correct_compensation_terms(
                     "effective_from": new_effective_from,
                     "basic_pay_cents": new_basic_pay.cents(),
                 },
-                "diverging_live_finalized_periods": diverging_periods
-                    .iter()
-                    .map(|period| {
-                        serde_json::json!({
-                            "period_start": period.start(),
-                            "period_end": period.end(),
-                        })
-                    })
-                    .collect::<Vec<_>>(),
+                "diverging_live_finalized_periods": diverging_periods_json(&diverging_periods),
             })),
         },
     )

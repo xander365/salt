@@ -37,6 +37,10 @@ fn may() -> PayPeriod {
     PayPeriod::new(date(2026, 5, 1), date(2026, 5, 31)).unwrap()
 }
 
+fn june() -> PayPeriod {
+    PayPeriod::new(date(2026, 6, 1), date(2026, 6, 30)).unwrap()
+}
+
 async fn an_employer(pool: &PgPool) -> EmployerId {
     create_employer(pool, monthly_schedule(), "actor")
         .await
@@ -427,6 +431,43 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
             { "period_start": "2026-05-01", "period_end": "2026-05-31" },
         ])
     );
+}
+
+/// Moving a row past a later sibling changes two disjoint spans: its old
+/// span, and the span it starts governing at the new date. Both must be named
+/// to the caller and ActionLog.
+#[sqlx::test]
+async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        may().start(),
+        Money::from_cents(600000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    for period in [march(), april(), may(), june()] {
+        finalize_period(&pool, &employer_id, period).await;
+    }
+
+    let diverging = correct_compensation_terms(
+        &pool,
+        &employment_id,
+        march().start(),
+        june().start(),
+        Money::from_cents(700000).unwrap(),
+        "the earlier terms began in June",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(diverging, vec![march(), april(), june()]);
 }
 
 // ---- `declare_unsupported_deduction_status`'s reason and divergence ----

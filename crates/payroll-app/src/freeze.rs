@@ -131,3 +131,19 @@ pub(crate) async fn live_finalized_periods_in_span(
         })
         .collect())
 }
+
+/// The ActionLog representation of a correction's named divergence. Both
+/// correctable master-data facts use this exact shape, so it has one owner.
+pub(crate) fn diverging_periods_json(periods: &[PayPeriod]) -> serde_json::Value {
+    serde_json::Value::Array(
+        periods
+            .iter()
+            .map(|period| {
+                serde_json::json!({
+                    "period_start": period.start(),
+                    "period_end": period.end(),
+                })
+            })
+            .collect(),
+    )
+}
