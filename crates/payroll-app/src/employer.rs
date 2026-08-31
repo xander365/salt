@@ -5,7 +5,7 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    DayOfMonth, EmployerId, PaySchedule, PayrollError, PeriodEndDay, TaxYear,
+    DayOfMonth, EmployerId, EmploymentId, PaySchedule, PayrollError, PeriodEndDay, TaxYear,
     validate_effective_from_is_a_period_start,
 };
 use sqlx::PgPool;
@@ -390,6 +390,48 @@ pub(crate) async fn pay_schedule_for_employer(
     .fetch_one(&mut **tx)
     .await?;
     Ok(pay_schedule_from_columns(&kind, value))
+}
+
+/// Locks the Employer of `employment_id` with `FOR SHARE` and hands back
+/// their id and current `PaySchedule`, or `None` when no such Employment
+/// exists.
+///
+/// Every use case that stores a **schedule-bounded date** — a
+/// `SaltCoverageStart`, a `CompensationTerms` `effective_from`, an
+/// `UnsupportedDeductionStatus` `effective_from` — must take this lock
+/// before it validates that date, because
+/// [`change_pay_schedule`]'s stranded-boundary guard reads those three
+/// tables under its own `FOR UPDATE` on this row. Without the lock the two
+/// transactions do not conflict: the writer validates against the schedule
+/// its snapshot shows, the changer's guard runs before the writer's row is
+/// visible, and both commit — leaving exactly the stranded boundary that
+/// guard exists to refuse.
+///
+/// The Employer row is locked **before** the Employment row, never after,
+/// and this separate statement is what fixes that order. Every use case that
+/// holds both takes them the same way round — `create_ordinary_payroll_run`
+/// locks the `employer` row and then touches `employment` through its
+/// membership insert's foreign key, and `finalize_payroll_run` reads the
+/// schedule before it locks its members — so no two of them can deadlock.
+pub(crate) async fn lock_the_pay_schedule_governing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    employment_id: &EmploymentId,
+) -> Result<Option<(EmployerId, PaySchedule)>, PayrollAppError> {
+    let row: Option<(String, String, Option<i16>)> = sqlx::query_as(
+        "SELECT id, period_end_day_kind, period_end_day_value FROM employer
+         WHERE id = (SELECT employer_id FROM employment WHERE id = $1)
+         FOR SHARE",
+    )
+    .bind(employment_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(row.map(|(employer_id, kind, value)| {
+        (
+            EmployerId::new(employer_id),
+            pay_schedule_from_columns(&kind, value),
+        )
+    }))
 }
 
 #[cfg(test)]

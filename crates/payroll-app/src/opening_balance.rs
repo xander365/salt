@@ -9,11 +9,11 @@
 //! being asked to change to.
 
 use chrono::NaiveDate;
-use payroll::{EmployerId, EmploymentId, Money, PayPeriod, PaySchedule, PayrollError, TaxYear};
+use payroll::{EmploymentId, Money, PayPeriod, PaySchedule, PayrollError, TaxYear};
 use sqlx::PgPool;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
-use crate::employer::pay_schedule_from_columns;
+use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 use crate::freeze::employment_has_a_finalization_in;
 
@@ -47,6 +47,19 @@ pub async fn record_opening_balance(
 ) -> Result<(), PayrollAppError> {
     let mut tx = pool.begin().await?;
 
+    // The Employer row is locked first, and `FOR SHARE` is what makes the
+    // `SaltCoverageStart` guard below hold: `change_pay_schedule` takes `FOR
+    // UPDATE` on that row and reads this table looking for a boundary its
+    // new schedule would strand, so without the lock a schedule change and
+    // this write neither conflict nor see each other, and both commit —
+    // storing a SaltCoverageStart that falls mid-period, the single thing
+    // user story 11 exists to prevent.
+    let Some((employer_id, schedule)) =
+        lock_the_pay_schedule_governing(&mut tx, employment_id).await?
+    else {
+        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
+    };
+
     // `FOR UPDATE OF employment` holds the row against a concurrent
     // `void_employment`, so a void committing between this read and the
     // insert cannot leave an OpeningBalance recorded against a now-voided
@@ -59,27 +72,16 @@ pub async fn record_opening_balance(
     // freeze check below hold — otherwise a finalization committing between
     // the check and the upsert would leave an `OpeningBalance` edited after
     // the finalization that re-reads it.
-    let employment: Option<(String, bool, NaiveDate, String, Option<i16>)> = sqlx::query_as(
-        "SELECT employment.employer_id,
-                employment.is_void,
-                employment.start_date,
-                employer.period_end_day_kind,
-                employer.period_end_day_value
-         FROM employment
-         JOIN employer ON employer.id = employment.employer_id
-         WHERE employment.id = $1
-         FOR UPDATE OF employment",
-    )
-    .bind(employment_id.as_str())
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (employer_id, is_void, employment_start_date, kind, value) =
+    let employment: Option<(bool, NaiveDate)> =
+        sqlx::query_as("SELECT is_void, start_date FROM employment WHERE id = $1 FOR UPDATE")
+            .bind(employment_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (is_void, employment_start_date) =
         employment.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
     if is_void {
         return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
     }
-    let employer_id = EmployerId::new(employer_id);
-    let schedule = pay_schedule_from_columns(&kind, value);
 
     // ADR-0013: OpeningBalance is re-read into every later period's
     // YearToDateContext, so once this Employment's first FinalizedPayroll in

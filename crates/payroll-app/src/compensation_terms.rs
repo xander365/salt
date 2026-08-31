@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 use payroll::{EmploymentId, Money, validate_effective_from_is_a_period_start};
 use sqlx::PgPool;
 
-use crate::employer::pay_schedule_from_columns;
+use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 
 /// Records a `CompensationTerms` row effective from `effective_from`. Refused
@@ -30,28 +30,31 @@ pub async fn record_compensation_terms(
 ) -> Result<(), PayrollAppError> {
     let mut tx = pool.begin().await?;
 
+    // The Employer row is locked first, and `FOR SHARE` is what makes the
+    // `effective_from` guard below hold: `change_pay_schedule` takes `FOR
+    // UPDATE` on that row and reads this table looking for an
+    // `effective_from` its new schedule would strand, so without the lock a
+    // schedule change and this write neither conflict nor see each other,
+    // and both commit — leaving a row claiming a rise took effect on a day
+    // that is no longer the start of anything (INV-014).
+    let Some((_, schedule)) = lock_the_pay_schedule_governing(&mut tx, employment_id).await? else {
+        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
+    };
+
     // `FOR SHARE OF employment` holds the row against a concurrent
     // `void_employment`, whose `UPDATE` needs the exclusive lock. Without
     // it, a void committing between this read and the insert would leave a
     // CompensationTerms row recorded against a voided Employment.
-    let schedule_row: Option<(String, Option<i16>, bool)> = sqlx::query_as(
-        "SELECT employer.period_end_day_kind,
-                employer.period_end_day_value,
-                employment.is_void
-         FROM employment
-         JOIN employer ON employer.id = employment.employer_id
-         WHERE employment.id = $1
-         FOR SHARE OF employment",
-    )
-    .bind(employment_id.as_str())
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (kind, value, is_void) =
-        schedule_row.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
+    let is_void: Option<bool> =
+        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR SHARE")
+            .bind(employment_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let is_void =
+        is_void.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
     if is_void {
         return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
     }
-    let schedule = pay_schedule_from_columns(&kind, value);
 
     validate_effective_from_is_a_period_start(schedule, effective_from)?;
 

@@ -215,6 +215,21 @@ refuse, and `CreateOrdinaryPayrollRun` would refuse the old period too, leaving
 a run that can be neither finished nor re-made. A run that exists is a fact, so
 this refusal rests on a fact rather than on the caller's account of the date.
 
+**A change must also strand no boundary already stored.** The `employer` table
+holds one `PaySchedule` and no history, so a change is retroactive for
+everything not already frozen into a `PayrollInput`. The finalization refusal
+protects the periods that have been paid; a second refusal protects the dated
+facts standing ready for the periods that have not. A `SaltCoverageStart`
+(§4.5), a `CompensationTerms` `effective_from` (§4.4) and an
+`UnsupportedDeductionStatus` `effective_from` (§4.5c) are each pinned to a
+boundary the schedule generates, so a change that would leave one of them on a
+date the new schedule does not place is refused and names the fact and the
+date. Only boundaries from the named TaxYear onward are checked: an earlier one
+describes a period already paid, whose `FinalizedPayroll` froze the schedule
+that cut it, and checking those too would make "change it from the next
+TaxYear" unreachable for anyone who has ever run a payroll.
+
+
 ### 4.3 Employment
 
 `Employment` is **never physically deleted**. Ending an Employment is an
@@ -704,6 +719,29 @@ Two mechanisms, in this order:
 `READ COMMITTED` is sufficient: correctness rests on the lock and the key, not
 on isolation level. Neither mechanism depends on an application-side
 `if status != Finalized`.
+
+The same reasoning covers the two guards §4.0 and §4.2 add, and both are
+read-then-write, so both need a lock rather than an isolation level:
+
+- **The freeze.** An edit of a frozen fact takes `FOR UPDATE` on the
+  `employment` row; finalization takes `FOR SHARE` on every member's before it
+  reads any master data. The two conflict, so the loser waits and then sees the
+  winner's committed result — the edit refuses because a `FinalizedPayroll` now
+  exists, or the finalization refuses because the fact it re-reads no longer
+  matches the approved one (§5.2).
+- **The schedule.** `ChangePaySchedule` takes `FOR UPDATE` on the `employer`
+  row; everything that reads the schedule to validate a date against it —
+  finalization, run creation, and each of the three use cases that *store* a
+  schedule-bounded boundary — takes `FOR SHARE` on the same row. Without that
+  last one the stranded-boundary refusal above is decorative: the writer would
+  validate against the schedule its snapshot shows, the changer would look for
+  stored boundaries before the writer's row was visible, and both would commit.
+
+**Lock order is `employer` before `employment`, everywhere.** That is the only
+reason these two rules do not deadlock against each other: run creation locks
+the `employer` row and then reaches `employment` through its membership
+insert's foreign key, so a fact writer that needs both must take the `employer`
+lock in its own statement first rather than joining the two tables in one.
 
 ---
 

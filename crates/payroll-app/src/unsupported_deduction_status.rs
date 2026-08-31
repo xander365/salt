@@ -3,13 +3,13 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    EmploymentId, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
     validate_effective_from_is_a_period_start,
 };
 use sqlx::{Acquire, PgPool, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
-use crate::employer::pay_schedule_from_columns;
+use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 
 /// Records the `UnsupportedDeductionDeclaration` in force from
@@ -56,30 +56,33 @@ pub async fn declare_unsupported_deduction_status(
 
     let mut tx = pool.begin().await?;
 
+    // The Employer row is locked first, and `FOR SHARE` is what makes the
+    // `effective_from` guard below hold: `change_pay_schedule` takes `FOR
+    // UPDATE` on that row and reads this table looking for an
+    // `effective_from` its new schedule would strand, so without the lock a
+    // schedule change and this write neither conflict nor see each other,
+    // and both commit — leaving a declaration governing no period the
+    // schedule generates.
+    let Some((employer_id, schedule)) =
+        lock_the_pay_schedule_governing(&mut tx, employment_id).await?
+    else {
+        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
+    };
+
     // `FOR SHARE OF employment` holds the row against a concurrent
     // `void_employment`, so a void committing between this read and the
     // insert cannot leave a declaration recorded against a now-voided
     // Employment.
-    let employment: Option<(String, bool, String, Option<i16>)> = sqlx::query_as(
-        "SELECT employment.employer_id,
-                employment.is_void,
-                employer.period_end_day_kind,
-                employer.period_end_day_value
-         FROM employment
-         JOIN employer ON employer.id = employment.employer_id
-         WHERE employment.id = $1
-         FOR SHARE OF employment",
-    )
-    .bind(employment_id.as_str())
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (employer_id, is_void, kind, value) =
-        employment.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
+    let is_void: Option<bool> =
+        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR SHARE")
+            .bind(employment_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let is_void =
+        is_void.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
     if is_void {
         return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
     }
-    let employer_id = EmployerId::new(employer_id);
-    let schedule = pay_schedule_from_columns(&kind, value);
 
     validate_effective_from_is_a_period_start(schedule, effective_from)?;
 

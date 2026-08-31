@@ -104,10 +104,22 @@ async fn finalize_march(
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
 ) -> FinalizedPayrollId {
-    let run_id =
-        create_ordinary_payroll_run(pool, employer_id, period(), date(2026, 4, 5), "actor")
-            .await
-            .unwrap();
+    finalize_the_period(pool, employer_id, employment_id, period(), date(2026, 4, 5)).await
+}
+
+/// The same, for any `PayPeriod` — what a test proving "March through July
+/// stay finalized" needs, since a period may only be run once the ones
+/// before it really have been.
+async fn finalize_the_period(
+    pool: &PgPool,
+    employer_id: &EmployerId,
+    employment_id: &EmploymentId,
+    run_period: PayPeriod,
+    pay_date: NaiveDate,
+) -> FinalizedPayrollId {
+    let run_id = create_ordinary_payroll_run(pool, employer_id, run_period, pay_date, "actor")
+        .await
+        .unwrap();
     let refusals = calculate_payroll_run(pool, &run_id, "calculator")
         .await
         .unwrap();
@@ -399,6 +411,70 @@ async fn recording_a_present_provident_fund_status_after_finalization_leaves_ear
             .await
             .unwrap();
     assert_eq!(live, 1, "the March FinalizedPayroll must still be live");
+
+    // April through July — every period the August declaration does not
+    // govern — still run and still finalize. The `ConfirmedNone` in force
+    // from March is what answers for them, and it was neither rewritten nor
+    // superseded.
+    for (month, pay_month) in [(4, 5), (5, 6), (6, 7), (7, 8)] {
+        let last_day = date(2026, pay_month, 1).pred_opt().unwrap();
+        let run_period = PayPeriod::new(date(2026, month, 1), last_day).unwrap();
+        finalize_the_period(
+            &pool,
+            &employer_id,
+            &employment_id,
+            run_period,
+            date(2026, pay_month, 5),
+        )
+        .await;
+    }
+    let live_period_ends: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT period_end FROM live_finalized_payroll
+         WHERE employment_id = $1 ORDER BY period_end",
+    )
+    .bind(employment_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        live_period_ends,
+        vec![
+            date(2026, 3, 31),
+            date(2026, 4, 30),
+            date(2026, 5, 31),
+            date(2026, 6, 30),
+            date(2026, 7, 31),
+        ],
+        "March through July stay finalized and live"
+    );
+
+    // August onward refuses, and refuses at calculation — so it can never
+    // reach the finalization transaction at all, and no reversal is asked
+    // for anywhere along the way.
+    let august = PayPeriod::new(date(2026, 8, 1), date(2026, 8, 31)).unwrap();
+    let august_run =
+        create_ordinary_payroll_run(&pool, &employer_id, august, date(2026, 9, 5), "actor")
+            .await
+            .unwrap();
+    let refusals = calculate_payroll_run(&pool, &august_run, "calculator")
+        .await
+        .unwrap();
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0].employment_id, employment_id);
+    assert!(
+        matches!(
+            refusals[0].refusal,
+            PayrollAppError::Payroll(payroll::PayrollError::UnsupportedDeductionsPresent { .. })
+        ),
+        "August must refuse for the deduction Salt cannot calculate, got {:?}",
+        refusals[0].refusal
+    );
+
+    let reversals: i64 = sqlx::query_scalar("SELECT count(*) FROM reversal")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reversals, 0, "none of this required a reversal");
 }
 
 // ---- PaySchedule change (§4.2, ADR-0013) ----
@@ -1216,4 +1292,152 @@ async fn a_pay_schedule_change_waits_for_a_reader_of_that_schedule(pool: PgPool)
         .await
         .expect("release the lock without changing anything");
     racing_task.await.expect("join racing task");
+}
+
+/// The other half of that conflict, and the one the stranded-boundary guard
+/// actually rests on: a use case *storing* a schedule-bounded date validates
+/// it against the schedule, and `change_pay_schedule` reads that same table
+/// looking for a boundary its new schedule would strand. Neither sees the
+/// other's uncommitted row, so unless the two take conflicting locks on the
+/// `employer` row they both commit and the stored boundary is stranded
+/// anyway. `lock_the_pay_schedule_governing` takes the `FOR SHARE` that
+/// makes them conflict.
+#[sqlx::test]
+async fn storing_a_boundary_waits_for_a_pay_schedule_change(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 6, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // A `change_pay_schedule` in flight, held open at its own `FOR UPDATE`.
+    let mut holder = pool
+        .acquire()
+        .await
+        .expect("acquire the holding connection");
+    let mut holder_tx = holder.begin().await.expect("begin the holding transaction");
+    sqlx::query_scalar::<_, String>(
+        "SELECT period_end_day_kind FROM employer WHERE id = $1 FOR UPDATE",
+    )
+    .bind(employer_id.as_str())
+    .fetch_one(&mut *holder_tx)
+    .await
+    .expect("take the schedule changer's row lock");
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let racing_pool = pool.clone();
+    let racing_employment_id = employment_id.clone();
+    let racing_task = tokio::spawn(async move {
+        started_sender.send(()).expect("notify the lock holder");
+        record_opening_balance(
+            &racing_pool,
+            &racing_employment_id,
+            TaxYear::starting(2026),
+            date(2026, 6, 30),
+            Money::ZERO,
+            Money::ZERO,
+            "actor",
+        )
+        .await
+    });
+
+    started_receiver.await.expect("racing transaction started");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !racing_task.is_finished(),
+        "storing a SaltCoverageStart must wait for the schedule change that \
+         would decide whether it is a period end at all"
+    );
+    holder_tx
+        .rollback()
+        .await
+        .expect("release the lock without changing anything");
+    racing_task
+        .await
+        .expect("join racing task")
+        .expect("the boundary is stored once the schedule change is gone");
+}
+
+/// And the outcome, with both use cases really in flight: a schedule change
+/// and the writing of a boundary that change would strand can never both
+/// succeed. Whichever loses the `employer` row lock sees the other's
+/// committed result — the writer refuses a `SaltCoverageStart` the new
+/// schedule does not place, or the changer refuses the boundary it now finds
+/// stored.
+#[sqlx::test]
+async fn a_pay_schedule_change_and_a_boundary_it_would_strand_never_both_succeed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 6, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let (change, store) = tokio::join!(
+        change_pay_schedule(
+            &pool,
+            &employer_id,
+            twenty_fifth_schedule(),
+            TaxYear::starting(2026),
+            "actor",
+        ),
+        record_opening_balance(
+            &pool,
+            &employment_id,
+            TaxYear::starting(2026),
+            date(2026, 6, 30),
+            Money::ZERO,
+            Money::ZERO,
+            "actor",
+        ),
+    );
+
+    assert!(
+        change.is_ok() != store.is_ok(),
+        "exactly one must succeed: a day-25 schedule does not place a \
+         boundary on the 30th, so both committing would strand it mid-period \
+         — got {change:?} and {store:?}"
+    );
+
+    // Whichever won, what is on record agrees with the schedule on record.
+    let (kind, value): (String, Option<i16>) = sqlx::query_as(
+        "SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1",
+    )
+    .bind(employer_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored_boundary: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT first_salt_period_end FROM opening_balance WHERE employment_id = $1",
+    )
+    .bind(employment_id.as_str())
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    match stored_boundary {
+        Some(boundary) => {
+            assert_eq!(boundary, date(2026, 6, 30));
+            assert_eq!(
+                (kind.as_str(), value),
+                ("last_day_of_month", None),
+                "a stored boundary on the 30th means the schedule change lost"
+            );
+        }
+        None => assert_eq!(
+            (kind.as_str(), value),
+            ("day", Some(25)),
+            "no stored boundary means the schedule change won"
+        ),
+    }
 }
