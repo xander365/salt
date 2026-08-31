@@ -233,6 +233,56 @@ pub enum PayrollAppError {
         tax_year: TaxYear,
         finalized_period_end: NaiveDate,
     },
+    /// `ChangePaySchedule` was asked for a schedule that does not generate a
+    /// boundary already stored against this Employer in the given TaxYear or
+    /// a later one (§4.2, §4.4, §4.5, §4.5c).
+    ///
+    /// The `employer` table holds exactly one `PaySchedule` and no history,
+    /// so every stored boundary is read under whichever schedule is current.
+    /// Letting the change through would leave a `SaltCoverageStart` mid-period
+    /// — the one thing INV-014 and §4.5 guard 1 exist to prevent — or a
+    /// `CompensationTerms` row claiming a rise took effect on a date that is
+    /// no longer the start of anything.
+    ///
+    /// Boundaries in earlier TaxYears are not checked, for the same reason
+    /// the finalization guard is not: their periods have already been paid
+    /// and their `PayrollInput` froze the schedule that cut them, so nothing
+    /// re-reads them against today's schedule.
+    PayScheduleChangeWouldStrandAStoredBoundary {
+        employer_id: EmployerId,
+        fact: ScheduleBoundedFact,
+        boundary: NaiveDate,
+    },
+}
+
+/// Which stored fact carries the boundary a `PaySchedule` change would
+/// strand. Typed rather than free text, for the same reason `ActionType` is:
+/// a caller deciding what to show the Employer next matches on a variant
+/// instead of parsing a sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleBoundedFact {
+    /// `opening_balance.first_salt_period_end`, which must be a `PayPeriod`
+    /// **end** the schedule generates (§4.5 guard 1).
+    SaltCoverageStart,
+    /// `compensation_terms.effective_from`, which must be a `PayPeriod`
+    /// **start** (INV-014).
+    CompensationTermsEffectiveFrom,
+    /// `unsupported_deduction_declaration.effective_from`, which must be a
+    /// `PayPeriod` **start**, so exactly one row governs a period (§4.5c).
+    UnsupportedDeductionEffectiveFrom,
+}
+
+impl std::fmt::Display for ScheduleBoundedFact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::SaltCoverageStart => "an OpeningBalance's SaltCoverageStart",
+            Self::CompensationTermsEffectiveFrom => "a CompensationTerms effective-from date",
+            Self::UnsupportedDeductionEffectiveFrom => {
+                "an UnsupportedDeductionStatus effective-from date"
+            }
+        };
+        f.write_str(name)
+    }
 }
 
 impl std::fmt::Display for PayrollAppError {
@@ -425,6 +475,15 @@ impl std::fmt::Display for PayrollAppError {
                  moved inside a TaxYear that had already finalized payroll",
                 tax_year.starting_year()
             ),
+            Self::PayScheduleChangeWouldStrandAStoredBoundary {
+                employer_id,
+                fact,
+                boundary,
+            } => write!(
+                f,
+                "Employer {employer_id}'s new PaySchedule does not generate {boundary}, which is \
+                 already recorded as {fact}: the change would leave that boundary mid-period"
+            ),
         }
     }
 }
@@ -476,7 +535,8 @@ impl std::error::Error for PayrollAppError {
             | Self::PriorEmploymentFrozenByFinalization { .. }
             | Self::PayScheduleFrozenByFinalization { .. }
             | Self::PayScheduleChangeBlockedByAnOpenRun { .. }
-            | Self::PayScheduleMovedWithinTaxYear { .. } => None,
+            | Self::PayScheduleMovedWithinTaxYear { .. }
+            | Self::PayScheduleChangeWouldStrandAStoredBoundary { .. } => None,
         }
     }
 }

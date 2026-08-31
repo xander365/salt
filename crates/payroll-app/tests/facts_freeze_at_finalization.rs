@@ -16,10 +16,10 @@ use payroll::{
     UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    FinalizedPayrollId, PayrollAppError, calculate_payroll_run, change_pay_schedule,
-    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
-    declare_unsupported_deduction_status, finalize_payroll_run, record_compensation_terms,
-    record_opening_balance, reverse_finalized_payroll,
+    FinalizedPayrollId, PayrollAppError, ScheduleBoundedFact, calculate_payroll_run,
+    change_pay_schedule, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
+    record_compensation_terms, record_opening_balance, reverse_finalized_payroll, void_employment,
 };
 use sqlx::{Acquire, PgPool, Row};
 use tokio::sync::oneshot;
@@ -753,6 +753,295 @@ async fn changing_the_pay_schedule_of_a_missing_employer_is_refused(pool: PgPool
     .await;
 
     assert_eq!(result, Err(PayrollAppError::EmployerNotFound(missing)));
+}
+
+// ---- A PaySchedule change must not strand a stored boundary (§4.2, §4.4, §4.5) ----
+
+/// A `SaltCoverageStart` already on record must remain a `PayPeriod` end the
+/// new schedule generates — the same demand §4.5 guard 1 makes when the row
+/// is first written, now asked of a schedule change instead.
+#[sqlx::test]
+async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_stored_salt_coverage_start(
+    pool: PgPool,
+) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 6, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    // June is this Employment's own first payable period end, so zero
+    // figures over that empty span are the legitimate boundary here.
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 6, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // A day-25 schedule's periods end on the 25th, not the 30th: the
+    // recorded boundary would be stranded mid-period.
+    let result = change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::PayScheduleChangeWouldStrandAStoredBoundary {
+                employer_id: employer_id.clone(),
+                fact: ScheduleBoundedFact::SaltCoverageStart,
+                boundary: date(2026, 6, 30),
+            }
+        )
+    );
+
+    let (kind, value): (String, Option<i16>) = sqlx::query_as(
+        "SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1",
+    )
+    .bind(employer_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kind, "last_day_of_month");
+    assert_eq!(value, None);
+}
+
+/// A `SaltCoverageStart` from a TaxYear earlier than the one the change
+/// names describes a period already paid, so it is not checked — the same
+/// exemption the finalization guard gives an earlier TaxYear (§4.2).
+#[sqlx::test]
+async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_change(
+    pool: PgPool,
+) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2025, 6, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2025),
+        date(2025, 6, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await
+    .unwrap();
+}
+
+/// A void Employment's `OpeningBalance` cannot strand anything: a void
+/// Employment reaches no payroll (§4.3), so no boundary of its own needs
+/// protecting.
+#[sqlx::test]
+async fn a_void_employments_salt_coverage_start_does_not_block_the_change(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        date(2026, 6, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    record_opening_balance(
+        &pool,
+        &employment_id,
+        TaxYear::starting(2026),
+        date(2026, 6, 30),
+        Money::ZERO,
+        Money::ZERO,
+        "actor",
+    )
+    .await
+    .unwrap();
+    void_employment(&pool, &employment_id, "actor")
+        .await
+        .unwrap();
+
+    change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await
+    .unwrap();
+}
+
+/// A `CompensationTerms.effective_from` already on record must remain a
+/// `PayPeriod` start the new schedule generates (INV-014), just as it must
+/// when the row is first written.
+#[sqlx::test]
+async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_terms_effective_from(
+    pool: PgPool,
+) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        period().start(),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        period().start(),
+        Money::from_cents(1_500_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // A day-25 schedule's periods start on the 26th: 1 March is no longer
+    // the start of anything.
+    let result = change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::PayScheduleChangeWouldStrandAStoredBoundary {
+                employer_id: employer_id.clone(),
+                fact: ScheduleBoundedFact::CompensationTermsEffectiveFrom,
+                boundary: period().start(),
+            }
+        )
+    );
+}
+
+/// An `UnsupportedDeductionDeclaration.effective_from` already on record must
+/// remain a `PayPeriod` start the new schedule generates (§4.5c), just as it
+/// must when the row is first written.
+#[sqlx::test]
+async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_deduction_effective_from(
+    pool: PgPool,
+) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        period().start(),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &pool,
+        &employment_id,
+        period().start(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let result = change_pay_schedule(
+        &pool,
+        &employer_id,
+        twenty_fifth_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::PayScheduleChangeWouldStrandAStoredBoundary {
+                employer_id: employer_id.clone(),
+                fact: ScheduleBoundedFact::UnsupportedDeductionEffectiveFrom,
+                boundary: period().start(),
+            }
+        )
+    );
+}
+
+/// A schedule that still generates every stored boundary goes through
+/// unrefused: the new guard only stops a change that would actually strand
+/// something.
+#[sqlx::test]
+async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id = create_employment(
+        &pool,
+        &employer_id,
+        &PersonId::new("person-1"),
+        period().start(),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        period().start(),
+        Money::from_cents(1_500_000).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // Still a last-day-of-month schedule under the hood: every boundary
+    // already recorded against the monthly schedule is unaffected.
+    change_pay_schedule(
+        &pool,
+        &employer_id,
+        monthly_schedule(),
+        TaxYear::starting(2026),
+        "actor",
+    )
+    .await
+    .unwrap();
 }
 
 // ---- Concurrency: a freeze check and a finalization never interleave ----

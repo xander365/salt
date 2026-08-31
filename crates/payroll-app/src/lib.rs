@@ -28,7 +28,7 @@ pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
 pub use compensation_terms::record_compensation_terms;
 pub use employer::{change_pay_schedule, create_employer};
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
-pub use error::PayrollAppError;
+pub use error::{PayrollAppError, ScheduleBoundedFact};
 pub use finalize::{FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run};
 pub use opening_balance::record_opening_balance;
 pub use payroll_run::{
