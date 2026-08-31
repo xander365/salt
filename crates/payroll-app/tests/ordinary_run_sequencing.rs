@@ -781,3 +781,101 @@ async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
         "June must finalize once March-May are back-filled, got {result:?}"
     );
 }
+
+// ---- Every member, not merely some member ----
+
+/// §7.1 is asked once per member and every answer has to be yes. A run
+/// holding one member the preceding period resolves for and one it does not
+/// must refuse — and must name the member it refused for, not the run.
+///
+/// This is also the only place the batched reads behind the check are put in
+/// front of more than one Employment at once: a resolved member must not
+/// answer for an unresolved one.
+#[sqlx::test]
+async fn one_unresolved_member_refuses_the_whole_run_and_names_that_member(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    // Starts 1 April, so March — the preceding period — never overlaps it
+    // and branch 1 resolves March for this one.
+    a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        date(2026, 4, 1),
+        TaxYear::starting(2026),
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    // Starts 1 March and March is never run at all: nothing resolves it.
+    let skipped = a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-2",
+        date(2026, 3, 1),
+        TaxYear::starting(2026),
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+
+    let result =
+        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PrecedingPeriodUnresolved {
+            employment_id: skipped,
+            period: month_period(2026, 3),
+        })
+    );
+
+    // All or nothing (§5.1): the member March *was* resolved for gets no
+    // FinalizedPayroll either.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+/// The same two members, each resolved by a different branch — one by
+/// branch 1 and one by branch 3 — finalize together. Two members answered
+/// from one set of reads, by two different branches, is the shape the
+/// refusal above is the negative of.
+#[sqlx::test]
+async fn members_resolved_by_different_branches_finalize_together(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-1",
+        date(2026, 4, 1),
+        TaxYear::starting(2026),
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    a_fully_declared_employment(
+        &pool,
+        &employer_id,
+        "person-2",
+        date(2026, 3, 1),
+        TaxYear::starting(2026),
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    // March holds person-2 alone — person-1 does not overlap it.
+    finalize_period(&pool, &employer_id, month_period(2026, 3), date(2026, 4, 5))
+        .await
+        .unwrap();
+
+    let result =
+        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+
+    assert!(result.is_ok(), "expected April to finalize, got {result:?}");
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM finalized_payroll WHERE period_end = $1")
+            .bind(date(2026, 4, 30))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2, "both members finalize");
+}
