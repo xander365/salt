@@ -351,9 +351,16 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         period: PayPeriod,
     },
-    /// `CorrectCompensationTerms` was given a reason that is empty or only
-    /// whitespace — the same up-front demand every other mandatory reason in
-    /// this crate makes (§6.5 guard 1).
+    /// A `CompensationTerms` write that diverges from live finalized payroll
+    /// was given a reason that is empty or only whitespace — the same demand
+    /// every other mandatory reason in this crate makes (§6.5 guard 1).
+    ///
+    /// `CorrectCompensationTerms` makes it up front, of every correction.
+    /// `RecordCompensationTerms` makes it only once its divergence list comes
+    /// back non-empty, because an insert that diverges from nothing is an
+    /// ordinary pay rise and owes no explanation — and it makes it *after*
+    /// the acknowledgement check, so a caller asking what diverges is told
+    /// the list rather than asked for a sentence it has no reason to write.
     CompensationTermsCorrectionReasonCannotBeEmpty,
     /// `CorrectCompensationTerms` was asked to correct a `CompensationTerms`
     /// row that does not exist at the given `(employment_id, effective_from)`

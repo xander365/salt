@@ -69,9 +69,17 @@ async fn an_employment_with_basic_pay(
     )
     .await
     .unwrap();
-    record_compensation_terms(pool, &employment_id, march().start(), basic_pay, "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        pool,
+        &employment_id,
+        march().start(),
+        basic_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
     declare_prior_employment(
         pool,
         &employment_id,
@@ -188,6 +196,24 @@ async fn frozen_figures(pool: &PgPool, employment_id: &EmploymentId) -> Vec<(Nai
     sqlx::query_as(
         "SELECT period_end, taxable_remuneration, paye FROM finalized_payroll
          WHERE employment_id = $1 ORDER BY period_end",
+    )
+    .bind(employment_id.as_str())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Every `CompensationTermsCorrected` context this Employment has, in the
+/// order the acts happened. A split writes two — the move, then the insert
+/// over the span the move freed — and each must say what it actually did.
+async fn correction_contexts(
+    pool: &PgPool,
+    employment_id: &EmploymentId,
+) -> Vec<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT context FROM action_log_entry
+         WHERE action_type = 'compensation_terms_corrected' AND target_id = $1
+         ORDER BY occurred_at",
     )
     .bind(employment_id.as_str())
     .fetch_all(pool)
@@ -424,18 +450,27 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
 
     assert_eq!(diverging, vec![march(), april(), may()]);
 
-    // Insert March's true amount as a brand new row — an ordinary record,
-    // not a correction, since nothing before this insert ever relied on it.
+    // Insert March's true amount as a brand new row. March is already
+    // finalized and live, so this insert is a correction too: it takes over
+    // the span `[1 March, 1 April)` the move just freed, and must name and
+    // have that one period acknowledged.
     let true_march_pay = Money::from_cents(550000).unwrap();
-    record_compensation_terms(
+    let insert_diverging = record_compensation_terms(
         &pool,
         &employment_id,
         march().start(),
         true_march_pay,
+        &[march()],
+        "March's true rate, recorded over the period it was already paid for",
         "actor",
     )
     .await
     .unwrap();
+    assert_eq!(
+        insert_diverging,
+        vec![march()],
+        "the insert governs 1 March up to the moved row, and March is live"
+    );
 
     assert_eq!(compensation_terms_row_count(&pool, &employment_id).await, 2);
 
@@ -465,27 +500,42 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
         "May's liveness row must be byte-identical"
     );
 
-    let context: serde_json::Value = sqlx::query_scalar(
-        "SELECT context FROM action_log_entry
-         WHERE action_type = 'compensation_terms_corrected' AND target_id = $1",
-    )
-    .bind(employment_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    // Both halves of the split are logged, each naming its own divergence.
+    let contexts = correction_contexts(&pool, &employment_id).await;
+    assert_eq!(contexts.len(), 2, "a split is two acts, so two entries");
+
+    let moved = &contexts[0];
     assert_eq!(
-        context["reason"],
+        moved["reason"],
         "March rate captured wrong; the terms only took effect in April"
     );
-    assert_eq!(context["before"]["effective_from"], "2026-03-01");
-    assert_eq!(context["after"]["effective_from"], "2026-04-01");
+    assert_eq!(moved["before"]["effective_from"], "2026-03-01");
+    assert_eq!(moved["after"]["effective_from"], "2026-04-01");
     assert_eq!(
-        context["diverging_live_finalized_periods"],
+        moved["diverging_live_finalized_periods"],
         serde_json::json!([
             { "period_start": "2026-03-01", "period_end": "2026-03-31" },
             { "period_start": "2026-04-01", "period_end": "2026-04-30" },
             { "period_start": "2026-05-01", "period_end": "2026-05-31" },
         ])
+    );
+
+    let inserted = &contexts[1];
+    assert_eq!(
+        inserted["reason"],
+        "March's true rate, recorded over the period it was already paid for"
+    );
+    assert_eq!(
+        inserted["before"],
+        serde_json::Value::Null,
+        "no row governed March under this key before the insert, and the \
+         absence is recorded as an absence"
+    );
+    assert_eq!(inserted["after"]["effective_from"], "2026-03-01");
+    assert_eq!(inserted["after"]["basic_pay_cents"], 550000);
+    assert_eq!(
+        inserted["diverging_live_finalized_periods"],
+        serde_json::json!([{ "period_start": "2026-03-01", "period_end": "2026-03-31" }])
     );
 }
 
@@ -503,6 +553,8 @@ async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPoo
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -820,6 +872,8 @@ async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) 
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -907,15 +961,18 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
     assert_eq!(diverging, vec![march(), april(), may()]);
 
     let true_march_pay = Money::from_cents(550000).unwrap();
-    record_compensation_terms(
+    let insert_diverging = record_compensation_terms(
         &pool,
         &employment_id,
         march().start(),
         true_march_pay,
+        &[march()],
+        "March's true rate, over the period already paid at the wrong one",
         "actor",
     )
     .await
     .unwrap();
+    assert_eq!(insert_diverging, vec![march()]);
 
     // Nothing has moved yet. Correcting master data is not paying anybody.
     assert_eq!(
@@ -1007,5 +1064,262 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
         june_context_after.prior_taxable_remuneration()
             > june_context_before.prior_taxable_remuneration(),
         "only the Reversal plus Replacement moves a figure, and this one did"
+    );
+}
+
+// ---- Issue #37: an insert is a correction wherever it diverges ----
+//
+// `record_compensation_terms` was the last way to make master data disagree
+// with paid history in silence. It now computes, requires the acknowledgement
+// of, and logs exactly the same divergence the two correction paths do — but
+// only where there is one. An insert ahead of payroll is untouched.
+
+/// Acceptance criterion 3: the ordinary act stays ordinary. A pay rise stated
+/// from a date nothing has been paid for yet diverges from nothing, needs no
+/// reason, acknowledges an empty list, and is not logged as a correction.
+#[sqlx::test]
+async fn recording_a_rise_ahead_of_payroll_diverges_from_nothing_and_needs_no_reason(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+
+    let diverging = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(600000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        diverging,
+        Vec::new(),
+        "April has never been finalized, so this insert disagrees with nothing"
+    );
+    assert_eq!(compensation_terms_row_count(&pool, &employment_id).await, 2);
+    assert_eq!(
+        correction_entry_count(&pool, &employment_id).await,
+        0,
+        "an insert that diverges from nothing is not a correction"
+    );
+}
+
+/// An insert that lands on a live finalized span names it. Asked with nothing
+/// acknowledged — the way a caller learns the list at all — it is refused,
+/// and no row is written.
+#[sqlx::test]
+async fn an_unacknowledged_insert_over_a_live_finalized_period_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    // The Employment's only row starts in March, so 1 April is free to
+    // insert on — and everything from April on is already paid.
+    for period in [march(), april(), may()] {
+        finalize_period(&pool, &employer_id, period).await;
+    }
+
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(600000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: vec![april(), may()],
+        }),
+        "the insert governs 1 April onwards, and April and May are both live"
+    );
+    assert_eq!(
+        compensation_terms_row_count(&pool, &employment_id).await,
+        1,
+        "a refused insert writes no row"
+    );
+    assert_eq!(correction_entry_count(&pool, &employment_id).await, 0);
+}
+
+/// The acknowledgement is checked before the reason, so a caller asking to
+/// *learn* the list is told the list rather than sent away for a sentence it
+/// has no reason to write yet. Once the list is acknowledged, the reason is
+/// demanded — and until it arrives, nothing is written.
+#[sqlx::test]
+async fn an_acknowledged_insert_over_a_live_finalized_period_still_demands_a_reason(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&pool, &employer_id, april()).await;
+
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(600000).unwrap(),
+        &[april()],
+        "   ",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::CompensationTermsCorrectionReasonCannotBeEmpty)
+    );
+    assert_eq!(
+        compensation_terms_row_count(&pool, &employment_id).await,
+        1,
+        "a refused insert writes no row"
+    );
+    assert_eq!(correction_entry_count(&pool, &employment_id).await, 0);
+}
+
+/// The divergence span of an insert ends at the next row that already exists,
+/// exactly as `declare_unsupported_deduction_status` derives its own — so a
+/// later sibling keeps its own periods out of this insert's list.
+#[sqlx::test]
+async fn an_inserts_divergence_stops_at_the_next_row_that_already_exists(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        may().start(),
+        Money::from_cents(600000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    for period in [march(), april(), may(), june()] {
+        finalize_period(&pool, &employer_id, period).await;
+    }
+
+    // Inserting at 1 April takes `[1 April, 1 May)` — May's own row already
+    // governs from there, so May and June belong to it, not to this insert.
+    let diverging = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(550000).unwrap(),
+        &[april()],
+        "April's true rate",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(diverging, vec![april()]);
+
+    let contexts = correction_contexts(&pool, &employment_id).await;
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0]["reason"], "April's true rate");
+    assert_eq!(contexts[0]["before"], serde_json::Value::Null);
+    assert_eq!(contexts[0]["after"]["effective_from"], "2026-04-01");
+    assert_eq!(contexts[0]["after"]["basic_pay_cents"], 550000);
+    assert_eq!(
+        contexts[0]["diverging_live_finalized_periods"],
+        serde_json::json!([{ "period_start": "2026-04-01", "period_end": "2026-04-30" }])
+    );
+}
+
+/// Acknowledging a period this insert does not diverge from is refused too:
+/// the acknowledgement must be of exactly the list, not merely a superset of
+/// it, or the ActionLog would record agreement to something else.
+#[sqlx::test]
+async fn an_insert_acknowledging_a_period_it_does_not_diverge_from_is_refused(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&pool, &employer_id, march()).await;
+
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(600000).unwrap(),
+        &[march()],
+        "a reason",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::MasterDataDivergenceNotAcknowledged {
+            employment_id: employment_id.clone(),
+            diverging_periods: Vec::new(),
+        }),
+        "March is before this insert's span; it diverges from nothing"
+    );
+    assert_eq!(compensation_terms_row_count(&pool, &employment_id).await, 1);
+}
+
+/// Acceptance criterion 6 for the insert path, asserted directly rather than
+/// trusted: year-to-date sums frozen numeric columns and never master data
+/// (ADR-0012), so an insert over live finalized periods cannot move a cent.
+#[sqlx::test]
+async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgPool) {
+    let employer_id = an_employer(&pool).await;
+    let employment_id =
+        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    for period in [march(), april(), may()] {
+        finalize_period(&pool, &employer_id, period).await;
+    }
+
+    let june_context_before = build_year_to_date_context(&pool, &employment_id, june().end())
+        .await
+        .unwrap();
+    let figures_before = frozen_figures(&pool, &employment_id).await;
+    assert_ne!(
+        june_context_before.prior_taxable_remuneration(),
+        Money::from_cents(0).unwrap(),
+        "the totals under test must be non-zero, or this proves nothing"
+    );
+
+    // Insert a row governing April and May at double the salary they were
+    // both calculated from. Neither may notice.
+    let diverging = record_compensation_terms(
+        &pool,
+        &employment_id,
+        april().start(),
+        Money::from_cents(1000000).unwrap(),
+        &[april(), may()],
+        "the April rise was never recorded",
+        "actor",
+    )
+    .await
+    .unwrap();
+    assert_eq!(diverging, vec![april(), may()]);
+
+    assert_eq!(
+        build_year_to_date_context(&pool, &employment_id, june().end())
+            .await
+            .unwrap(),
+        june_context_before,
+        "an insert over live finalized periods moves no year-to-date total"
+    );
+    assert_eq!(
+        frozen_figures(&pool, &employment_id).await,
+        figures_before,
+        "an insert over live finalized periods moves no finalized figure"
     );
 }

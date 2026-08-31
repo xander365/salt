@@ -109,6 +109,8 @@ async fn compensation_terms_are_accepted_on_a_pay_periods_own_start_date(pool: P
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -134,6 +136,8 @@ async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(po
         &employment_id,
         date(2026, 1, 10),
         Money::from_cents(500000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await;
@@ -168,6 +172,8 @@ async fn recording_compensation_terms_against_a_missing_employment_is_refused(po
         &missing,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await;
@@ -183,13 +189,28 @@ async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool:
     let (_, employment_id) = an_employer_and_employment(&pool).await;
     let basic_pay = Money::from_cents(500000).unwrap();
 
-    record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), basic_pay, "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        basic_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
 
-    let result =
-        record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), basic_pay, "actor")
-            .await;
+    let result = record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        basic_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await;
 
     assert!(
         matches!(result, Err(PayrollAppError::Database(_))),
@@ -254,9 +275,17 @@ async fn voiding_a_missing_employment_is_refused(pool: PgPool) {
 async fn reading_an_employment_back_yields_a_snapshot_the_pure_crate_accepts(pool: PgPool) {
     let (employer_id, employment_id) = an_employer_and_employment(&pool).await;
     let basic_pay = Money::from_cents(500000).unwrap();
-    record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), basic_pay, "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        basic_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
 
     let snapshot = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1))
         .await
@@ -283,12 +312,28 @@ async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_f
     let (_, employment_id) = an_employer_and_employment(&pool).await;
     let march_pay = Money::from_cents(500000).unwrap();
     let april_pay = Money::from_cents(550000).unwrap();
-    record_compensation_terms(&pool, &employment_id, date(2026, 1, 26), march_pay, "actor")
-        .await
-        .unwrap();
-    record_compensation_terms(&pool, &employment_id, date(2026, 2, 26), april_pay, "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 1, 26),
+        march_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    record_compensation_terms(
+        &pool,
+        &employment_id,
+        date(2026, 2, 26),
+        april_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
 
     let first_period = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1))
         .await
@@ -338,6 +383,8 @@ async fn a_voided_employment_yields_no_snapshot_to_calculate_from(pool: PgPool) 
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -366,6 +413,8 @@ async fn a_voided_employment_accepts_no_further_compensation_terms(pool: PgPool)
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await;

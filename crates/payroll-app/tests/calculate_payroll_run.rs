@@ -68,6 +68,8 @@ async fn a_fully_declared_employment(
         &employment_id,
         well_before_the_period(),
         basic_pay,
+        &[],
+        "",
         "actor",
     )
     .await
@@ -321,6 +323,8 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
         &blocked,
         well_before_the_period(),
         Money::from_cents(1200000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -385,6 +389,8 @@ async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
         &blocked,
         well_before_the_period(),
         Money::from_cents(1200000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await

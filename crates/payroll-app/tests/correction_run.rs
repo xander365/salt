@@ -56,9 +56,17 @@ async fn a_fully_declared_employment(
     )
     .await
     .unwrap();
-    record_compensation_terms(pool, &employment_id, period().start(), basic_pay, "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        pool,
+        &employment_id,
+        period().start(),
+        basic_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
     declare_prior_employment(
         pool,
         &employment_id,

@@ -1,9 +1,14 @@
 //! `RecordCompensationTerms` and `CorrectCompensationTerms` (§4.4, §6.5,
-//! §12). Recording is a bare insert of a new row; correcting changes an
-//! existing one — at any time, including where Live finalized payroll
-//! references it — because §6.5 makes a correction a payroll act that
-//! gathers a reason and computes a divergence list against live finalized
-//! periods, not something a bare record call can do.
+//! §12). Recording inserts a new row; correcting changes an existing one.
+//!
+//! Both are payroll acts once they touch a span that already holds live
+//! finalized payroll: §6.5 asks the same three things of every write that
+//! makes master data disagree with paid history, whichever shape the write
+//! takes. So both compute the same divergence list, require the same
+//! acknowledgement of it, and write the same `CompensationTermsCorrected`
+//! entry. What separates them is only that recording asks none of it of an
+//! insert that diverges from nothing — the ordinary act of stating a pay
+//! rise ahead of payroll, which stays as cheap as it ever was.
 
 use std::collections::BTreeSet;
 
@@ -29,19 +34,45 @@ use crate::freeze::{
 /// recorded mistake that never reaches a payroll, so standing pay facts
 /// against it would describe an Employment nobody will ever pay.
 ///
-/// This takes no reason and names no divergence, because stating a pay rise
-/// from a date nothing has been paid for yet is the ordinary act (spec
-/// stories 1 and 2), not a correction. The one place it *does* land on a
-/// live finalized span is the second half of a split (see
-/// [`correct_compensation_terms`]), where the move that precedes it already
-/// named and had that exact span acknowledged.
+/// Returns every Live finalized `PayPeriod` this new row now diverges from:
+/// the periods already finalized inside the span it takes over,
+/// `[effective_from, next_effective_from)`, `next_effective_from` being
+/// whichever later row already exists for this Employment, or open-ended
+/// when none does. That is the same derivation
+/// `declare_unsupported_deduction_status` makes, computed here inside this
+/// call's own transaction and under its Employment lock, so the list names
+/// what the insert is about to disagree with.
+///
+/// Divergence is **never a refusal**. An insert onto a live finalized span
+/// is the second half of §6.5's split (see [`correct_compensation_terms`]),
+/// the one repair the whole correction machinery exists to enable — so it is
+/// warned about, named and acknowledged, never blocked. But it is a
+/// correction wearing an insert's clothes, and it is treated as one:
+///
+/// * `acknowledged_diverging_periods` must name exactly the returned list,
+///   or the call is refused with
+///   [`PayrollAppError::MasterDataDivergenceNotAcknowledged`] carrying it and
+///   nothing is written — the same guard, from the same helper, as the two
+///   correction paths (§6.5 guard 2).
+/// * `reason` must be non-empty, and a `CompensationTermsCorrected` entry
+///   carries it, the after values, and that list (§6.5 guard 1). The
+///   `"before"` is `null`: there was no row, and the absence is recorded as
+///   an absence rather than as a fabricated value.
+///
+/// An insert that diverges from nothing asks for none of that. Pass `&[]`
+/// and an empty `reason`: an Employer stating next quarter's rise is not
+/// correcting anything, no acknowledgement is owed, and no ActionLog entry
+/// is written. Demanding a sentence there is the ceremony §5.1 rejects by
+/// name.
 pub async fn record_compensation_terms(
     pool: &PgPool,
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     basic_pay: Money,
+    acknowledged_diverging_periods: &[PayPeriod],
+    reason: &str,
     created_by: &str,
-) -> Result<(), PayrollAppError> {
+) -> Result<Vec<PayPeriod>, PayrollAppError> {
     let mut tx = pool.begin().await?;
 
     // The Employer row is locked first, and `FOR SHARE` is what makes the
@@ -51,16 +82,26 @@ pub async fn record_compensation_terms(
     // schedule change and this write neither conflict nor see each other,
     // and both commit — leaving a row claiming a rise took effect on a day
     // that is no longer the start of anything (INV-014).
-    let Some((_, schedule)) = lock_the_pay_schedule_governing(&mut tx, employment_id).await? else {
+    let Some((employer_id, schedule)) =
+        lock_the_pay_schedule_governing(&mut tx, employment_id).await?
+    else {
         return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
     };
 
-    // `FOR SHARE OF employment` holds the row against a concurrent
-    // `void_employment`, whose `UPDATE` needs the exclusive lock. Without
-    // it, a void committing between this read and the insert would leave a
+    // `FOR UPDATE` holds the row against a concurrent `void_employment`,
+    // whose `UPDATE` needs the exclusive lock — without it, a void
+    // committing between this read and the insert would leave a
     // CompensationTerms row recorded against a voided Employment.
+    //
+    // It is the exclusive lock rather than `FOR SHARE`, as in
+    // `correct_compensation_terms`, because this call now derives a span
+    // from its sibling rows: two inserts for one Employment would otherwise
+    // not conflict, and each would compute a divergence list the other's
+    // commit falsifies. It also conflicts with `finalize_payroll_run`'s `FOR
+    // SHARE`, so the `live_finalized_payroll` rows the list is read from
+    // cannot grow underneath it either.
     let is_void: Option<bool> =
-        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR SHARE")
+        sqlx::query_scalar("SELECT is_void FROM employment WHERE id = $1 FOR UPDATE")
             .bind(employment_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
@@ -71,6 +112,39 @@ pub async fn record_compensation_terms(
     }
 
     validate_effective_from_is_a_period_start(schedule, effective_from)?;
+
+    // The span this insert takes over, derived exactly as
+    // `declare_unsupported_deduction_status` derives its own: up to whichever
+    // later row already exists for this Employment, or open-ended when none
+    // does. Read before the INSERT below, so it names the span as it will
+    // stand once the row is in.
+    let next_effective_from: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT MIN(effective_from) FROM compensation_terms
+         WHERE employment_id = $1 AND effective_from > $2",
+    )
+    .bind(employment_id.as_str())
+    .bind(effective_from)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let diverging_periods =
+        live_finalized_periods_in_span(&mut tx, employment_id, effective_from, next_effective_from)
+            .await?;
+
+    // Acknowledgement is checked before the reason, so the caller that asks
+    // with nothing acknowledged and nothing to say is told *what* diverges
+    // rather than being sent away for a sentence it has no reason to write
+    // yet. An insert that diverges from nothing passes both checks silently.
+    require_acknowledgement_of(
+        employment_id,
+        &diverging_periods,
+        acknowledged_diverging_periods,
+    )?;
+
+    let diverges = !diverging_periods.is_empty();
+    if diverges && reason.trim().is_empty() {
+        return Err(PayrollAppError::CompensationTermsCorrectionReasonCannotBeEmpty);
+    }
 
     sqlx::query(
         "INSERT INTO compensation_terms (employment_id, effective_from, basic_pay, created_by)
@@ -83,9 +157,39 @@ pub async fn record_compensation_terms(
     .execute(&mut *tx)
     .await?;
 
+    // Only a diverging insert is a correction. One that diverges from
+    // nothing is the ordinary act of stating a pay rise ahead of payroll,
+    // and logging it as a correction would say something untrue about it.
+    if diverges {
+        write_action_log_entry(
+            &mut tx,
+            ActionLogEntry {
+                employer_id: &employer_id,
+                actor: created_by,
+                action_type: ActionType::CompensationTermsCorrected,
+                target_type: "employment",
+                target_id: employment_id.as_str(),
+                context: Some(serde_json::json!({
+                    "reason": reason,
+                    // No row governed `effective_from` under this key before
+                    // now. The absence is recorded as an absence; a "before"
+                    // carrying the amount some earlier row happened to state
+                    // would name a value this insert never replaced.
+                    "before": serde_json::Value::Null,
+                    "after": {
+                        "effective_from": effective_from,
+                        "basic_pay_cents": basic_pay.cents(),
+                    },
+                    "diverging_live_finalized_periods": diverging_periods_json(&diverging_periods),
+                })),
+            },
+        )
+        .await?;
+    }
+
     tx.commit().await?;
 
-    Ok(())
+    Ok(diverging_periods)
 }
 
 /// Corrects the existing `CompensationTerms` row identified by

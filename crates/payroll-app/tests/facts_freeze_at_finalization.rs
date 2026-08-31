@@ -62,9 +62,17 @@ async fn a_fully_declared_employment(
     )
     .await
     .unwrap();
-    record_compensation_terms(pool, &employment_id, period().start(), basic_pay, "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        pool,
+        &employment_id,
+        period().start(),
+        basic_pay,
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
     record_opening_balance(
         pool,
         &employment_id,
@@ -359,6 +367,8 @@ async fn compensation_terms_stays_editable_after_finalization(pool: PgPool) {
         &employment_id,
         date(2026, 4, 1),
         Money::from_cents(1_600_000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -1021,6 +1031,8 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_te
         &employment_id,
         period().start(),
         Money::from_cents(1_500_000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await
@@ -1121,6 +1133,8 @@ async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
         &employment_id,
         period().start(),
         Money::from_cents(1_500_000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await

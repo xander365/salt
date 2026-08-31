@@ -577,6 +577,8 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
         &employment_id,
         date(2026, 3, 1),
         Money::from_cents(1_500_000).unwrap(),
+        &[],
+        "",
         "actor",
     )
     .await

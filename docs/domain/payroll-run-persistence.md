@@ -858,7 +858,12 @@ replace it:
    live `FinalizedPayroll`, Salt lists **every affected finalized period** and
    requires the user to acknowledge that master data now differs from history.
    The same action-log entry carries that list. It is a warning, never a
-   refusal, and it never touches a finalized row.
+   refusal, and it never touches a finalized row. "Change" here means any write
+   that lands on such a span, **including inserting a new row over one** — the
+   second half of the split below is exactly that, and an insert that makes
+   master data disagree with paid history is a correction whatever its shape.
+   An insert that diverges from nothing is not: it owes no reason, no
+   acknowledgement and no entry.
 3. **Nothing arithmetic can move.** Year-to-date sums frozen numeric columns
    (ADR-0012), never master data, so a master edit cannot change a cent of any
    finalized figure. Only a reversal plus a replacement can.
@@ -1254,6 +1259,14 @@ nothing and takes exactly one. A single entry point would have to branch on
 generic master-data update, because §6.5 makes it a payroll act: it must gather
 a reason, compute the list of live finalized periods the change diverges from,
 and write the action-log entry carrying both.
+
+`RecordCompensationTerms` stays a separate use case rather than merging into it
+— an insert and an edit identify their row differently, and most inserts are
+the ordinary act of stating a rise ahead of payroll. But it carries the same
+three obligations on the one path where it diverges, from the same helpers, and
+logs the same `CompensationTermsCorrected` entry with `before` recorded as
+`null`. A second `ActionType` for "a correction that happened to be an insert"
+would split one meaning across two names.
 
 No `Repository<T>`, no `UnitOfWork`, no `Specification<T>`. Explicit SQLx
 transactions. Abstraction arrives when there are two real implementations.
