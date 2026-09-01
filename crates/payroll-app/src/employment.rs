@@ -6,9 +6,10 @@ use payroll::{
     CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, PersonId,
     PersonReference,
 };
-use sqlx::{Acquire, PgPool, Postgres};
+use sqlx::{Acquire, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::ids::new_id;
 
@@ -20,13 +21,14 @@ use crate::ids::new_id;
 /// Employer is checked inside the insert itself rather than by a preceding
 /// `SELECT`, so there is no window between the two statements.
 pub async fn create_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     person_id: &PersonId,
     start_date: NaiveDate,
     end_date: Option<NaiveDate>,
     created_by: &str,
 ) -> Result<EmploymentId, PayrollAppError> {
+    let pool = db.pool();
     if let Some(end_date) = end_date
         && end_date < start_date
     {
@@ -69,11 +71,11 @@ pub async fn create_employment(
 /// void has already happened, and a second `EmploymentVoided` entry would
 /// record an act that did not — in a log no role may afterwards correct.
 pub async fn void_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employment_id: &EmploymentId,
     actor: &str,
 ) -> Result<(), PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // The `is_void = FALSE` predicate is what makes two concurrent voids
     // resolve to one: the second blocks on the first's row lock, then
@@ -131,11 +133,23 @@ pub async fn void_employment(
 /// A void Employment is refused: this snapshot is a calculation input, and
 /// §4.3 keeps a voided Employment out of every payroll.
 ///
+/// Public entry point over the opaque [`SaltDatabase`] handle. The
+/// generic connection-taking implementation is `get_employment_snapshot_on`,
+/// used internally by callers — `calculate.rs` among them — that already
+/// hold a transaction and need this read on that same connection.
+pub async fn get_employment_snapshot(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+    as_of: NaiveDate,
+) -> Result<EmploymentSnapshot, PayrollAppError> {
+    get_employment_snapshot_on(db.pool(), employment_id, as_of).await
+}
+
 /// Takes anything a connection can be acquired from — a `&PgPool` for a
 /// standalone read, or a `&mut Transaction` so a caller assembling several
 /// facts at once reads them all on the one connection, inside its own
 /// transaction and under whatever lock it already holds.
-pub async fn get_employment_snapshot<'a>(
+pub(crate) async fn get_employment_snapshot_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     as_of: NaiveDate,

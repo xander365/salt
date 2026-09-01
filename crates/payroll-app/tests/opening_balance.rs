@@ -8,7 +8,7 @@ use payroll::{
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, create_employer, create_employment, declare_prior_employment,
+    PayrollAppError, SaltDatabase, create_employer, create_employment, declare_prior_employment,
     declare_unsupported_deduction_status, record_compensation_terms, record_opening_balance,
     void_employment,
 };
@@ -27,13 +27,13 @@ fn twenty_sixth_schedule() -> payroll::PaySchedule {
 }
 
 async fn an_employer_and_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     schedule: payroll::PaySchedule,
     start_date: NaiveDate,
 ) -> (EmployerId, EmploymentId) {
-    let employer_id = create_employer(pool, schedule, "actor").await.unwrap();
+    let employer_id = create_employer(db, schedule, "actor").await.unwrap();
     let employment_id = create_employment(
-        pool,
+        db,
         &employer_id,
         &PersonId::new("person-1"),
         start_date,
@@ -49,14 +49,15 @@ async fn an_employer_and_employment(
 
 #[sqlx::test]
 async fn a_mid_year_adoption_boundary_with_non_zero_prior_figures_is_recorded(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     // Employer E adopts Salt in October: the Employment existed all TaxYear
     // (started at the TaxYear's own first period, 1 March), and
     // March-September is pre-Salt.
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 10, 31),
@@ -83,11 +84,12 @@ async fn a_mid_year_adoption_boundary_with_non_zero_prior_figures_is_recorded(po
 
 #[sqlx::test]
 async fn the_first_opening_balance_writes_a_created_action_log_entry(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (employer_id, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 9, 30),
@@ -117,11 +119,12 @@ async fn the_first_opening_balance_writes_a_created_action_log_entry(pool: PgPoo
 /// second `Created`.
 #[sqlx::test]
 async fn re_recording_replaces_the_row_and_writes_a_changed_entry(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 9, 30),
@@ -133,7 +136,7 @@ async fn re_recording_replaces_the_row_and_writes_a_changed_entry(pool: PgPool) 
     .unwrap();
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 10, 31),
@@ -178,11 +181,12 @@ async fn re_recording_replaces_the_row_and_writes_a_changed_entry(pool: PgPool) 
 
 #[sqlx::test]
 async fn a_salt_coverage_start_that_is_not_a_period_end_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 9, 15),
@@ -209,11 +213,12 @@ async fn a_salt_coverage_start_that_is_not_a_period_end_is_refused(pool: PgPool)
 /// month, so a nearby-but-wrong date must still be refused.
 #[sqlx::test]
 async fn a_salt_coverage_start_one_day_off_the_twenty_sixth_schedule_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, twenty_sixth_schedule(), date(2026, 3, 26)).await;
+        an_employer_and_employment(&db, twenty_sixth_schedule(), date(2026, 3, 26)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 9, 26),
@@ -235,13 +240,14 @@ async fn a_salt_coverage_start_one_day_off_the_twenty_sixth_schedule_is_refused(
 
 #[sqlx::test]
 async fn a_salt_coverage_start_outside_the_stated_tax_year_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     // The Employment has existed for years, so guard 3 is satisfied by any
     // date in either TaxYear; only guard 2 can be failing here.
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2020, 1, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2020, 1, 1)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2025),
         date(2026, 10, 31),
@@ -267,11 +273,12 @@ async fn a_salt_coverage_start_outside_the_stated_tax_year_is_refused(pool: PgPo
 /// refused for stating the only TaxYear their boundary can be in.
 #[sqlx::test]
 async fn a_february_boundary_belongs_to_the_tax_year_that_started_the_previous_march(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2027, 2, 28),
@@ -285,7 +292,7 @@ async fn a_february_boundary_belongs_to_the_tax_year_that_started_the_previous_m
     // The same boundary read as its own calendar year is the wrong TaxYear,
     // and is refused.
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2027),
         date(2027, 2, 28),
@@ -310,13 +317,14 @@ async fn a_february_boundary_belongs_to_the_tax_year_that_started_the_previous_m
 async fn a_salt_coverage_start_before_the_employments_first_payable_period_is_refused(
     pool: PgPool,
 ) {
+    let db = SaltDatabase::from_pool(pool.clone());
     // The Employment starts in June, so May and earlier were never payable
     // for it, even though May is inside the TaxYear.
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 6, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 6, 1)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 5, 31),
@@ -347,11 +355,12 @@ async fn a_salt_coverage_start_before_the_employments_first_payable_period_is_re
 async fn a_continuing_employees_first_payable_period_is_the_tax_years_own_first_period(
     pool: PgPool,
 ) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2020, 1, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2020, 1, 1)).await;
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 3, 31),
@@ -363,7 +372,7 @@ async fn a_continuing_employees_first_payable_period_is_the_tax_years_own_first_
     .unwrap();
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 3, 31),
@@ -387,14 +396,15 @@ async fn a_continuing_employees_first_payable_period_is_the_tax_years_own_first_
 
 #[sqlx::test]
 async fn zero_figures_at_the_employments_first_payable_period_are_accepted(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     // The Employment's very first payable period is also the boundary: the
     // covered span is empty, and zero figures over an empty span state
     // nothing false.
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 3, 31),
@@ -414,11 +424,12 @@ async fn zero_figures_at_the_employments_first_payable_period_are_accepted(pool:
 
 #[sqlx::test]
 async fn non_zero_figures_at_the_employments_first_payable_period_are_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 3, 31),
@@ -445,11 +456,12 @@ async fn non_zero_figures_at_the_employments_first_payable_period_are_refused(po
 
 #[sqlx::test]
 async fn non_zero_paye_alone_at_an_empty_covered_span_is_also_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 3, 31),
@@ -473,10 +485,11 @@ async fn non_zero_paye_alone_at_an_empty_covered_span_is_also_refused(pool: PgPo
 
 #[sqlx::test]
 async fn recording_against_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmploymentId::new("does-not-exist");
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &missing,
         TaxYear::starting(2026),
         date(2026, 9, 30),
@@ -491,14 +504,13 @@ async fn recording_against_a_missing_employment_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_voided_employment_accepts_no_opening_balance(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 9, 30),
@@ -521,11 +533,12 @@ async fn a_voided_employment_accepts_no_opening_balance(pool: PgPool) {
 
 #[sqlx::test]
 async fn an_unattributed_opening_balance_is_refused_by_the_database(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 9, 30),
@@ -557,8 +570,9 @@ async fn an_unattributed_opening_balance_is_refused_by_the_database(pool: PgPool
 /// payroll runs here, and the table stays empty through all of them.
 #[sqlx::test]
 async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id) =
-        an_employer_and_employment(&pool, calendar_month_schedule(), date(2026, 3, 1)).await;
+        an_employer_and_employment(&db, calendar_month_schedule(), date(2026, 3, 1)).await;
 
     let count = |pool: PgPool| async move {
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM opening_balance")
@@ -573,7 +587,7 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
     );
 
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 3, 1),
         Money::from_cents(1_500_000).unwrap(),
@@ -584,7 +598,7 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
     .await
     .unwrap();
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -593,7 +607,7 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 3, 1),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -618,11 +632,12 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
 /// covered span is empty. Both rows coexist, each with its own boundary.
 #[sqlx::test]
 async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
-    let employer_id = create_employer(&pool, calendar_month_schedule(), "actor")
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = create_employer(&db, calendar_month_schedule(), "actor")
         .await
         .unwrap();
     let continuing = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 3, 1),
@@ -632,7 +647,7 @@ async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
     .await
     .unwrap();
     let joiner = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-2"),
         date(2026, 11, 1),
@@ -643,7 +658,7 @@ async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
     .unwrap();
 
     record_opening_balance(
-        &pool,
+        &db,
         &continuing,
         TaxYear::starting(2026),
         date(2026, 10, 31),
@@ -654,7 +669,7 @@ async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
     .await
     .unwrap();
     record_opening_balance(
-        &pool,
+        &db,
         &joiner,
         TaxYear::starting(2026),
         date(2026, 11, 30),
@@ -683,7 +698,7 @@ async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
     // The joiner's own figures must still be zero: their covered span is
     // empty, whatever the other Employment's boundary says.
     let result = record_opening_balance(
-        &pool,
+        &db,
         &joiner,
         TaxYear::starting(2026),
         date(2026, 11, 30),

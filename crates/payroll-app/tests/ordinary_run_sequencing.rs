@@ -12,10 +12,10 @@ use payroll::{
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, PayrollRunId, calculate_payroll_run, create_employer, create_employment,
-    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
-    finalize_payroll_run, record_compensation_terms, record_opening_balance,
-    remove_employment_from_run, reverse_finalized_payroll,
+    PayrollAppError, PayrollRunId, SaltDatabase, calculate_payroll_run, create_employer,
+    create_employment, create_ordinary_payroll_run, declare_prior_employment,
+    declare_unsupported_deduction_status, finalize_payroll_run, record_compensation_terms,
+    record_opening_balance, remove_employment_from_run, reverse_finalized_payroll,
 };
 use sqlx::PgPool;
 
@@ -41,8 +41,8 @@ fn month_period(year: i32, month: u32) -> PayPeriod {
     PayPeriod::new(start, end).unwrap()
 }
 
-async fn an_employer(pool: &PgPool) -> EmployerId {
-    create_employer(pool, monthly_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> EmployerId {
+    create_employer(db, monthly_schedule(), "actor")
         .await
         .unwrap()
 }
@@ -53,7 +53,7 @@ async fn an_employer(pool: &PgPool) -> EmployerId {
 /// `tax_year`, and a confirmed absence of unsupported deductions from that
 /// day. No `OpeningBalance` — callers that need one record it themselves.
 async fn a_fully_declared_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     person: &str,
     start_date: NaiveDate,
@@ -61,7 +61,7 @@ async fn a_fully_declared_employment(
     basic_pay: Money,
 ) -> EmploymentId {
     let employment_id = create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new(person),
         start_date,
@@ -70,28 +70,14 @@ async fn a_fully_declared_employment(
     )
     .await
     .unwrap();
-    record_compensation_terms(
-        pool,
-        &employment_id,
-        start_date,
-        basic_pay,
-        &[],
-        "",
-        "actor",
-    )
-    .await
-    .unwrap();
-    declare_prior_employment(
-        pool,
-        &employment_id,
-        tax_year,
-        PriorEmployment::None,
-        "actor",
-    )
-    .await
-    .unwrap();
+    record_compensation_terms(db, &employment_id, start_date, basic_pay, &[], "", "actor")
+        .await
+        .unwrap();
+    declare_prior_employment(db, &employment_id, tax_year, PriorEmployment::None, "actor")
+        .await
+        .unwrap();
     declare_unsupported_deduction_status(
-        pool,
+        db,
         &employment_id,
         start_date,
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -108,15 +94,15 @@ async fn a_fully_declared_employment(
 /// the run's members are whoever the Employer's active Employments overlap
 /// `period` with, exactly as `create_ordinary_payroll_run` auto-proposes.
 async fn finalize_period(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     period: PayPeriod,
     pay_date: NaiveDate,
 ) -> Result<PayrollRunId, PayrollAppError> {
-    let run_id = create_ordinary_payroll_run(pool, employer_id, period, pay_date, "actor").await?;
-    let refusals = calculate_payroll_run(pool, &run_id, "calculator").await?;
+    let run_id = create_ordinary_payroll_run(db, employer_id, period, pay_date, "actor").await?;
+    let refusals = calculate_payroll_run(db, &run_id, "calculator").await?;
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
-    finalize_payroll_run(pool, &run_id, "finalizer").await?;
+    finalize_payroll_run(db, &run_id, "finalizer").await?;
     Ok(run_id)
 }
 
@@ -124,10 +110,11 @@ async fn finalize_period(
 
 #[sqlx::test]
 async fn branch_1_an_employment_starting_after_the_preceding_period_resolves_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // Starts 1 April: March, the preceding period, never overlaps it.
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 4, 1),
@@ -136,8 +123,7 @@ async fn branch_1_an_employment_starting_after_the_preceding_period_resolves_it(
     )
     .await;
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 }
@@ -146,9 +132,10 @@ async fn branch_1_an_employment_starting_after_the_preceding_period_resolves_it(
 
 #[sqlx::test]
 async fn branch_2_an_opening_balance_boundary_after_the_preceding_period_resolves_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -159,7 +146,7 @@ async fn branch_2_an_opening_balance_boundary_after_the_preceding_period_resolve
     // Salt is responsible starting with April's own period: March's figures
     // are inside this balance.
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 4, 30),
@@ -170,8 +157,7 @@ async fn branch_2_an_opening_balance_boundary_after_the_preceding_period_resolve
     .await
     .unwrap();
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 }
@@ -180,9 +166,10 @@ async fn branch_2_an_opening_balance_boundary_after_the_preceding_period_resolve
 
 #[sqlx::test]
 async fn branch_3_a_live_finalized_payroll_for_the_preceding_period_resolves_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -192,12 +179,11 @@ async fn branch_3_a_live_finalized_payroll_for_the_preceding_period_resolves_it(
     .await;
     // March is the TaxYear's own first period, so it finalizes with nothing
     // to check.
-    finalize_period(&pool, &employer_id, month_period(2026, 3), date(2026, 4, 5))
+    finalize_period(&db, &employer_id, month_period(2026, 3), date(2026, 4, 5))
         .await
         .unwrap();
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 }
@@ -206,9 +192,10 @@ async fn branch_3_a_live_finalized_payroll_for_the_preceding_period_resolves_it(
 
 #[sqlx::test]
 async fn branch_4a_a_reasoned_removal_from_the_finalized_ordinary_run_resolves_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -220,7 +207,7 @@ async fn branch_4a_a_reasoned_removal_from_the_finalized_ordinary_run_resolves_i
     // March is auto-proposed, then removed with a reason before it
     // calculates — the run still finalizes, vacuously.
     let march_run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 3),
         date(2026, 4, 5),
@@ -229,7 +216,7 @@ async fn branch_4a_a_reasoned_removal_from_the_finalized_ordinary_run_resolves_i
     .await
     .unwrap();
     remove_employment_from_run(
-        &pool,
+        &db,
         &march_run_id,
         &employment_id,
         "on unpaid leave all of March",
@@ -237,17 +224,16 @@ async fn branch_4a_a_reasoned_removal_from_the_finalized_ordinary_run_resolves_i
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &march_run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &march_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
-    finalize_payroll_run(&pool, &march_run_id, "finalizer")
+    finalize_payroll_run(&db, &march_run_id, "finalizer")
         .await
         .unwrap();
 
     // The Employment is still active, so it is a member of April too.
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 }
@@ -259,9 +245,10 @@ async fn branch_4a_a_reasoned_removal_from_the_finalized_ordinary_run_resolves_i
 /// never finalized at all — so April must still refuse.
 #[sqlx::test]
 async fn branch_4a_a_removal_from_a_run_that_never_finalized_does_not_resolve_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -273,7 +260,7 @@ async fn branch_4a_a_removal_from_a_run_that_never_finalized_does_not_resolve_it
     // March is created and the member removed with a reason, exactly as in
     // the test above — but March is left open, never finalized.
     let march_run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 3),
         date(2026, 4, 5),
@@ -282,7 +269,7 @@ async fn branch_4a_a_removal_from_a_run_that_never_finalized_does_not_resolve_it
     .await
     .unwrap();
     remove_employment_from_run(
-        &pool,
+        &db,
         &march_run_id,
         &employment_id,
         "on unpaid leave all of March",
@@ -291,8 +278,7 @@ async fn branch_4a_a_removal_from_a_run_that_never_finalized_does_not_resolve_it
     .await
     .unwrap();
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert_eq!(
         result,
@@ -307,9 +293,10 @@ async fn branch_4a_a_removal_from_a_run_that_never_finalized_does_not_resolve_it
 
 #[sqlx::test]
 async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -318,7 +305,7 @@ async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool:
     )
     .await;
     let march_run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 3),
         date(2026, 4, 5),
@@ -326,11 +313,11 @@ async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool:
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &march_run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &march_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
-    let finalized = finalize_payroll_run(&pool, &march_run_id, "finalizer")
+    let finalized = finalize_payroll_run(&db, &march_run_id, "finalizer")
         .await
         .unwrap()
         .finalized;
@@ -339,7 +326,7 @@ async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool:
         .find(|(id, _)| *id == employment_id)
         .expect("the Employment must have finalized");
     reverse_finalized_payroll(
-        &pool,
+        &db,
         &finalized_payroll_id,
         "the March figures were wrong, no replacement yet",
         "actor",
@@ -347,8 +334,7 @@ async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool:
     .await
     .unwrap();
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 }
@@ -357,9 +343,10 @@ async fn branch_4b_a_reversed_finalized_payroll_with_none_live_resolves_it(pool:
 
 #[sqlx::test]
 async fn absence_of_every_record_refuses_and_names_the_employment_and_the_period(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -370,8 +357,7 @@ async fn absence_of_every_record_refuses_and_names_the_employment_and_the_period
     // March is never run at all: no FinalizedPayroll, no removal, no
     // OpeningBalance, and the Employment did overlap it.
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert_eq!(
         result,
@@ -386,9 +372,10 @@ async fn absence_of_every_record_refuses_and_names_the_employment_and_the_period
 /// all-or-nothing guarantee every other finalization refusal gives (§5.1).
 #[sqlx::test]
 async fn a_refusal_leaves_no_finalized_payroll_and_no_status_change(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -398,7 +385,7 @@ async fn a_refusal_leaves_no_finalized_payroll_and_no_status_change(pool: PgPool
     .await;
 
     let run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 4),
         date(2026, 5, 5),
@@ -406,12 +393,12 @@ async fn a_refusal_leaves_no_finalized_payroll_and_no_status_change(pool: PgPool
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
     assert!(result.is_err());
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
@@ -434,13 +421,14 @@ async fn a_refusal_leaves_no_finalized_payroll_and_no_status_change(pool: PgPool
 /// never reaches it.
 #[sqlx::test]
 async fn the_walk_never_crosses_the_tax_year_boundary(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // Employed well before this TaxYear, with a real, unresolved gap in
     // January 2026 (TaxYear 2025: January belongs to the year that started
     // the previous March) — no FinalizedPayroll, no removal, no
     // OpeningBalance for TaxYear 2025 at all.
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2025, 1, 1),
@@ -452,8 +440,7 @@ async fn the_walk_never_crosses_the_tax_year_boundary(pool: PgPool) {
     // March 2026 is TaxYear 2026's own first period. Its predecessor,
     // February 2026, belongs to TaxYear 2025 — the walk stops there and
     // never looks at January.
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 3), date(2026, 4, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 3), date(2026, 4, 5)).await;
 
     assert!(
         result.is_ok(),
@@ -478,9 +465,10 @@ async fn the_walk_never_crosses_the_tax_year_boundary(pool: PgPool) {
 /// this test isolates the sequencing refusal from that one.
 #[sqlx::test]
 async fn only_the_immediate_predecessor_is_read_not_a_gap_two_periods_back(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -490,7 +478,7 @@ async fn only_the_immediate_predecessor_is_read_not_a_gap_two_periods_back(pool:
     .await;
     // March is the TaxYear's own first period: it finalizes with nothing to
     // check.
-    finalize_period(&pool, &employer_id, month_period(2026, 3), date(2026, 4, 5))
+    finalize_period(&db, &employer_id, month_period(2026, 3), date(2026, 4, 5))
         .await
         .unwrap();
     // April is skipped entirely: no FinalizedPayroll, no removal, no
@@ -501,7 +489,7 @@ async fn only_the_immediate_predecessor_is_read_not_a_gap_two_periods_back(pool:
     // that removal resolves May by branch 4 without May's own predecessor
     // (April) ever being asked about.
     let may_run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 5),
         date(2026, 6, 5),
@@ -510,7 +498,7 @@ async fn only_the_immediate_predecessor_is_read_not_a_gap_two_periods_back(pool:
     .await
     .unwrap();
     remove_employment_from_run(
-        &pool,
+        &db,
         &may_run_id,
         &employment_id,
         "still not paid, kept out deliberately",
@@ -518,19 +506,18 @@ async fn only_the_immediate_predecessor_is_read_not_a_gap_two_periods_back(pool:
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &may_run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &may_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
-    finalize_payroll_run(&pool, &may_run_id, "finalizer")
+    finalize_payroll_run(&db, &may_run_id, "finalizer")
         .await
         .unwrap();
 
     // June's own predecessor is May, resolved by that removal (branch 4a).
     // If finalization ever walked a second period back it would reach
     // April's real gap and refuse; it must not.
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 6), date(2026, 7, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 6), date(2026, 7, 5)).await;
     assert!(
         result.is_ok(),
         "June must finalize despite April's real, unresolved gap two periods \
@@ -544,9 +531,10 @@ async fn only_the_immediate_predecessor_is_read_not_a_gap_two_periods_back(pool:
 /// unresolved by any Salt record at all.
 #[sqlx::test]
 async fn the_a_b_pair_an_october_boundary_lets_october_finalize(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -560,7 +548,7 @@ async fn the_a_b_pair_an_october_boundary_lets_october_finalize(pool: PgPool) {
     // keep October's own YearToDateContext trivially consistent with
     // periods_elapsed regardless of the seven periods this balance covers.
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 10, 31),
@@ -571,13 +559,8 @@ async fn the_a_b_pair_an_october_boundary_lets_october_finalize(pool: PgPool) {
     .await
     .unwrap();
 
-    let result = finalize_period(
-        &pool,
-        &employer_id,
-        month_period(2026, 10),
-        date(2026, 11, 5),
-    )
-    .await;
+    let result =
+        finalize_period(&db, &employer_id, month_period(2026, 10), date(2026, 11, 5)).await;
 
     assert!(
         result.is_ok(),
@@ -597,9 +580,10 @@ async fn the_a_b_pair_an_october_boundary_lets_october_finalize(pool: PgPool) {
 async fn the_a_b_pair_a_frozen_march_boundary_makes_october_refuse_a_skipped_september(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -610,7 +594,7 @@ async fn the_a_b_pair_a_frozen_march_boundary_makes_october_refuse_a_skipped_sep
     // Adopted from the very first period: an empty covered span is the
     // legitimate boundary here, and it freezes at March's finalization.
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 3, 31),
@@ -624,7 +608,7 @@ async fn the_a_b_pair_a_frozen_march_boundary_makes_october_refuse_a_skipped_sep
     // March through August all really ran and finalized.
     for month in 3..=8 {
         finalize_period(
-            &pool,
+            &db,
             &employer_id,
             month_period(2026, month),
             date(2026, month + 1, 5),
@@ -634,13 +618,8 @@ async fn the_a_b_pair_a_frozen_march_boundary_makes_october_refuse_a_skipped_sep
     }
     // September is skipped entirely — forgotten.
 
-    let result = finalize_period(
-        &pool,
-        &employer_id,
-        month_period(2026, 10),
-        date(2026, 11, 5),
-    )
-    .await;
+    let result =
+        finalize_period(&db, &employer_id, month_period(2026, 10), date(2026, 11, 5)).await;
 
     assert_eq!(
         result,
@@ -662,12 +641,13 @@ async fn the_a_b_pair_a_frozen_march_boundary_makes_october_refuse_a_skipped_sep
 /// without an affirmative record.
 #[sqlx::test]
 async fn mid_year_onboarding_refuses_until_given_a_salt_coverage_start(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // `start_date` is backdated to March, as if the person was truly hired
     // then, even though the Employer only onboarded to Salt in June and
     // back-declared every fact from March onward.
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -681,7 +661,7 @@ async fn mid_year_onboarding_refuses_until_given_a_salt_coverage_start(pool: PgP
     // attempt, after the fix below, is a real retry of the same run rather
     // than a fresh one.
     let june_run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 6),
         date(2026, 7, 5),
@@ -689,12 +669,12 @@ async fn mid_year_onboarding_refuses_until_given_a_salt_coverage_start(pool: PgP
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &june_run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &june_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
 
-    let refused = finalize_payroll_run(&pool, &june_run_id, "finalizer").await;
+    let refused = finalize_payroll_run(&db, &june_run_id, "finalizer").await;
     assert_eq!(
         refused,
         Err(PayrollAppError::PrecedingPeriodUnresolved {
@@ -708,7 +688,7 @@ async fn mid_year_onboarding_refuses_until_given_a_salt_coverage_start(pool: PgP
     // period — March through May are inside the balance. Zero prior figures
     // are the ordinary case over a non-empty span.
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 6, 30),
@@ -719,7 +699,7 @@ async fn mid_year_onboarding_refuses_until_given_a_salt_coverage_start(pool: PgP
     .await
     .unwrap();
 
-    let result = finalize_payroll_run(&pool, &june_run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &june_run_id, "finalizer").await;
     assert!(
         result.is_ok(),
         "June must finalize once given a June SaltCoverageStart, got {result:?}"
@@ -730,9 +710,10 @@ async fn mid_year_onboarding_refuses_until_given_a_salt_coverage_start(pool: PgP
 /// March, April and May with real, finalized runs instead of a boundary.
 #[sqlx::test]
 async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 3, 1),
@@ -742,7 +723,7 @@ async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
     .await;
 
     let june_run_id = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         month_period(2026, 6),
         date(2026, 7, 5),
@@ -750,12 +731,12 @@ async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &june_run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &june_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
 
-    let refused = finalize_payroll_run(&pool, &june_run_id, "finalizer").await;
+    let refused = finalize_payroll_run(&db, &june_run_id, "finalizer").await;
     assert_eq!(
         refused,
         Err(PayrollAppError::PrecedingPeriodUnresolved {
@@ -767,7 +748,7 @@ async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
     // Back-fill March, April and May for real — no boundary at all.
     for month in 3..=5 {
         finalize_period(
-            &pool,
+            &db,
             &employer_id,
             month_period(2026, month),
             date(2026, month + 1, 5),
@@ -781,12 +762,12 @@ async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
     // calculation is recomputed before finalizing again — otherwise §5.2's
     // own three-way equality would refuse it for a reason unrelated to this
     // test.
-    let refusals = calculate_payroll_run(&pool, &june_run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &june_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
 
-    let result = finalize_payroll_run(&pool, &june_run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &june_run_id, "finalizer").await;
     assert!(
         result.is_ok(),
         "June must finalize once March-May are back-filled, got {result:?}"
@@ -804,11 +785,12 @@ async fn mid_year_onboarding_refuses_until_back_filled(pool: PgPool) {
 /// answer for an unresolved one.
 #[sqlx::test]
 async fn one_unresolved_member_refuses_the_whole_run_and_names_that_member(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // Starts 1 April, so March — the preceding period — never overlaps it
     // and branch 1 resolves March for this one.
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 4, 1),
@@ -818,7 +800,7 @@ async fn one_unresolved_member_refuses_the_whole_run_and_names_that_member(pool:
     .await;
     // Starts 1 March and March is never run at all: nothing resolves it.
     let skipped = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-2",
         date(2026, 3, 1),
@@ -827,8 +809,7 @@ async fn one_unresolved_member_refuses_the_whole_run_and_names_that_member(pool:
     )
     .await;
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert_eq!(
         result,
@@ -853,9 +834,10 @@ async fn one_unresolved_member_refuses_the_whole_run_and_names_that_member(pool:
 /// refusal above is the negative of.
 #[sqlx::test]
 async fn members_resolved_by_different_branches_finalize_together(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2026, 4, 1),
@@ -864,7 +846,7 @@ async fn members_resolved_by_different_branches_finalize_together(pool: PgPool) 
     )
     .await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-2",
         date(2026, 3, 1),
@@ -873,12 +855,11 @@ async fn members_resolved_by_different_branches_finalize_together(pool: PgPool) 
     )
     .await;
     // March holds person-2 alone — person-1 does not overlap it.
-    finalize_period(&pool, &employer_id, month_period(2026, 3), date(2026, 4, 5))
+    finalize_period(&db, &employer_id, month_period(2026, 3), date(2026, 4, 5))
         .await
         .unwrap();
 
-    let result =
-        finalize_period(&pool, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
+    let result = finalize_period(&db, &employer_id, month_period(2026, 4), date(2026, 5, 5)).await;
 
     assert!(result.is_ok(), "expected April to finalize, got {result:?}");
 

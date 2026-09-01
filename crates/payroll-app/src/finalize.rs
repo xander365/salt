@@ -55,16 +55,10 @@
 
 use std::collections::HashMap;
 
-use chrono::NaiveDate;
-use payroll::{
-    EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollInput, PayrollRules, TaxYear,
-    ruleset_for,
-};
-use sqlx::PgPool;
-
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
 use crate::correction::{validate_correction_target, verify_null_lineage_is_legitimate};
+use crate::database::SaltDatabase;
 use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
@@ -72,6 +66,11 @@ use crate::payroll_run::{
     EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids, lock_run,
 };
 use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
+use chrono::NaiveDate;
+use payroll::{
+    EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollInput, PayrollRules, TaxYear,
+    ruleset_for,
+};
 
 /// The shape of the three JSONB snapshots this code freezes (§9, §9.1).
 ///
@@ -122,11 +121,11 @@ struct WorkingCalculation {
 /// every later `PayPeriod` already finalized for its Employment, as a
 /// warning (§6.4); always empty for an Ordinary run.
 pub async fn finalize_payroll_run(
-    pool: &PgPool,
+    db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     finalized_by: &str,
 ) -> Result<FinalizationOutcome, PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // The `FOR UPDATE` lock taken here is what serialises two finalizers of
     // the same run (§5.4): the loser blocks until the winner commits, then

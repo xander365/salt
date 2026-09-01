@@ -29,6 +29,18 @@ pub enum PayrollAppError {
     ///
     /// [`Payroll`]: PayrollAppError::Payroll
     Database(String),
+    /// `SaltDatabase::connect` found the database's applied migration
+    /// version behind the version compiled into this build. A typed
+    /// refusal rather than letting the mismatch surface later as a raw
+    /// database error the first time a use case reaches a column or table
+    /// this build expects and an unmigrated database does not have.
+    SchemaOutOfDate {
+        /// The highest migration version compiled into this build.
+        compiled: i64,
+        /// The highest migration version applied to the database, or
+        /// `None` when no migration has ever been applied to it.
+        applied: Option<i64>,
+    },
     /// No Employer exists with this id.
     EmployerNotFound(EmployerId),
     /// No Employment exists with this id.
@@ -440,6 +452,18 @@ impl std::fmt::Display for PayrollAppError {
         match self {
             Self::Payroll(err) => write!(f, "{err}"),
             Self::Database(message) => write!(f, "database error: {message}"),
+            Self::SchemaOutOfDate { compiled, applied } => match applied {
+                Some(applied) => write!(
+                    f,
+                    "the database's applied migration version {applied} is behind the version \
+                     {compiled} compiled into this build"
+                ),
+                None => write!(
+                    f,
+                    "the database has no applied migrations, but this build compiled in \
+                     migration version {compiled}"
+                ),
+            },
             Self::EmployerNotFound(id) => write!(f, "no Employer exists with id {id}"),
             Self::EmploymentNotFound(id) => write!(f, "no Employment exists with id {id}"),
             Self::EmploymentIsVoid(id) => write!(f, "Employment {id} is void"),
@@ -786,6 +810,7 @@ impl std::error::Error for PayrollAppError {
             // *below* it is still reachable.
             Self::FinalizationRebuildRefused { refusal, .. } => refusal.source(),
             Self::Database(_)
+            | Self::SchemaOutOfDate { .. }
             | Self::EmployerNotFound(_)
             | Self::EmploymentNotFound(_)
             | Self::EmploymentIsVoid(_)

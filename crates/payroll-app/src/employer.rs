@@ -3,25 +3,25 @@
 //! one `PaySchedule`" is structural — this use case needs no extra guard
 //! for it.
 
+use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
+use crate::error::{PayrollAppError, ScheduleBoundedFact};
+use crate::freeze::employer_has_a_finalization_in_or_after;
+use crate::ids::new_id;
 use chrono::NaiveDate;
 use payroll::{
     DayOfMonth, EmployerId, EmploymentId, PaySchedule, PayrollError, PeriodEndDay, TaxYear,
     validate_effective_from_is_a_period_start,
 };
-use sqlx::PgPool;
-
-use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
-use crate::error::{PayrollAppError, ScheduleBoundedFact};
-use crate::freeze::employer_has_a_finalization_in_or_after;
-use crate::ids::new_id;
 
 /// Records a new Employer with the given `PaySchedule`. Changing it later is
 /// [`change_pay_schedule`].
 pub async fn create_employer(
-    pool: &PgPool,
+    db: &SaltDatabase,
     pay_schedule: PaySchedule,
     created_by: &str,
 ) -> Result<EmployerId, PayrollAppError> {
+    let pool = db.pool();
     let id = EmployerId::new(new_id());
     let (kind, value) = period_end_day_columns(pay_schedule.period_end_day());
 
@@ -82,13 +82,13 @@ pub async fn create_employer(
 /// run open, and recorded no boundary in `current_tax_year` is exactly the one
 /// who set the schedule up wrong on Monday and wants it right on Tuesday.
 pub async fn change_pay_schedule(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     new_schedule: PaySchedule,
     current_tax_year: TaxYear,
     changed_by: &str,
 ) -> Result<(), PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // `FOR UPDATE` is what holds the freeze check below against a concurrent
     // *reader* of this schedule: `pay_schedule_for_employer` takes `FOR

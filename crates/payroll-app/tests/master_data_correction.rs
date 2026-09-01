@@ -13,7 +13,7 @@ use payroll::{
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    FinalizedPayrollId, PayrollAppError, add_employment_to_correction_run,
+    FinalizedPayrollId, PayrollAppError, SaltDatabase, add_employment_to_correction_run,
     build_year_to_date_context, calculate_payroll_run, correct_compensation_terms,
     create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
@@ -45,8 +45,8 @@ fn june() -> PayPeriod {
     PayPeriod::new(date(2026, 6, 1), date(2026, 6, 30)).unwrap()
 }
 
-async fn an_employer(pool: &PgPool) -> EmployerId {
-    create_employer(pool, monthly_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> EmployerId {
+    create_employer(db, monthly_schedule(), "actor")
         .await
         .unwrap()
 }
@@ -56,12 +56,12 @@ async fn an_employer(pool: &PgPool) -> EmployerId {
 /// `CompensationTerms` row from that same day and every other fact
 /// `calculate` needs already on record.
 async fn an_employment_with_basic_pay(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     basic_pay: Money,
 ) -> EmploymentId {
     let employment_id = create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new("person-1"),
         march().start(),
@@ -71,7 +71,7 @@ async fn an_employment_with_basic_pay(
     .await
     .unwrap();
     record_compensation_terms(
-        pool,
+        db,
         &employment_id,
         march().start(),
         basic_pay,
@@ -82,7 +82,7 @@ async fn an_employment_with_basic_pay(
     .await
     .unwrap();
     declare_prior_employment(
-        pool,
+        db,
         &employment_id,
         TaxYear::for_period_end(march().end()),
         PriorEmployment::None,
@@ -91,7 +91,7 @@ async fn an_employment_with_basic_pay(
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        pool,
+        db,
         &employment_id,
         march().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -107,15 +107,15 @@ async fn an_employment_with_basic_pay(
 /// Creates, calculates and finalizes an Ordinary run for `period`, and
 /// returns the fingerprint pair (`finalized_payroll`, `live_finalized_payroll`)
 /// so a caller can prove neither row moves later.
-async fn finalize_period(pool: &PgPool, employer_id: &EmployerId, period: PayPeriod) {
-    let run_id = create_ordinary_payroll_run(pool, employer_id, period, period.end(), "actor")
+async fn finalize_period(db: &SaltDatabase, employer_id: &EmployerId, period: PayPeriod) {
+    let run_id = create_ordinary_payroll_run(db, employer_id, period, period.end(), "actor")
         .await
         .unwrap();
-    let refusals = calculate_payroll_run(pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
-    finalize_payroll_run(pool, &run_id, "finalizer")
+    finalize_payroll_run(db, &run_id, "finalizer")
         .await
         .unwrap();
 }
@@ -123,19 +123,19 @@ async fn finalize_period(pool: &PgPool, employer_id: &EmployerId, period: PayPer
 /// As [`finalize_period`], but hands back the `FinalizedPayrollId` written
 /// for `employment_id`, for a test that has to reverse that exact record.
 async fn finalize_period_returning_id(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
     period: PayPeriod,
 ) -> FinalizedPayrollId {
-    let run_id = create_ordinary_payroll_run(pool, employer_id, period, period.end(), "actor")
+    let run_id = create_ordinary_payroll_run(db, employer_id, period, period.end(), "actor")
         .await
         .unwrap();
-    let refusals = calculate_payroll_run(pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
-    finalize_payroll_run(pool, &run_id, "finalizer")
+    finalize_payroll_run(db, &run_id, "finalizer")
         .await
         .unwrap()
         .finalized
@@ -262,12 +262,13 @@ async fn compensation_terms_row_count(pool: &PgPool, employment_id: &EmploymentI
 /// and is logged with the before and after values.
 #[sqlx::test]
 async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -312,12 +313,13 @@ async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool:
 
 #[sqlx::test]
 async fn an_empty_reason_is_refused_and_nothing_is_touched(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -360,12 +362,13 @@ async fn an_empty_reason_is_refused_and_nothing_is_touched(pool: PgPool) {
 
 #[sqlx::test]
 async fn correcting_a_row_that_does_not_exist_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 6, 1),
         date(2026, 6, 1),
@@ -387,10 +390,11 @@ async fn correcting_a_row_that_does_not_exist_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn correcting_against_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmploymentId::new("does-not-exist");
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &missing,
         march().start(),
         march().start(),
@@ -406,12 +410,13 @@ async fn correcting_against_a_missing_employment_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_new_effective_from_that_is_not_a_period_start_is_a_domain_refusal(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         date(2026, 3, 10),
@@ -441,13 +446,14 @@ async fn a_new_effective_from_that_is_not_a_period_start_is_a_domain_refusal(poo
 /// byte-identical.
 #[sqlx::test]
 async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let original_pay = Money::from_cents(500000).unwrap();
-    let employment_id = an_employment_with_basic_pay(&pool, &employer_id, original_pay).await;
+    let employment_id = an_employment_with_basic_pay(&db, &employer_id, original_pay).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
-    finalize_period(&pool, &employer_id, april()).await;
-    finalize_period(&pool, &employer_id, may()).await;
+    finalize_period(&db, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, april()).await;
+    finalize_period(&db, &employer_id, may()).await;
 
     let april_finalized_before =
         finalized_payroll_fingerprint(&pool, &employment_id, april().end()).await;
@@ -462,7 +468,7 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
     // unchanged — April and May must go on reading exactly what they always
     // did.
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         april().start(),
@@ -482,7 +488,7 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
     // have that one period acknowledged.
     let true_march_pay = Money::from_cents(550000).unwrap();
     let insert_diverging = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         true_march_pay,
@@ -570,12 +576,13 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
 /// to the caller and ActionLog.
 #[sqlx::test]
 async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
@@ -586,11 +593,11 @@ async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPoo
     .await
     .unwrap();
     for period in [march(), april(), may(), june()] {
-        finalize_period(&pool, &employer_id, period).await;
+        finalize_period(&db, &employer_id, period).await;
     }
 
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         june().start(),
@@ -609,12 +616,13 @@ async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPoo
 
 #[sqlx::test]
 async fn an_empty_reason_is_refused_for_an_unsupported_deduction_declaration(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -635,14 +643,15 @@ async fn an_empty_reason_is_refused_for_an_unsupported_deduction_declaration(poo
 /// and the before and after status.
 #[sqlx::test]
 async fn redeclaring_over_a_live_finalized_period_names_it_as_diverging(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, march()).await;
 
     let diverging = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -669,16 +678,17 @@ async fn redeclaring_over_a_live_finalized_period_names_it_as_diverging(pool: Pg
 /// identical correction through — divergence warns, it never refuses.
 #[sqlx::test]
 async fn an_unacknowledged_divergence_is_refused_and_names_the_periods(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let original_pay = Money::from_cents(500000).unwrap();
-    let employment_id = an_employment_with_basic_pay(&pool, &employer_id, original_pay).await;
+    let employment_id = an_employment_with_basic_pay(&db, &employer_id, original_pay).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
-    finalize_period(&pool, &employer_id, april()).await;
+    finalize_period(&db, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, april()).await;
 
     let corrected_pay = Money::from_cents(550000).unwrap();
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -705,7 +715,7 @@ async fn an_unacknowledged_divergence_is_refused_and_names_the_periods(pool: PgP
 
     // The same correction, now acknowledging exactly what it was told.
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -730,15 +740,16 @@ async fn an_unacknowledged_divergence_is_refused_and_names_the_periods(pool: PgP
 /// is, so a caller cannot acknowledge a shorter list than the user saw.
 #[sqlx::test]
 async fn an_acknowledgement_that_omits_a_diverging_period_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
-    finalize_period(&pool, &employer_id, april()).await;
+    finalize_period(&db, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, april()).await;
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -764,12 +775,13 @@ async fn an_acknowledgement_that_omits_a_diverging_period_is_refused(pool: PgPoo
 /// list it was never shown is not an acknowledgement of anything.
 #[sqlx::test]
 async fn an_acknowledgement_of_a_period_that_does_not_diverge_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -794,14 +806,15 @@ async fn an_acknowledgement_of_a_period_that_does_not_diverge_is_refused(pool: P
 /// finalized period is refused, and nothing is written.
 #[sqlx::test]
 async fn an_unacknowledged_declaration_change_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, march()).await;
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         UnsupportedDeductionStatus::Present(
@@ -821,7 +834,7 @@ async fn an_unacknowledged_declaration_change_is_refused(pool: PgPool) {
         })
     );
     assert_eq!(
-        get_unsupported_deduction_status(&pool, &employment_id, march().end())
+        get_unsupported_deduction_status(&db, &employment_id, march().end())
             .await
             .unwrap(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -837,15 +850,16 @@ async fn an_unacknowledged_declaration_change_is_refused(pool: PgPool) {
 /// sums frozen numeric columns and never master data (ADR-0012).
 #[sqlx::test]
 async fn a_correction_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     for period in [march(), april(), may()] {
-        finalize_period(&pool, &employer_id, period).await;
+        finalize_period(&db, &employer_id, period).await;
     }
 
-    let june_context_before = build_year_to_date_context(&pool, &employment_id, june().end())
+    let june_context_before = build_year_to_date_context(&db, &employment_id, june().end())
         .await
         .unwrap();
     let fingerprints_before = frozen_figures(&pool, &employment_id).await;
@@ -858,7 +872,7 @@ async fn a_correction_moves_no_finalized_figure_and_no_year_to_date_total(pool: 
     // Double the salary every one of those three periods was calculated
     // from. Nothing already finalized may notice.
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         march().start(),
@@ -872,7 +886,7 @@ async fn a_correction_moves_no_finalized_figure_and_no_year_to_date_total(pool: 
     assert_eq!(diverging, vec![march(), april(), may()]);
 
     assert_eq!(
-        build_year_to_date_context(&pool, &employment_id, june().end())
+        build_year_to_date_context(&db, &employment_id, june().end())
             .await
             .unwrap(),
         june_context_before,
@@ -890,11 +904,12 @@ async fn a_correction_moves_no_finalized_figure_and_no_year_to_date_total(pool: 
 /// error from `UNIQUE (employment_id, effective_from)`.
 #[sqlx::test]
 async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
@@ -906,7 +921,7 @@ async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) 
     .unwrap();
 
     let result = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         may().start(),
@@ -942,18 +957,19 @@ async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) 
 /// figure — the correction in step 1 moved none (guard 3, spec 81).
 #[sqlx::test]
 async fn the_march_correction_end_to_end(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let wrong_pay = Money::from_cents(500000).unwrap();
-    let employment_id = an_employment_with_basic_pay(&pool, &employer_id, wrong_pay).await;
+    let employment_id = an_employment_with_basic_pay(&db, &employer_id, wrong_pay).await;
 
     let march_run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, march(), march().end(), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, march(), march().end(), "actor")
             .await
             .unwrap();
-    calculate_payroll_run(&pool, &march_run_id, "calculator")
+    calculate_payroll_run(&db, &march_run_id, "calculator")
         .await
         .unwrap();
-    let march_original = finalize_payroll_run(&pool, &march_run_id, "finalizer")
+    let march_original = finalize_payroll_run(&db, &march_run_id, "finalizer")
         .await
         .unwrap()
         .finalized
@@ -961,19 +977,19 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
         .find(|(id, _)| id == &employment_id)
         .expect("March must have finalized")
         .1;
-    finalize_period(&pool, &employer_id, april()).await;
-    finalize_period(&pool, &employer_id, may()).await;
+    finalize_period(&db, &employer_id, april()).await;
+    finalize_period(&db, &employer_id, may()).await;
 
     let april_before = finalized_payroll_fingerprint(&pool, &employment_id, april().end()).await;
     let may_before = finalized_payroll_fingerprint(&pool, &employment_id, may().end()).await;
-    let june_context_before = build_year_to_date_context(&pool, &employment_id, june().end())
+    let june_context_before = build_year_to_date_context(&db, &employment_id, june().end())
         .await
         .unwrap();
 
     // 1. Correct master data: the terms only took effect in April, and March
     //    was always a different, higher amount.
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         april().start(),
@@ -988,7 +1004,7 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
 
     let true_march_pay = Money::from_cents(550000).unwrap();
     let insert_diverging = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         march().start(),
         true_march_pay,
@@ -1002,7 +1018,7 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
 
     // Nothing has moved yet. Correcting master data is not paying anybody.
     assert_eq!(
-        build_year_to_date_context(&pool, &employment_id, june().end())
+        build_year_to_date_context(&db, &employment_id, june().end())
             .await
             .unwrap(),
         june_context_before,
@@ -1010,16 +1026,11 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
 
     // 2, 3, 4, 5. Reverse March and replace it through a CorrectionRun,
     //    which assembles its PayrollInput from the corrected master data.
-    reverse_finalized_payroll(
-        &pool,
-        &march_original,
-        "March was calculated wrong",
-        "actor",
-    )
-    .await
-    .unwrap();
+    reverse_finalized_payroll(&db, &march_original, "March was calculated wrong", "actor")
+        .await
+        .unwrap();
     let correction_run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         march(),
         date(2026, 6, 5),
@@ -1029,7 +1040,7 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
     .await
     .unwrap();
     add_employment_to_correction_run(
-        &pool,
+        &db,
         &correction_run_id,
         &employment_id,
         Some(&march_original),
@@ -1038,12 +1049,12 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &correction_run_id, "calculator")
+        calculate_payroll_run(&db, &correction_run_id, "calculator")
             .await
             .unwrap(),
         Vec::new(),
     );
-    finalize_payroll_run(&pool, &correction_run_id, "finalizer")
+    finalize_payroll_run(&db, &correction_run_id, "finalizer")
         .await
         .unwrap();
 
@@ -1083,7 +1094,7 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
         finalized_payroll_fingerprint(&pool, &employment_id, may().end()).await,
         may_before,
     );
-    let june_context_after = build_year_to_date_context(&pool, &employment_id, june().end())
+    let june_context_after = build_year_to_date_context(&db, &employment_id, june().end())
         .await
         .unwrap();
     assert!(
@@ -1105,14 +1116,15 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
 /// reason, acknowledges an empty list, and is not logged as a correction.
 #[sqlx::test]
 async fn recording_a_rise_ahead_of_payroll_diverges_from_nothing_and_needs_no_reason(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, march()).await;
 
     let diverging = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
@@ -1141,18 +1153,19 @@ async fn recording_a_rise_ahead_of_payroll_diverges_from_nothing_and_needs_no_re
 /// and no row is written.
 #[sqlx::test]
 async fn an_unacknowledged_insert_over_a_live_finalized_period_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     // The Employment's only row starts in March, so 1 April is free to
     // insert on — and everything from April on is already paid.
     for period in [march(), april(), may()] {
-        finalize_period(&pool, &employer_id, period).await;
+        finalize_period(&db, &employer_id, period).await;
     }
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
@@ -1184,15 +1197,16 @@ async fn an_unacknowledged_insert_over_a_live_finalized_period_is_refused(pool: 
 /// demanded — and until it arrives, nothing is written.
 #[sqlx::test]
 async fn an_acknowledged_insert_over_a_live_finalized_period_still_demands_a_reason(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
-    finalize_period(&pool, &employer_id, april()).await;
+    finalize_period(&db, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, april()).await;
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
@@ -1219,11 +1233,12 @@ async fn an_acknowledged_insert_over_a_live_finalized_period_still_demands_a_rea
 /// later sibling keeps its own periods out of this insert's list.
 #[sqlx::test]
 async fn an_inserts_divergence_stops_at_the_next_row_that_already_exists(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
@@ -1234,13 +1249,13 @@ async fn an_inserts_divergence_stops_at_the_next_row_that_already_exists(pool: P
     .await
     .unwrap();
     for period in [march(), april(), may(), june()] {
-        finalize_period(&pool, &employer_id, period).await;
+        finalize_period(&db, &employer_id, period).await;
     }
 
     // Inserting at 1 April takes `[1 April, 1 May)` — May's own row already
     // governs from there, so May and June belong to it, not to this insert.
     let diverging = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(550000).unwrap(),
@@ -1270,14 +1285,15 @@ async fn an_inserts_divergence_stops_at_the_next_row_that_already_exists(pool: P
 /// it, or the ActionLog would record agreement to something else.
 #[sqlx::test]
 async fn an_insert_acknowledging_a_period_it_does_not_diverge_from_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, march()).await;
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
@@ -1303,15 +1319,16 @@ async fn an_insert_acknowledging_a_period_it_does_not_diverge_from_is_refused(po
 /// (ADR-0012), so an insert over live finalized periods cannot move a cent.
 #[sqlx::test]
 async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
     for period in [march(), april(), may()] {
-        finalize_period(&pool, &employer_id, period).await;
+        finalize_period(&db, &employer_id, period).await;
     }
 
-    let june_context_before = build_year_to_date_context(&pool, &employment_id, june().end())
+    let june_context_before = build_year_to_date_context(&db, &employment_id, june().end())
         .await
         .unwrap();
     let figures_before = frozen_figures(&pool, &employment_id).await;
@@ -1324,7 +1341,7 @@ async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgP
     // Insert a row governing April and May at double the salary they were
     // both calculated from. Neither may notice.
     let diverging = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(1000000).unwrap(),
@@ -1337,7 +1354,7 @@ async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgP
     assert_eq!(diverging, vec![april(), may()]);
 
     assert_eq!(
-        build_year_to_date_context(&pool, &employment_id, june().end())
+        build_year_to_date_context(&db, &employment_id, june().end())
             .await
             .unwrap(),
         june_context_before,
@@ -1360,23 +1377,24 @@ async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgP
 /// is where the claim is newly made.
 #[sqlx::test]
 async fn an_insert_never_names_a_reversed_period_it_covers(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, march()).await;
     let april_original =
-        finalize_period_returning_id(&pool, &employer_id, &employment_id, april()).await;
-    finalize_period(&pool, &employer_id, may()).await;
+        finalize_period_returning_id(&db, &employer_id, &employment_id, april()).await;
+    finalize_period(&db, &employer_id, may()).await;
 
-    reverse_finalized_payroll(&pool, &april_original, "April was paid wrong", "actor")
+    reverse_finalized_payroll(&db, &april_original, "April was paid wrong", "actor")
         .await
         .unwrap();
 
     // The insert governs 1 April onwards. April's record is reversed and May's
     // is not, so exactly one of the two periods it covers is a divergence.
     let diverging = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
@@ -1407,20 +1425,21 @@ async fn an_insert_never_names_a_reversed_period_it_covers(pool: PgPool) {
 /// agreement to a list that was never true.
 #[sqlx::test]
 async fn an_insert_acknowledging_a_reversed_period_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id =
-        an_employment_with_basic_pay(&pool, &employer_id, Money::from_cents(500000).unwrap()).await;
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
 
-    finalize_period(&pool, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, march()).await;
     let april_original =
-        finalize_period_returning_id(&pool, &employer_id, &employment_id, april()).await;
+        finalize_period_returning_id(&db, &employer_id, &employment_id, april()).await;
 
-    reverse_finalized_payroll(&pool, &april_original, "April was paid wrong", "actor")
+    reverse_finalized_payroll(&db, &april_original, "April was paid wrong", "actor")
         .await
         .unwrap();
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),

@@ -10,7 +10,7 @@ use payroll::{
 };
 use payroll_app::{
     EarningPrePopulation, FinalizedPayrollId, PayrollAppError, PayrollRunId,
-    SNAPSHOT_SCHEMA_VERSION, add_employment_to_correction_run, calculate_payroll_run,
+    SNAPSHOT_SCHEMA_VERSION, SaltDatabase, add_employment_to_correction_run, calculate_payroll_run,
     correct_compensation_terms, create_correction_run, create_employer, create_employment,
     create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
     finalize_payroll_run, record_compensation_terms, remove_employment_from_run,
@@ -34,20 +34,20 @@ fn next_period() -> PayPeriod {
     PayPeriod::new(date(2026, 4, 1), date(2026, 4, 30)).unwrap()
 }
 
-async fn an_employer(pool: &PgPool) -> EmployerId {
-    create_employer(pool, monthly_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> EmployerId {
+    create_employer(db, monthly_schedule(), "actor")
         .await
         .unwrap()
 }
 
 async fn a_fully_declared_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
     let employment_id = create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new(person),
         period().start(),
@@ -57,7 +57,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     record_compensation_terms(
-        pool,
+        db,
         &employment_id,
         period().start(),
         basic_pay,
@@ -68,7 +68,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_prior_employment(
-        pool,
+        db,
         &employment_id,
         TaxYear::for_period_end(period().end()),
         PriorEmployment::None,
@@ -77,7 +77,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        pool,
+        db,
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -93,18 +93,17 @@ async fn a_fully_declared_employment(
 /// Creates and finalizes an Ordinary March run for `employment_id`, and
 /// returns its `FinalizedPayrollId`. Live: nothing reverses it.
 async fn finalize_march(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
 ) -> FinalizedPayrollId {
-    let run_id =
-        create_ordinary_payroll_run(pool, employer_id, period(), date(2026, 4, 5), "actor")
-            .await
-            .unwrap();
-    calculate_payroll_run(pool, &run_id, "calculator")
+    let run_id = create_ordinary_payroll_run(db, employer_id, period(), date(2026, 4, 5), "actor")
         .await
         .unwrap();
-    let outcome = finalize_payroll_run(pool, &run_id, "finalizer")
+    calculate_payroll_run(db, &run_id, "calculator")
+        .await
+        .unwrap();
+    let outcome = finalize_payroll_run(db, &run_id, "finalizer")
         .await
         .unwrap();
     outcome
@@ -118,19 +117,14 @@ async fn finalize_march(
 /// As [`finalize_march`], but reverses the result immediately afterwards —
 /// the fixture every replacement test starts from (§6.1, §6.3).
 async fn finalize_and_reverse_march(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
 ) -> FinalizedPayrollId {
-    let finalized_payroll_id = finalize_march(pool, employer_id, employment_id).await;
-    reverse_finalized_payroll(
-        pool,
-        &finalized_payroll_id,
-        "March salary was wrong",
-        "actor",
-    )
-    .await
-    .unwrap();
+    let finalized_payroll_id = finalize_march(db, employer_id, employment_id).await;
+    reverse_finalized_payroll(db, &finalized_payroll_id, "March salary was wrong", "actor")
+        .await
+        .unwrap();
     finalized_payroll_id
 }
 
@@ -138,13 +132,13 @@ async fn finalize_and_reverse_march(
 /// `employment_id` alone, declaring `replaces`, and returns the
 /// `FinalizedPayrollId` it minted — one link of the chain.
 async fn finalize_a_correction(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
     replaces: Option<&FinalizedPayrollId>,
 ) -> FinalizedPayrollId {
     let run_id = create_correction_run(
-        pool,
+        db,
         employer_id,
         period(),
         date(2026, 7, 5),
@@ -153,13 +147,13 @@ async fn finalize_a_correction(
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(pool, &run_id, employment_id, replaces, "actor")
+    add_employment_to_correction_run(db, &run_id, employment_id, replaces, "actor")
         .await
         .unwrap();
-    calculate_payroll_run(pool, &run_id, "calculator")
+    calculate_payroll_run(db, &run_id, "calculator")
         .await
         .unwrap();
-    let outcome = finalize_payroll_run(pool, &run_id, "finalizer")
+    let outcome = finalize_payroll_run(db, &run_id, "finalizer")
         .await
         .unwrap();
     outcome
@@ -244,10 +238,11 @@ async fn action_log_context(
 
 #[sqlx::test]
 async fn create_correction_run_creates_a_draft_run_that_proposes_nobody(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -263,10 +258,11 @@ async fn create_correction_run_creates_a_draft_run_that_proposes_nobody(pool: Pg
 
 #[sqlx::test]
 async fn create_correction_run_refuses_a_blank_reason(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
     let result = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -282,23 +278,24 @@ async fn create_correction_run_refuses_a_blank_reason(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_second_employment_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_a = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-a",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let employment_b = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-b",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -307,12 +304,11 @@ async fn a_second_employment_is_refused(pool: PgPool) {
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_a, None, "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_a, None, "actor")
         .await
         .unwrap();
 
-    let result =
-        add_employment_to_correction_run(&pool, &run_id, &employment_b, None, "actor").await;
+    let result = add_employment_to_correction_run(&db, &run_id, &employment_b, None, "actor").await;
 
     assert_eq!(
         result,
@@ -324,17 +320,18 @@ async fn a_second_employment_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_target_with_no_reversal_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let finalized_payroll_id = finalize_march(&pool, &employer_id, &employment_id).await;
+    let finalized_payroll_id = finalize_march(&db, &employer_id, &employment_id).await;
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -345,7 +342,7 @@ async fn a_target_with_no_reversal_is_refused(pool: PgPool) {
     .unwrap();
 
     let result = add_employment_to_correction_run(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         Some(&finalized_payroll_id),
@@ -363,24 +360,25 @@ async fn a_target_with_no_reversal_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_target_belonging_to_a_different_employment_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_a = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-a",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let employment_b = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-b",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target_a = finalize_and_reverse_march(&pool, &employer_id, &employment_a).await;
+    let target_a = finalize_and_reverse_march(&db, &employer_id, &employment_a).await;
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -391,7 +389,7 @@ async fn a_target_belonging_to_a_different_employment_is_refused(pool: PgPool) {
     .unwrap();
 
     let result =
-        add_employment_to_correction_run(&pool, &run_id, &employment_b, Some(&target_a), "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_b, Some(&target_a), "actor")
             .await;
 
     assert_eq!(
@@ -409,18 +407,19 @@ async fn a_target_belonging_to_a_different_employment_is_refused(pool: PgPool) {
 async fn two_draft_corrections_naming_the_same_target_end_with_only_the_first_finalized(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
 
     let run_a = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -429,18 +428,18 @@ async fn two_draft_corrections_naming_the_same_target_end_with_only_the_first_fi
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_a, &employment_id, Some(&target), "actor")
+    add_employment_to_correction_run(&db, &run_a, &employment_id, Some(&target), "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_a, "calculator")
+        calculate_payroll_run(&db, &run_a, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
     let run_b = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 6),
@@ -449,20 +448,20 @@ async fn two_draft_corrections_naming_the_same_target_end_with_only_the_first_fi
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_b, &employment_id, Some(&target), "actor")
+    add_employment_to_correction_run(&db, &run_b, &employment_id, Some(&target), "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_b, "calculator")
+        calculate_payroll_run(&db, &run_b, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
-    finalize_payroll_run(&pool, &run_a, "finalizer")
+    finalize_payroll_run(&db, &run_a, "finalizer")
         .await
         .unwrap();
-    let result_b = finalize_payroll_run(&pool, &run_b, "finalizer").await;
+    let result_b = finalize_payroll_run(&db, &run_b, "finalizer").await;
 
     assert_eq!(
         result_b,
@@ -486,20 +485,21 @@ async fn two_draft_corrections_naming_the_same_target_end_with_only_the_first_fi
 async fn null_lineage_is_legitimate_after_a_reasoned_removal_from_the_finalized_ordinary_run(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let ordinary_run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
     remove_employment_from_run(
-        &pool,
+        &db,
         &ordinary_run_id,
         &employment_id,
         "on unpaid leave",
@@ -508,18 +508,18 @@ async fn null_lineage_is_legitimate_after_a_reasoned_removal_from_the_finalized_
     .await
     .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &ordinary_run_id, "calculator")
+        calculate_payroll_run(&db, &ordinary_run_id, "calculator")
             .await
             .unwrap(),
         Vec::new(),
         "a run with no active members reaches Calculated vacuously"
     );
-    finalize_payroll_run(&pool, &ordinary_run_id, "finalizer")
+    finalize_payroll_run(&db, &ordinary_run_id, "finalizer")
         .await
         .unwrap();
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -528,17 +528,17 @@ async fn null_lineage_is_legitimate_after_a_reasoned_removal_from_the_finalized_
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
-    let outcome = finalize_payroll_run(&pool, &run_id, "finalizer")
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
@@ -547,22 +547,23 @@ async fn null_lineage_is_legitimate_after_a_reasoned_removal_from_the_finalized_
 
 #[sqlx::test]
 async fn null_lineage_is_legitimate_when_the_employment_was_never_a_member(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // March's Ordinary run happens first, for a colleague, and finalizes.
     // Only then is this Employment created — with a backdated start date —
     // so it was never auto-proposed into that run and §4.6 forbids a second
     // one. That is §4.8's second null-lineage case.
     let colleague_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-2",
         Money::from_cents(1200000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &colleague_id).await;
+    finalize_march(&db, &employer_id, &colleague_id).await;
 
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
@@ -570,7 +571,7 @@ async fn null_lineage_is_legitimate_when_the_employment_was_never_a_member(pool:
     .await;
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -579,17 +580,17 @@ async fn null_lineage_is_legitimate_when_the_employment_was_never_a_member(pool:
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
-    let outcome = finalize_payroll_run(&pool, &run_id, "finalizer")
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
@@ -600,9 +601,10 @@ async fn null_lineage_is_legitimate_when_the_employment_was_never_a_member(pool:
 async fn null_lineage_is_refused_for_an_employment_that_was_an_unremoved_finalized_member(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
@@ -610,10 +612,10 @@ async fn null_lineage_is_refused_for_an_employment_that_was_an_unremoved_finaliz
     .await;
     // Finalized normally, live, never removed — there is nothing for a null
     // target to legitimately mean here.
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -622,17 +624,17 @@ async fn null_lineage_is_refused_for_an_employment_that_was_an_unremoved_finaliz
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(
         result,
@@ -650,17 +652,18 @@ async fn null_lineage_is_refused_for_an_employment_that_was_an_unremoved_finaliz
 /// unreplaced forever and fork the chain ADR-0015 keeps linear.
 #[sqlx::test]
 async fn null_lineage_is_refused_while_a_reversed_predecessor_is_unreplaced(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let colleague_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-2",
         Money::from_cents(1200000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &colleague_id).await;
+    finalize_march(&db, &employer_id, &colleague_id).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
@@ -669,13 +672,13 @@ async fn null_lineage_is_refused_while_a_reversed_predecessor_is_unreplaced(pool
 
     // A legitimate null-lineage correction — the Employment was never a
     // member — which is then found wrong in its turn and reversed.
-    let first = finalize_a_correction(&pool, &employer_id, &employment_id, None).await;
-    reverse_finalized_payroll(&pool, &first, "the backdated pay was wrong too", "actor")
+    let first = finalize_a_correction(&db, &employer_id, &employment_id, None).await;
+    reverse_finalized_payroll(&db, &first, "the backdated pay was wrong too", "actor")
         .await
         .unwrap();
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 7, 5),
@@ -684,14 +687,14 @@ async fn null_lineage_is_refused_while_a_reversed_predecessor_is_unreplaced(pool
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
         .await
         .unwrap();
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(
         result,
@@ -711,9 +714,10 @@ async fn null_lineage_is_refused_while_a_reversed_predecessor_is_unreplaced(pool
 /// it would collide with it on the `live_finalized_payroll` primary key.
 #[sqlx::test]
 async fn null_lineage_is_refused_before_the_ordinary_run_for_the_period_finalizes(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
@@ -723,7 +727,7 @@ async fn null_lineage_is_refused_before_the_ordinary_run_for_the_period_finalize
     // been run yet, and running it is still the right way to pay it.
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -732,14 +736,14 @@ async fn null_lineage_is_refused_before_the_ordinary_run_for_the_period_finalize
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
         .await
         .unwrap();
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(
         result,
@@ -761,20 +765,21 @@ async fn null_lineage_is_refused_before_the_ordinary_run_for_the_period_finalize
 /// key violation that would otherwise be the first thing to notice.
 #[sqlx::test]
 async fn a_second_null_lineage_correction_for_an_already_paid_period_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let ordinary_run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
     remove_employment_from_run(
-        &pool,
+        &db,
         &ordinary_run_id,
         &employment_id,
         "on unpaid leave",
@@ -782,10 +787,10 @@ async fn a_second_null_lineage_correction_for_an_already_paid_period_is_refused(
     )
     .await
     .unwrap();
-    calculate_payroll_run(&pool, &ordinary_run_id, "calculator")
+    calculate_payroll_run(&db, &ordinary_run_id, "calculator")
         .await
         .unwrap();
-    finalize_payroll_run(&pool, &ordinary_run_id, "finalizer")
+    finalize_payroll_run(&db, &ordinary_run_id, "finalizer")
         .await
         .unwrap();
 
@@ -794,7 +799,7 @@ async fn a_second_null_lineage_correction_for_an_already_paid_period_is_refused(
     let mut run_ids = Vec::new();
     for _ in 0..2 {
         let run_id = create_correction_run(
-            &pool,
+            &db,
             &employer_id,
             period(),
             date(2026, 6, 5),
@@ -803,19 +808,19 @@ async fn a_second_null_lineage_correction_for_an_already_paid_period_is_refused(
         )
         .await
         .unwrap();
-        add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
             .await
             .unwrap();
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap();
         run_ids.push(run_id);
     }
 
-    let first = finalize_payroll_run(&pool, &run_ids[0], "finalizer")
+    let first = finalize_payroll_run(&db, &run_ids[0], "finalizer")
         .await
         .unwrap();
-    let second = finalize_payroll_run(&pool, &run_ids[1], "finalizer").await;
+    let second = finalize_payroll_run(&db, &run_ids[1], "finalizer").await;
 
     assert_eq!(
         second,
@@ -849,20 +854,21 @@ async fn a_second_null_lineage_correction_for_an_already_paid_period_is_refused(
 async fn two_null_lineage_corrections_finalizing_at_once_end_with_only_the_first_finalized(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let ordinary_run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
     remove_employment_from_run(
-        &pool,
+        &db,
         &ordinary_run_id,
         &employment_id,
         "on unpaid leave",
@@ -870,17 +876,17 @@ async fn two_null_lineage_corrections_finalizing_at_once_end_with_only_the_first
     )
     .await
     .unwrap();
-    calculate_payroll_run(&pool, &ordinary_run_id, "calculator")
+    calculate_payroll_run(&db, &ordinary_run_id, "calculator")
         .await
         .unwrap();
-    finalize_payroll_run(&pool, &ordinary_run_id, "finalizer")
+    finalize_payroll_run(&db, &ordinary_run_id, "finalizer")
         .await
         .unwrap();
 
     let mut run_ids = Vec::new();
     for _ in 0..2 {
         let run_id = create_correction_run(
-            &pool,
+            &db,
             &employer_id,
             period(),
             date(2026, 6, 5),
@@ -889,18 +895,18 @@ async fn two_null_lineage_corrections_finalizing_at_once_end_with_only_the_first
         )
         .await
         .unwrap();
-        add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
             .await
             .unwrap();
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap();
         run_ids.push(run_id);
     }
 
     let (first, second) = tokio::join!(
-        finalize_payroll_run(&pool, &run_ids[0], "finalizer"),
-        finalize_payroll_run(&pool, &run_ids[1], "finalizer"),
+        finalize_payroll_run(&db, &run_ids[0], "finalizer"),
+        finalize_payroll_run(&db, &run_ids[1], "finalizer"),
     );
 
     let refusal = match (first, second) {
@@ -925,21 +931,22 @@ async fn two_null_lineage_corrections_finalizing_at_once_end_with_only_the_first
 /// `F1 → reversed → F2 (replaces F1) → reversed → F3 (replaces F2)`.
 #[sqlx::test]
 async fn repeated_corrections_form_a_chain_rather_than_a_tree(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
 
-    let f1 = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
-    let f2 = finalize_a_correction(&pool, &employer_id, &employment_id, Some(&f1)).await;
-    reverse_finalized_payroll(&pool, &f2, "the first correction was wrong too", "actor")
+    let f1 = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
+    let f2 = finalize_a_correction(&db, &employer_id, &employment_id, Some(&f1)).await;
+    reverse_finalized_payroll(&db, &f2, "the first correction was wrong too", "actor")
         .await
         .unwrap();
-    let f3 = finalize_a_correction(&pool, &employer_id, &employment_id, Some(&f2)).await;
+    let f3 = finalize_a_correction(&db, &employer_id, &employment_id, Some(&f2)).await;
 
     // Each link names exactly one predecessor, and F1 is named once only.
     let lineage: Vec<(String, Option<String>)> = sqlx::query_as(
@@ -969,39 +976,40 @@ async fn repeated_corrections_form_a_chain_rather_than_a_tree(pool: PgPool) {
 
 #[sqlx::test]
 async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let ordinary_run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
     set_run_earnings(
-        &pool,
+        &db,
         &ordinary_run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(Money::from_cents(20000).unwrap())],
     )
     .await
     .unwrap();
-    calculate_payroll_run(&pool, &ordinary_run_id, "calculator")
+    calculate_payroll_run(&db, &ordinary_run_id, "calculator")
         .await
         .unwrap();
-    let outcome = finalize_payroll_run(&pool, &ordinary_run_id, "finalizer")
+    let outcome = finalize_payroll_run(&db, &ordinary_run_id, "finalizer")
         .await
         .unwrap();
     let target = outcome.finalized[0].1.clone();
-    reverse_finalized_payroll(&pool, &target, "March salary was wrong", "actor")
+    reverse_finalized_payroll(&db, &target, "March salary was wrong", "actor")
         .await
         .unwrap();
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1012,7 +1020,7 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     .unwrap();
 
     let pre_population =
-        add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
             .await
             .unwrap();
 
@@ -1037,16 +1045,17 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
 
 #[sqlx::test]
 async fn no_target_prepopulates_no_earnings(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1057,7 +1066,7 @@ async fn no_target_prepopulates_no_earnings(pool: PgPool) {
     .unwrap();
 
     let pre_population =
-        add_employment_to_correction_run(&pool, &run_id, &employment_id, None, "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_id, None, "actor")
             .await
             .unwrap();
 
@@ -1072,15 +1081,16 @@ async fn no_target_prepopulates_no_earnings(pool: PgPool) {
 /// §9.1 forbids, dressed up as a degradation.
 #[sqlx::test]
 async fn a_snapshot_missing_its_earnings_field_degrades_to_no_earnings_and_says_so(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
     sqlx::query("UPDATE finalized_payroll SET payroll_input_json = '{}' WHERE id = $1::uuid")
         .bind(target.as_str())
         .execute(&pool)
@@ -1088,7 +1098,7 @@ async fn a_snapshot_missing_its_earnings_field_degrades_to_no_earnings_and_says_
         .unwrap();
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1099,7 +1109,7 @@ async fn a_snapshot_missing_its_earnings_field_degrades_to_no_earnings_and_says_
     .unwrap();
 
     let pre_population =
-        add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
             .await
             .unwrap();
 
@@ -1113,15 +1123,16 @@ async fn a_snapshot_missing_its_earnings_field_degrades_to_no_earnings_and_says_
 
 #[sqlx::test]
 async fn an_unreadable_snapshot_schema_degrades_to_no_earnings_and_says_so(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
     // A future schema shape this build cannot read — `snapshot_schema_version`
     // is stated explicitly at finalization (§9.1), never left to a default,
     // so this is the one honest way to fabricate a not-yet-invented version
@@ -1134,7 +1145,7 @@ async fn an_unreadable_snapshot_schema_degrades_to_no_earnings_and_says_so(pool:
         .unwrap();
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1145,7 +1156,7 @@ async fn an_unreadable_snapshot_schema_degrades_to_no_earnings_and_says_so(pool:
     .unwrap();
 
     let pre_population =
-        add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
             .await
             .unwrap();
 
@@ -1171,17 +1182,18 @@ async fn an_unreadable_snapshot_schema_degrades_to_no_earnings_and_says_so(pool:
 
 #[sqlx::test]
 async fn the_added_action_log_entry_carries_the_correction_reason_and_the_target(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1191,7 +1203,7 @@ async fn the_added_action_log_entry_carries_the_correction_reason_and_the_target
     .await
     .unwrap();
 
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
         .await
         .unwrap();
 
@@ -1209,15 +1221,16 @@ async fn the_added_action_log_entry_carries_the_correction_reason_and_the_target
 
 #[sqlx::test]
 async fn a_corrected_compensation_terms_reaches_the_replacement_calculation(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
 
     // Master data is corrected after the reversal — the true March rate, per
     // §6.5's "split the row" repair, through `CorrectCompensationTerms`
@@ -1225,7 +1238,7 @@ async fn a_corrected_compensation_terms_reaches_the_replacement_calculation(pool
     // just reversed, so it is no longer Live and the correction diverges from
     // nothing: `&[]` is the whole acknowledgement it owes.
     let diverging = correct_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         period().start(),
         period().start(),
@@ -1243,7 +1256,7 @@ async fn a_corrected_compensation_terms_reaches_the_replacement_calculation(pool
     );
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1252,17 +1265,17 @@ async fn a_corrected_compensation_terms_reaches_the_replacement_calculation(pool
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
-    let outcome = finalize_payroll_run(&pool, &run_id, "finalizer")
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
@@ -1285,37 +1298,33 @@ async fn a_corrected_compensation_terms_reaches_the_replacement_calculation(pool
 async fn a_correction_checks_its_own_period_only_and_warns_about_later_finalized_periods(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
 
     // April is finalized against the (reversed) March's year-to-date.
-    let april_run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        next_period(),
-        date(2026, 5, 5),
-        "actor",
-    )
-    .await
-    .unwrap();
-    calculate_payroll_run(&pool, &april_run_id, "calculator")
+    let april_run_id =
+        create_ordinary_payroll_run(&db, &employer_id, next_period(), date(2026, 5, 5), "actor")
+            .await
+            .unwrap();
+    calculate_payroll_run(&db, &april_run_id, "calculator")
         .await
         .unwrap();
-    let april_outcome = finalize_payroll_run(&pool, &april_run_id, "finalizer")
+    let april_outcome = finalize_payroll_run(&db, &april_run_id, "finalizer")
         .await
         .unwrap();
     let april_finalized_payroll_id = april_outcome.finalized[0].1.clone();
     let april_row_before = finalized_payroll_row(&pool, &april_finalized_payroll_id).await;
 
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1324,17 +1333,17 @@ async fn a_correction_checks_its_own_period_only_and_warns_about_later_finalized
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
         .await
         .unwrap();
     assert_eq!(
-        calculate_payroll_run(&pool, &run_id, "calculator")
+        calculate_payroll_run(&db, &run_id, "calculator")
             .await
             .unwrap(),
         Vec::new()
     );
 
-    let outcome = finalize_payroll_run(&pool, &run_id, "finalizer")
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
@@ -1358,15 +1367,16 @@ async fn a_correction_checks_its_own_period_only_and_warns_about_later_finalized
 
 #[sqlx::test]
 async fn year_to_date_built_after_replacement_sees_the_replacement_not_the_original(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let target = finalize_and_reverse_march(&pool, &employer_id, &employment_id).await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
     sqlx::query(
         "UPDATE compensation_terms SET basic_pay = $1
          WHERE employment_id = $2 AND effective_from = $3",
@@ -1378,7 +1388,7 @@ async fn year_to_date_built_after_replacement_sees_the_replacement_not_the_origi
     .await
     .unwrap();
     let run_id = create_correction_run(
-        &pool,
+        &db,
         &employer_id,
         period(),
         date(2026, 6, 5),
@@ -1387,18 +1397,18 @@ async fn year_to_date_built_after_replacement_sees_the_replacement_not_the_origi
     )
     .await
     .unwrap();
-    add_employment_to_correction_run(&pool, &run_id, &employment_id, Some(&target), "actor")
+    add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
         .await
         .unwrap();
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
-    let outcome = finalize_payroll_run(&pool, &run_id, "finalizer")
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
     let replacement_id = outcome.finalized[0].1.clone();
 
-    let ytd = payroll_app::build_year_to_date_context(&pool, &employment_id, next_period().end())
+    let ytd = payroll_app::build_year_to_date_context(&db, &employment_id, next_period().end())
         .await
         .unwrap();
 

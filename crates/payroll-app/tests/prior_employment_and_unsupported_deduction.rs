@@ -10,7 +10,7 @@ use payroll::{
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, create_employer, create_employment, declare_prior_employment,
+    PayrollAppError, SaltDatabase, create_employer, create_employment, declare_prior_employment,
     declare_unsupported_deduction_status, get_prior_employment, get_unsupported_deduction_status,
     void_employment,
 };
@@ -26,12 +26,12 @@ fn twenty_sixth_schedule() -> payroll::PaySchedule {
     payroll::PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()))
 }
 
-async fn an_employer_and_employment(pool: &PgPool) -> (payroll::EmployerId, EmploymentId) {
-    let employer_id = create_employer(pool, twenty_sixth_schedule(), "actor")
+async fn an_employer_and_employment(db: &SaltDatabase) -> (payroll::EmployerId, EmploymentId) {
+    let employer_id = create_employer(db, twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
     let employment_id = create_employment(
-        pool,
+        db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 1, 26),
@@ -47,10 +47,11 @@ async fn an_employer_and_employment(pool: &PgPool) -> (payroll::EmployerId, Empl
 
 #[sqlx::test]
 async fn a_confirmed_none_prior_employment_is_recorded_with_no_figures(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -75,14 +76,15 @@ async fn a_confirmed_none_prior_employment_is_recorded_with_no_figures(pool: PgP
 
 #[sqlx::test]
 async fn a_present_prior_employment_is_recorded_with_its_figures_set_together(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     let figures = PriorEmploymentFigures::new(
         Money::from_cents(150_000).unwrap(),
         Money::from_cents(20_000).unwrap(),
     );
 
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::Some(figures),
@@ -107,10 +109,11 @@ async fn a_present_prior_employment_is_recorded_with_its_figures_set_together(po
 
 #[sqlx::test]
 async fn declaring_prior_employment_as_unknown_is_refused(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::Unknown,
@@ -134,10 +137,11 @@ async fn declaring_prior_employment_as_unknown_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn declaring_prior_employment_against_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmploymentId::new("does-not-exist");
 
     let result = declare_prior_employment(
-        &pool,
+        &db,
         &missing,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -150,13 +154,12 @@ async fn declaring_prior_employment_against_a_missing_employment_is_refused(pool
 
 #[sqlx::test]
 async fn a_voided_employment_accepts_no_prior_employment_declaration(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     let result = declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -177,10 +180,11 @@ async fn a_voided_employment_accepts_no_prior_employment_declaration(pool: PgPoo
 
 #[sqlx::test]
 async fn the_first_prior_employment_declaration_writes_a_declared_action_log_entry(pool: PgPool) {
-    let (employer_id, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (employer_id, employment_id) = an_employer_and_employment(&db).await;
 
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -208,10 +212,11 @@ async fn the_first_prior_employment_declaration_writes_a_declared_action_log_ent
 /// second `Declared` — the pair the ActionType catalogue names for §4.5b.
 #[sqlx::test]
 async fn redeclaring_prior_employment_replaces_the_row_and_writes_a_changed_entry(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -222,7 +227,7 @@ async fn redeclaring_prior_employment_replaces_the_row_and_writes_a_changed_entr
 
     let figures = PriorEmploymentFigures::new(Money::from_cents(50_000).unwrap(), Money::ZERO);
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::Some(figures),
@@ -263,10 +268,11 @@ async fn redeclaring_prior_employment_replaces_the_row_and_writes_a_changed_entr
 
 #[sqlx::test]
 async fn an_unattributed_prior_employment_declaration_is_refused_by_the_database(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -289,10 +295,11 @@ async fn an_unattributed_prior_employment_declaration_is_refused_by_the_database
 
 #[sqlx::test]
 async fn a_confirmed_none_unsupported_deduction_status_is_recorded_with_no_kinds(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -317,7 +324,8 @@ async fn a_confirmed_none_unsupported_deduction_status_is_recorded_with_no_kinds
 
 #[sqlx::test]
 async fn a_present_unsupported_deduction_status_is_recorded_with_its_named_kinds(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     let kinds = UnsupportedDeductionKinds::new(vec![
         UnsupportedDeductionKind::ProvidentFund,
         UnsupportedDeductionKind::EducationPolicy,
@@ -325,7 +333,7 @@ async fn a_present_unsupported_deduction_status_is_recorded_with_its_named_kinds
     .unwrap();
 
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::Present(kinds),
@@ -354,10 +362,11 @@ async fn a_present_unsupported_deduction_status_is_recorded_with_its_named_kinds
 
 #[sqlx::test]
 async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 10),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -384,10 +393,11 @@ async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(po
 
 #[sqlx::test]
 async fn declaring_unsupported_deduction_status_as_unknown_is_refused(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::Unknown,
@@ -415,10 +425,11 @@ async fn declaring_unsupported_deduction_status_as_unknown_is_refused(pool: PgPo
 async fn declaring_unsupported_deduction_status_against_a_missing_employment_is_refused(
     pool: PgPool,
 ) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmploymentId::new("does-not-exist");
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &missing,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -433,13 +444,12 @@ async fn declaring_unsupported_deduction_status_against_a_missing_employment_is_
 
 #[sqlx::test]
 async fn a_voided_employment_accepts_no_unsupported_deduction_status_declaration(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -466,10 +476,11 @@ async fn a_voided_employment_accepts_no_unsupported_deduction_status_declaration
 /// is a second, later-effective row — never a rewrite of March.
 #[sqlx::test]
 async fn a_later_effective_from_adds_a_second_row_rather_than_rewriting_the_first(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -483,7 +494,7 @@ async fn a_later_effective_from_adds_a_second_row_rather_than_rewriting_the_firs
     let kinds =
         UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::ProvidentFund]).unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 2, 26),
         UnsupportedDeductionStatus::Present(kinds),
@@ -517,10 +528,11 @@ async fn a_later_effective_from_adds_a_second_row_rather_than_rewriting_the_firs
 /// catalogue names only one act here, unlike §4.5b's Declared/Changed pair.
 #[sqlx::test]
 async fn redeclaring_the_same_effective_from_replaces_the_row_and_logs_a_correction(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -535,7 +547,7 @@ async fn redeclaring_the_same_effective_from_replaces_the_row_and_logs_a_correct
         UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::RetirementAnnuityFund])
             .unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::Present(kinds),
@@ -585,10 +597,11 @@ async fn redeclaring_the_same_effective_from_replaces_the_row_and_logs_a_correct
 async fn an_unattributed_unsupported_deduction_declaration_is_refused_by_the_database(
     pool: PgPool,
 ) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -615,9 +628,10 @@ async fn an_unattributed_unsupported_deduction_declaration_is_refused_by_the_dat
 /// `Unknown`, never as a confirmed none.
 #[sqlx::test]
 async fn no_prior_employment_row_reads_back_as_unknown(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
-    let prior_employment = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026))
+    let prior_employment = get_prior_employment(&db, &employment_id, TaxYear::starting(2026))
         .await
         .unwrap();
 
@@ -629,9 +643,10 @@ async fn no_prior_employment_row_reads_back_as_unknown(pool: PgPool) {
 /// Unknown" cuts both ways.
 #[sqlx::test]
 async fn a_declaration_for_one_tax_year_leaves_another_unknown(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -640,10 +655,10 @@ async fn a_declaration_for_one_tax_year_leaves_another_unknown(pool: PgPool) {
     .await
     .unwrap();
 
-    let declared = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026))
+    let declared = get_prior_employment(&db, &employment_id, TaxYear::starting(2026))
         .await
         .unwrap();
-    let other_year = get_prior_employment(&pool, &employment_id, TaxYear::starting(2027))
+    let other_year = get_prior_employment(&db, &employment_id, TaxYear::starting(2027))
         .await
         .unwrap();
 
@@ -653,13 +668,14 @@ async fn a_declaration_for_one_tax_year_leaves_another_unknown(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_present_prior_employment_reads_back_with_both_figures(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     let figures = PriorEmploymentFigures::new(
         Money::from_cents(150_000).unwrap(),
         Money::from_cents(20_000).unwrap(),
     );
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::Some(figures),
@@ -668,7 +684,7 @@ async fn a_present_prior_employment_reads_back_with_both_figures(pool: PgPool) {
     .await
     .unwrap();
 
-    let prior_employment = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026))
+    let prior_employment = get_prior_employment(&db, &employment_id, TaxYear::starting(2026))
         .await
         .unwrap();
 
@@ -679,18 +695,20 @@ async fn a_present_prior_employment_reads_back_with_both_figures(pool: PgPool) {
 /// answering `Unknown` would turn a mistyped id into a fact about payroll.
 #[sqlx::test]
 async fn reading_prior_employment_for_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmploymentId::new("no-such-employment");
 
-    let result = get_prior_employment(&pool, &missing, TaxYear::starting(2026)).await;
+    let result = get_prior_employment(&db, &missing, TaxYear::starting(2026)).await;
 
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 }
 
 #[sqlx::test]
 async fn reading_prior_employment_for_a_voided_employment_is_refused(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::None,
@@ -698,11 +716,9 @@ async fn reading_prior_employment_for_a_voided_employment_is_refused(pool: PgPoo
     )
     .await
     .unwrap();
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
-    let result = get_prior_employment(&pool, &employment_id, TaxYear::starting(2026)).await;
+    let result = get_prior_employment(&db, &employment_id, TaxYear::starting(2026)).await;
 
     assert_eq!(
         result,
@@ -712,9 +728,10 @@ async fn reading_prior_employment_for_a_voided_employment_is_refused(pool: PgPoo
 
 #[sqlx::test]
 async fn no_unsupported_deduction_row_in_force_reads_back_as_unknown(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
-    let status = get_unsupported_deduction_status(&pool, &employment_id, date(2026, 2, 25))
+    let status = get_unsupported_deduction_status(&db, &employment_id, date(2026, 2, 25))
         .await
         .unwrap();
 
@@ -728,9 +745,10 @@ async fn no_unsupported_deduction_row_in_force_reads_back_as_unknown(pool: PgPoo
 /// still `Unknown`.
 #[sqlx::test]
 async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 2, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -743,7 +761,7 @@ async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: P
     let kinds =
         UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::ProvidentFund]).unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 7, 26),
         UnsupportedDeductionStatus::Present(kinds.clone()),
@@ -754,15 +772,15 @@ async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: P
     .await
     .unwrap();
 
-    let before_any = get_unsupported_deduction_status(&pool, &employment_id, date(2026, 2, 25))
+    let before_any = get_unsupported_deduction_status(&db, &employment_id, date(2026, 2, 25))
         .await
         .unwrap();
     let governed_by_the_first =
-        get_unsupported_deduction_status(&pool, &employment_id, date(2026, 6, 25))
+        get_unsupported_deduction_status(&db, &employment_id, date(2026, 6, 25))
             .await
             .unwrap();
     let governed_by_the_second =
-        get_unsupported_deduction_status(&pool, &employment_id, date(2026, 8, 25))
+        get_unsupported_deduction_status(&db, &employment_id, date(2026, 8, 25))
             .await
             .unwrap();
 
@@ -779,18 +797,20 @@ async fn the_latest_row_effective_on_or_before_the_period_end_governs_it(pool: P
 
 #[sqlx::test]
 async fn reading_unsupported_deduction_status_for_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmploymentId::new("no-such-employment");
 
-    let result = get_unsupported_deduction_status(&pool, &missing, date(2026, 2, 25)).await;
+    let result = get_unsupported_deduction_status(&db, &missing, date(2026, 2, 25)).await;
 
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 }
 
 #[sqlx::test]
 async fn reading_unsupported_deduction_status_for_a_voided_employment_is_refused(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -800,11 +820,9 @@ async fn reading_unsupported_deduction_status_for_a_voided_employment_is_refused
     )
     .await
     .unwrap();
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
-    let result = get_unsupported_deduction_status(&pool, &employment_id, date(2026, 2, 25)).await;
+    let result = get_unsupported_deduction_status(&db, &employment_id, date(2026, 2, 25)).await;
 
     assert_eq!(
         result,
@@ -820,7 +838,8 @@ async fn reading_unsupported_deduction_status_for_a_voided_employment_is_refused
 /// expectation a schema guarantee rather than a hope about every writer.
 #[sqlx::test]
 async fn the_database_refuses_a_negative_prior_employment_figure(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = sqlx::query(
         "INSERT INTO prior_employment_declaration
@@ -842,7 +861,8 @@ async fn the_database_refuses_a_negative_prior_employment_figure(pool: PgPool) {
 /// evaluation.
 #[sqlx::test]
 async fn the_database_refuses_kinds_that_are_not_a_non_empty_array(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     for kinds in [r#"{"ProvidentFund": true}"#, "[]", r#""ProvidentFund""#] {
         let result = sqlx::query(

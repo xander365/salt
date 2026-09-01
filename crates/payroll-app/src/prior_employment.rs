@@ -1,9 +1,10 @@
 //! `DeclarePriorEmployment` and the read that resolves it (§4.5b, §12).
 
 use payroll::{EmployerId, EmploymentId, Money, PriorEmployment, PriorEmploymentFigures, TaxYear};
-use sqlx::{Acquire, PgPool, Postgres};
+use sqlx::{Acquire, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::freeze::employment_has_a_finalization_in;
 
@@ -24,7 +25,7 @@ use crate::freeze::employment_has_a_finalization_in;
 /// YearToDateContext, so an edit after that point would re-price
 /// already-finalized figures silently.
 pub async fn declare_prior_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employment_id: &EmploymentId,
     tax_year: TaxYear,
     prior_employment: PriorEmployment,
@@ -42,7 +43,7 @@ pub async fn declare_prior_employment(
         ),
     };
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // `FOR UPDATE` holds the row against a concurrent `void_employment`, so
     // a void committing between this read and the insert cannot leave a
@@ -131,11 +132,23 @@ pub async fn declare_prior_employment(
 /// A void Employment is refused for §4.3's reason: this is a calculation
 /// input, and a voided Employment reaches no payroll.
 ///
+/// Public entry point over the opaque [`SaltDatabase`] handle. The
+/// generic connection-taking implementation is `get_prior_employment_on`,
+/// used internally by `year_to_date.rs`, which already holds a connection
+/// or transaction and needs this read on that same one.
+pub async fn get_prior_employment(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+    tax_year: TaxYear,
+) -> Result<PriorEmployment, PayrollAppError> {
+    get_prior_employment_on(db.pool(), employment_id, tax_year).await
+}
+
 /// Takes anything a connection can be acquired from — a `&PgPool` for a
 /// standalone read, or a `&mut Transaction` so a caller assembling several
 /// facts at once reads them all on the one connection, inside its own
 /// transaction and under whatever lock it already holds.
-pub async fn get_prior_employment<'a>(
+pub(crate) async fn get_prior_employment_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     tax_year: TaxYear,

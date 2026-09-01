@@ -7,7 +7,7 @@
 use chrono::NaiveDate;
 use payroll::{DayOfMonth, Money, PayrollError, PeriodEndDay, PersonId};
 use payroll_app::{
-    PayrollAppError, create_employer, create_employment, get_employment_snapshot,
+    PayrollAppError, SaltDatabase, create_employer, create_employment, get_employment_snapshot,
     record_compensation_terms, void_employment,
 };
 use sqlx::{PgPool, Row};
@@ -25,8 +25,9 @@ fn twenty_sixth_schedule() -> payroll::PaySchedule {
 
 #[sqlx::test]
 async fn an_employer_is_created_with_exactly_one_pay_schedule(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let schedule = twenty_sixth_schedule();
-    let employer_id = create_employer(&pool, schedule, "actor").await.unwrap();
+    let employer_id = create_employer(&db, schedule, "actor").await.unwrap();
 
     let row =
         sqlx::query("SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1")
@@ -40,13 +41,14 @@ async fn an_employer_is_created_with_exactly_one_pay_schedule(pool: PgPool) {
 
 #[sqlx::test]
 async fn an_employment_is_created_with_a_start_date_and_an_optional_end_date(pool: PgPool) {
-    let employer_id = create_employer(&pool, twenty_sixth_schedule(), "actor")
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = create_employer(&db, twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
     let person_id = PersonId::new("person-1");
 
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &person_id,
         date(2026, 1, 26),
@@ -66,7 +68,7 @@ async fn an_employment_is_created_with_a_start_date_and_an_optional_end_date(poo
     assert!(!row.get::<bool, _>(2));
 
     let leaver_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &person_id,
         date(2026, 1, 26),
@@ -83,12 +85,14 @@ async fn an_employment_is_created_with_a_start_date_and_an_optional_end_date(poo
     assert_eq!(row.get::<Option<NaiveDate>, _>(0), Some(date(2026, 6, 25)));
 }
 
-async fn an_employer_and_employment(pool: &PgPool) -> (payroll::EmployerId, payroll::EmploymentId) {
-    let employer_id = create_employer(pool, twenty_sixth_schedule(), "actor")
+async fn an_employer_and_employment(
+    db: &SaltDatabase,
+) -> (payroll::EmployerId, payroll::EmploymentId) {
+    let employer_id = create_employer(db, twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
     let employment_id = create_employment(
-        pool,
+        db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 1, 26),
@@ -102,10 +106,11 @@ async fn an_employer_and_employment(pool: &PgPool) -> (payroll::EmployerId, payr
 
 #[sqlx::test]
 async fn compensation_terms_are_accepted_on_a_pay_periods_own_start_date(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
@@ -129,10 +134,11 @@ async fn compensation_terms_are_accepted_on_a_pay_periods_own_start_date(pool: P
 
 #[sqlx::test]
 async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 10),
         Money::from_cents(500000).unwrap(),
@@ -165,10 +171,11 @@ async fn an_effective_from_that_is_not_a_pay_period_start_is_a_domain_refusal(po
 
 #[sqlx::test]
 async fn recording_compensation_terms_against_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = payroll::EmploymentId::new("does-not-exist");
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &missing,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
@@ -186,11 +193,12 @@ async fn recording_compensation_terms_against_a_missing_employment_is_refused(po
 /// PostgreSQL constraint violation must never surface as a domain refusal.
 #[sqlx::test]
 async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     let basic_pay = Money::from_cents(500000).unwrap();
 
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         basic_pay,
@@ -202,7 +210,7 @@ async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool:
     .unwrap();
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         basic_pay,
@@ -220,11 +228,10 @@ async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool:
 
 #[sqlx::test]
 async fn an_employment_can_be_voided_and_is_never_physically_deleted(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     let row = sqlx::query("SELECT is_void FROM employment WHERE id = $1")
         .bind(employment_id.as_str())
@@ -236,11 +243,10 @@ async fn an_employment_can_be_voided_and_is_never_physically_deleted(pool: PgPoo
 
 #[sqlx::test]
 async fn voiding_writes_an_employment_voided_action_log_entry(pool: PgPool) {
-    let (employer_id, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (employer_id, employment_id) = an_employer_and_employment(&db).await;
 
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     let row = sqlx::query(
         "SELECT employer_id, actor, action_type, target_type, target_id
@@ -258,9 +264,10 @@ async fn voiding_writes_an_employment_voided_action_log_entry(pool: PgPool) {
 
 #[sqlx::test]
 async fn voiding_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = payroll::EmploymentId::new("does-not-exist");
 
-    let result = void_employment(&pool, &missing, "actor").await;
+    let result = void_employment(&db, &missing, "actor").await;
 
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 
@@ -273,10 +280,11 @@ async fn voiding_a_missing_employment_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn reading_an_employment_back_yields_a_snapshot_the_pure_crate_accepts(pool: PgPool) {
-    let (employer_id, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (employer_id, employment_id) = an_employer_and_employment(&db).await;
     let basic_pay = Money::from_cents(500000).unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         basic_pay,
@@ -287,7 +295,7 @@ async fn reading_an_employment_back_yields_a_snapshot_the_pure_crate_accepts(poo
     .await
     .unwrap();
 
-    let snapshot = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1))
+    let snapshot = get_employment_snapshot(&db, &employment_id, date(2026, 2, 1))
         .await
         .unwrap();
 
@@ -309,11 +317,12 @@ async fn reading_an_employment_back_yields_a_snapshot_the_pure_crate_accepts(poo
 /// — there is no `effective_until` column to read it from.
 #[sqlx::test]
 async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_from(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     let march_pay = Money::from_cents(500000).unwrap();
     let april_pay = Money::from_cents(550000).unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         march_pay,
@@ -324,7 +333,7 @@ async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_f
     .await
     .unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 2, 26),
         april_pay,
@@ -335,7 +344,7 @@ async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_f
     .await
     .unwrap();
 
-    let first_period = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1))
+    let first_period = get_employment_snapshot(&db, &employment_id, date(2026, 2, 1))
         .await
         .unwrap();
     assert_eq!(first_period.compensation_terms().basic_pay(), march_pay);
@@ -345,7 +354,7 @@ async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_f
         "the first row must end the day before the second row begins"
     );
 
-    let second_period = get_employment_snapshot(&pool, &employment_id, date(2026, 3, 1))
+    let second_period = get_employment_snapshot(&db, &employment_id, date(2026, 3, 1))
         .await
         .unwrap();
     assert_eq!(second_period.compensation_terms().basic_pay(), april_pay);
@@ -354,9 +363,10 @@ async fn a_compensation_terms_row_stays_in_force_until_the_next_rows_effective_f
 
 #[sqlx::test]
 async fn reading_an_employment_with_no_compensation_terms_in_force_is_refused(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
-    let result = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1)).await;
+    let result = get_employment_snapshot(&db, &employment_id, date(2026, 2, 1)).await;
 
     assert_eq!(
         result,
@@ -366,9 +376,10 @@ async fn reading_an_employment_with_no_compensation_terms_in_force_is_refused(po
 
 #[sqlx::test]
 async fn reading_a_missing_employment_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = payroll::EmploymentId::new("does-not-exist");
 
-    let result = get_employment_snapshot(&pool, &missing, date(2026, 2, 1)).await;
+    let result = get_employment_snapshot(&db, &missing, date(2026, 2, 1)).await;
 
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 }
@@ -377,9 +388,10 @@ async fn reading_a_missing_employment_is_refused(pool: PgPool) {
 /// input read for one is refused rather than handed to the pure crate.
 #[sqlx::test]
 async fn a_voided_employment_yields_no_snapshot_to_calculate_from(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
@@ -389,11 +401,9 @@ async fn a_voided_employment_yields_no_snapshot_to_calculate_from(pool: PgPool) 
     )
     .await
     .unwrap();
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
-    let result = get_employment_snapshot(&pool, &employment_id, date(2026, 2, 1)).await;
+    let result = get_employment_snapshot(&db, &employment_id, date(2026, 2, 1)).await;
 
     assert_eq!(
         result,
@@ -403,13 +413,12 @@ async fn a_voided_employment_yields_no_snapshot_to_calculate_from(pool: PgPool) 
 
 #[sqlx::test]
 async fn a_voided_employment_accepts_no_further_compensation_terms(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     let result = record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500000).unwrap(),
@@ -436,12 +445,11 @@ async fn a_voided_employment_accepts_no_further_compensation_terms(pool: PgPool)
 /// an act that did not, in a log no role may afterwards correct.
 #[sqlx::test]
 async fn voiding_an_already_void_employment_writes_no_second_action_log_entry(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
-    let result = void_employment(&pool, &employment_id, "actor").await;
+    let result = void_employment(&db, &employment_id, "actor").await;
 
     assert_eq!(
         result,
@@ -458,12 +466,13 @@ async fn voiding_an_already_void_employment_writes_no_second_action_log_entry(po
 
 #[sqlx::test]
 async fn an_employment_that_ends_before_it_starts_is_a_domain_refusal(pool: PgPool) {
-    let employer_id = create_employer(&pool, twenty_sixth_schedule(), "actor")
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = create_employer(&db, twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
 
     let result = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 6, 26),
@@ -488,10 +497,11 @@ async fn an_employment_that_ends_before_it_starts_is_a_domain_refusal(pool: PgPo
 
 #[sqlx::test]
 async fn an_employment_against_a_missing_employer_is_a_domain_refusal(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = payroll::EmployerId::new("does-not-exist");
 
     let result = create_employment(
-        &pool,
+        &db,
         &missing,
         &PersonId::new("person-1"),
         date(2026, 1, 26),
@@ -508,9 +518,10 @@ async fn an_employment_against_a_missing_employer_is_a_domain_refusal(pool: PgPo
 /// with nothing.
 #[sqlx::test]
 async fn an_unattributed_void_is_refused_by_the_database(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
-    let result = void_employment(&pool, &employment_id, "").await;
+    let result = void_employment(&db, &employment_id, "").await;
 
     assert!(
         matches!(result, Err(PayrollAppError::Database(_))),
@@ -532,7 +543,8 @@ async fn an_unattributed_void_is_refused_by_the_database(pool: PgPool) {
 /// that would break it.
 #[sqlx::test]
 async fn a_negative_basic_pay_is_refused_by_the_database(pool: PgPool) {
-    let (_, employment_id) = an_employer_and_employment(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, employment_id) = an_employer_and_employment(&db).await;
 
     let result = sqlx::query(
         "INSERT INTO compensation_terms (employment_id, effective_from, basic_pay, created_by)

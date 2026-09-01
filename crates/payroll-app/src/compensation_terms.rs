@@ -12,16 +12,15 @@
 
 use std::collections::BTreeSet;
 
-use chrono::NaiveDate;
-use payroll::{EmploymentId, Money, PayPeriod, validate_effective_from_is_a_period_start};
-use sqlx::PgPool;
-
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 use crate::freeze::{
     diverging_periods_json, live_finalized_periods_in_span, require_acknowledgement_of,
 };
+use chrono::NaiveDate;
+use payroll::{EmploymentId, Money, PayPeriod, validate_effective_from_is_a_period_start};
 
 /// Records a `CompensationTerms` row effective from `effective_from`. Refused
 /// as a domain refusal, not a database error, when `effective_from` is not a
@@ -65,7 +64,7 @@ use crate::freeze::{
 /// is written. Demanding a sentence there is the ceremony §5.1 rejects by
 /// name.
 pub async fn record_compensation_terms(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     basic_pay: Money,
@@ -73,7 +72,7 @@ pub async fn record_compensation_terms(
     reason: &str,
     created_by: &str,
 ) -> Result<Vec<PayPeriod>, PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // The Employer row is locked first, and `FOR SHARE` is what makes the
     // `effective_from` guard below hold: `change_pay_schedule` takes `FOR
@@ -231,7 +230,7 @@ pub async fn record_compensation_terms(
 // one more name in front of it.
 #[allow(clippy::too_many_arguments)]
 pub async fn correct_compensation_terms(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employment_id: &EmploymentId,
     current_effective_from: NaiveDate,
     new_effective_from: NaiveDate,
@@ -244,7 +243,7 @@ pub async fn correct_compensation_terms(
         return Err(PayrollAppError::CompensationTermsCorrectionReasonCannotBeEmpty);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // Same lock, same reason as `record_compensation_terms`: it is what
     // makes the INV-014 check on `new_effective_from` below hold against a

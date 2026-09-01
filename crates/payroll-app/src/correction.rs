@@ -10,13 +10,12 @@
 //! between. [`verify_null_lineage_is_legitimate`] is called from
 //! `finalize.rs`, not from here.
 
-use payroll::{Earning, EmployerId, EmploymentId, PayPeriod};
-use sqlx::PgPool;
-
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::finalize::{FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION};
 use crate::payroll_run::{LockedRun, PayrollRunId, RunKind, lock_and_reopen_run};
+use payroll::{Earning, EmployerId, EmploymentId, PayPeriod};
 
 /// What happened to a Correction run's Earning lines when
 /// [`add_employment_to_correction_run`] tried to pre-populate them from a
@@ -65,13 +64,13 @@ pub enum EarningPrePopulation {
 /// ordinary calculation path (§6.3, §6.5); Earning lines are the one field
 /// with no other source.
 pub async fn add_employment_to_correction_run(
-    pool: &PgPool,
+    db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
     replaces: Option<&FinalizedPayrollId>,
     actor: &str,
 ) -> Result<EarningPrePopulation, PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     let run = lock_and_reopen_run(&mut tx, payroll_run_id).await?;
     if run.kind != RunKind::Correction {

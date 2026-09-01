@@ -16,7 +16,7 @@ use payroll::{
     UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    FinalizedPayrollId, PayrollAppError, ScheduleBoundedFact, calculate_payroll_run,
+    FinalizedPayrollId, PayrollAppError, SaltDatabase, ScheduleBoundedFact, calculate_payroll_run,
     change_pay_schedule, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
     record_compensation_terms, record_opening_balance, reverse_finalized_payroll, void_employment,
@@ -36,8 +36,8 @@ fn period() -> PayPeriod {
     PayPeriod::new(date(2026, 3, 1), date(2026, 3, 31)).unwrap()
 }
 
-async fn an_employer(pool: &PgPool) -> EmployerId {
-    create_employer(pool, monthly_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> EmployerId {
+    create_employer(db, monthly_schedule(), "actor")
         .await
         .unwrap()
 }
@@ -47,13 +47,13 @@ async fn an_employer(pool: &PgPool) -> EmployerId {
 /// its own first payable period end — the guard-4 case, so it is a
 /// legitimate row and not itself refused.
 async fn a_fully_declared_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
     let employment_id = create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new(person),
         period().start(),
@@ -63,7 +63,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     record_compensation_terms(
-        pool,
+        db,
         &employment_id,
         period().start(),
         basic_pay,
@@ -74,7 +74,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     record_opening_balance(
-        pool,
+        db,
         &employment_id,
         TaxYear::for_period_end(period().end()),
         period().end(),
@@ -85,7 +85,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_prior_employment(
-        pool,
+        db,
         &employment_id,
         TaxYear::for_period_end(period().end()),
         PriorEmployment::None,
@@ -94,7 +94,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        pool,
+        db,
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -110,31 +110,31 @@ async fn a_fully_declared_employment(
 /// Creates, calculates and finalizes a March Ordinary run for `employment_id`
 /// alone, returning the `FinalizedPayrollId` it produced.
 async fn finalize_march(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
 ) -> FinalizedPayrollId {
-    finalize_the_period(pool, employer_id, employment_id, period(), date(2026, 4, 5)).await
+    finalize_the_period(db, employer_id, employment_id, period(), date(2026, 4, 5)).await
 }
 
 /// The same, for any `PayPeriod` — what a test proving "March through July
 /// stay finalized" needs, since a period may only be run once the ones
 /// before it really have been.
 async fn finalize_the_period(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     employment_id: &EmploymentId,
     run_period: PayPeriod,
     pay_date: NaiveDate,
 ) -> FinalizedPayrollId {
-    let run_id = create_ordinary_payroll_run(pool, employer_id, run_period, pay_date, "actor")
+    let run_id = create_ordinary_payroll_run(db, employer_id, run_period, pay_date, "actor")
         .await
         .unwrap();
-    let refusals = calculate_payroll_run(pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
-    let finalized = finalize_payroll_run(pool, &run_id, "finalizer")
+    let finalized = finalize_payroll_run(db, &run_id, "finalizer")
         .await
         .unwrap()
         .finalized;
@@ -149,18 +149,19 @@ async fn finalize_the_period(
 
 #[sqlx::test]
 async fn opening_balance_is_refused_after_the_employments_first_finalization(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         period().end(),
@@ -194,27 +195,23 @@ async fn opening_balance_is_refused_after_the_employments_first_finalization(poo
 /// retroactively reclassified as pre-Salt.
 #[sqlx::test]
 async fn a_reversal_does_not_thaw_a_frozen_opening_balance(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    let finalized_payroll_id = finalize_march(&pool, &employer_id, &employment_id).await;
+    let finalized_payroll_id = finalize_march(&db, &employer_id, &employment_id).await;
 
-    reverse_finalized_payroll(
-        &pool,
-        &finalized_payroll_id,
-        "correcting a mistake",
-        "actor",
-    )
-    .await
-    .unwrap();
+    reverse_finalized_payroll(&db, &finalized_payroll_id, "correcting a mistake", "actor")
+        .await
+        .unwrap();
 
     let result = record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         period().end(),
@@ -238,19 +235,20 @@ async fn a_reversal_does_not_thaw_a_frozen_opening_balance(pool: PgPool) {
 /// even though the first Employment's March run already finalized.
 #[sqlx::test]
 async fn the_freeze_is_per_employment_not_per_employer(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let finalized_employment = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &finalized_employment).await;
+    finalize_march(&db, &employer_id, &finalized_employment).await;
 
     let june_start = date(2026, 6, 1);
     let june_employment = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-2"),
         june_start,
@@ -263,7 +261,7 @@ async fn the_freeze_is_per_employment_not_per_employer(pool: PgPool) {
     // June is this Employment's own first payable period end — an empty
     // covered span, so zero figures are the legitimate boundary here.
     record_opening_balance(
-        &pool,
+        &db,
         &june_employment,
         TaxYear::starting(2026),
         date(2026, 6, 30),
@@ -279,18 +277,19 @@ async fn the_freeze_is_per_employment_not_per_employer(pool: PgPool) {
 
 #[sqlx::test]
 async fn prior_employment_is_refused_after_the_employments_first_finalization(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let result = declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         PriorEmployment::Some(PriorEmploymentFigures::new(
@@ -323,18 +322,19 @@ async fn prior_employment_is_refused_after_the_employments_first_finalization(po
 /// Employment.
 #[sqlx::test]
 async fn prior_employment_for_a_different_tax_year_stays_writable(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     declare_prior_employment(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2027),
         PriorEmployment::None,
@@ -348,22 +348,23 @@ async fn prior_employment_for_a_different_tax_year_stays_writable(pool: PgPool) 
 
 #[sqlx::test]
 async fn compensation_terms_stays_editable_after_finalization(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     // A record-only use case: correcting an existing row's own
     // `effective_from` is a separate, later use case, so a genuinely
     // editable-after-finalization write is a new row, effective from the
     // next period.
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 4, 1),
         Money::from_cents(1_600_000).unwrap(),
@@ -382,20 +383,21 @@ async fn compensation_terms_stays_editable_after_finalization(pool: PgPool) {
 async fn recording_a_present_provident_fund_status_after_finalization_leaves_earlier_periods_untouched(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let kinds =
         UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::ProvidentFund]).unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         date(2026, 8, 1),
         UnsupportedDeductionStatus::Present(kinds),
@@ -435,7 +437,7 @@ async fn recording_a_present_provident_fund_status_after_finalization_leaves_ear
         let last_day = date(2026, pay_month, 1).pred_opt().unwrap();
         let run_period = PayPeriod::new(date(2026, month, 1), last_day).unwrap();
         finalize_the_period(
-            &pool,
+            &db,
             &employer_id,
             &employment_id,
             run_period,
@@ -468,10 +470,10 @@ async fn recording_a_present_provident_fund_status_after_finalization_leaves_ear
     // for anywhere along the way.
     let august = PayPeriod::new(date(2026, 8, 1), date(2026, 8, 31)).unwrap();
     let august_run =
-        create_ordinary_payroll_run(&pool, &employer_id, august, date(2026, 9, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, august, date(2026, 9, 5), "actor")
             .await
             .unwrap();
-    let refusals = calculate_payroll_run(&pool, &august_run, "calculator")
+    let refusals = calculate_payroll_run(&db, &august_run, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals.len(), 1);
@@ -502,18 +504,19 @@ fn twenty_fifth_schedule() -> payroll::PaySchedule {
 async fn a_pay_schedule_change_is_refused_once_any_payroll_is_finalized_in_that_tax_year(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -542,10 +545,11 @@ async fn a_pay_schedule_change_is_refused_once_any_payroll_is_finalized_in_that_
 
 #[sqlx::test]
 async fn a_pay_schedule_change_is_allowed_before_any_finalization_in_that_tax_year(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -569,18 +573,19 @@ async fn a_pay_schedule_change_is_allowed_before_any_finalization_in_that_tax_ye
 /// in the current one — the guard names "the current TaxYear" specifically.
 #[sqlx::test]
 async fn a_finalization_in_a_different_tax_year_does_not_block_the_change(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2027),
@@ -594,10 +599,11 @@ async fn a_finalization_in_a_different_tax_year_does_not_block_the_change(pool: 
 async fn an_allowed_pay_schedule_change_writes_a_pay_schedule_changed_action_log_entry(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -624,18 +630,19 @@ async fn an_allowed_pay_schedule_change_writes_a_pay_schedule_changed_action_log
 /// actually happened is logged.
 #[sqlx::test]
 async fn a_refused_pay_schedule_change_writes_no_action_log_entry(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let _ = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -657,18 +664,19 @@ async fn a_refused_pay_schedule_change_writes_no_action_log_entry(pool: PgPool) 
 /// reads "in that TaxYear or later" (§4.2).
 #[sqlx::test]
 async fn a_pay_schedule_change_claiming_an_earlier_tax_year_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2025),
@@ -691,20 +699,21 @@ async fn a_pay_schedule_change_claiming_an_earlier_tax_year_is_refused(pool: PgP
 /// change claimed (§4.2, ADR-0005).
 #[sqlx::test]
 async fn a_schedule_moved_under_a_part_finalized_tax_year_stops_the_next_run(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     // The forward claim the freeze check cannot disprove: it is April 2026,
     // but the caller names the next TaxYear and the change goes through.
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2027),
@@ -717,7 +726,7 @@ async fn a_schedule_moved_under_a_part_finalized_tax_year_stops_the_next_run(poo
     // period ending 31 March and one ending 25 April — thirteen periods, and
     // cumulative PAYE built on a boundary that no longer exists.
     let result = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         PayPeriod::new(date(2026, 3, 26), date(2026, 4, 25)).unwrap(),
         date(2026, 5, 5),
@@ -739,18 +748,19 @@ async fn a_schedule_moved_under_a_part_finalized_tax_year_stops_the_next_run(poo
 /// names the finalized periods, not the change.
 #[sqlx::test]
 async fn a_run_in_the_next_tax_year_is_unaffected_by_the_change(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    finalize_march(&pool, &employer_id, &employment_id).await;
+    finalize_march(&db, &employer_id, &employment_id).await;
 
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2027),
@@ -760,7 +770,7 @@ async fn a_run_in_the_next_tax_year_is_unaffected_by_the_change(pool: PgPool) {
     .unwrap();
 
     create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         PayPeriod::new(date(2027, 3, 26), date(2027, 4, 25)).unwrap(),
         date(2027, 5, 5),
@@ -774,20 +784,21 @@ async fn a_run_in_the_next_tax_year_is_unaffected_by_the_change(pool: PgPool) {
 /// by the old schedule, and finalization re-derives from the current one.
 #[sqlx::test]
 async fn a_pay_schedule_change_is_refused_while_a_run_in_that_tax_year_is_open(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+    create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
         .await
         .unwrap();
 
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -812,20 +823,21 @@ async fn a_pay_schedule_change_is_refused_while_a_run_in_that_tax_year_is_open(p
 /// could be neither finished nor re-made.
 #[sqlx::test]
 async fn an_open_run_in_an_earlier_tax_year_also_blocks_the_change(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
     )
     .await;
-    create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+    create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
         .await
         .unwrap();
 
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2027),
@@ -844,10 +856,11 @@ async fn an_open_run_in_an_earlier_tax_year_also_blocks_the_change(pool: PgPool)
 
 #[sqlx::test]
 async fn changing_the_pay_schedule_of_a_missing_employer_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = EmployerId::new("does-not-exist");
 
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &missing,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -867,9 +880,10 @@ async fn changing_the_pay_schedule_of_a_missing_employer_is_refused(pool: PgPool
 async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_stored_salt_coverage_start(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 6, 1),
@@ -881,7 +895,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_stored_salt_cov
     // June is this Employment's own first payable period end, so zero
     // figures over that empty span are the legitimate boundary here.
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 6, 30),
@@ -895,7 +909,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_stored_salt_cov
     // A day-25 schedule's periods end on the 25th, not the 30th: the
     // recorded boundary would be stranded mid-period.
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -932,9 +946,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_stored_salt_cov
 async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_change(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2025, 6, 1),
@@ -944,7 +959,7 @@ async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_
     .await
     .unwrap();
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2025),
         date(2025, 6, 30),
@@ -956,7 +971,7 @@ async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_
     .unwrap();
 
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -971,9 +986,10 @@ async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_
 /// protecting.
 #[sqlx::test]
 async fn a_void_employments_salt_coverage_start_does_not_block_the_change(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 6, 1),
@@ -983,7 +999,7 @@ async fn a_void_employments_salt_coverage_start_does_not_block_the_change(pool: 
     .await
     .unwrap();
     record_opening_balance(
-        &pool,
+        &db,
         &employment_id,
         TaxYear::starting(2026),
         date(2026, 6, 30),
@@ -993,12 +1009,10 @@ async fn a_void_employments_salt_coverage_start_does_not_block_the_change(pool: 
     )
     .await
     .unwrap();
-    void_employment(&pool, &employment_id, "actor")
-        .await
-        .unwrap();
+    void_employment(&db, &employment_id, "actor").await.unwrap();
 
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -1015,9 +1029,10 @@ async fn a_void_employments_salt_coverage_start_does_not_block_the_change(pool: 
 async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_terms_effective_from(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         period().start(),
@@ -1027,7 +1042,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_te
     .await
     .unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         period().start(),
         Money::from_cents(1_500_000).unwrap(),
@@ -1041,7 +1056,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_te
     // A day-25 schedule's periods start on the 26th: 1 March is no longer
     // the start of anything.
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -1068,9 +1083,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_te
 async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_deduction_effective_from(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         period().start(),
@@ -1080,7 +1096,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_de
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -1092,7 +1108,7 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_de
     .unwrap();
 
     let result = change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         twenty_fifth_schedule(),
         TaxYear::starting(2026),
@@ -1117,9 +1133,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_de
 /// something.
 #[sqlx::test]
 async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         period().start(),
@@ -1129,7 +1146,7 @@ async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
     .await
     .unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &employment_id,
         period().start(),
         Money::from_cents(1_500_000).unwrap(),
@@ -1143,7 +1160,7 @@ async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
     // Still a last-day-of-month schedule under the hood: every boundary
     // already recorded against the monthly schedule is unaffected.
     change_pay_schedule(
-        &pool,
+        &db,
         &employer_id,
         monthly_schedule(),
         TaxYear::starting(2026),
@@ -1167,9 +1184,10 @@ async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
 // then two real use cases in flight at once prove the outcome.
 #[sqlx::test]
 async fn a_frozen_fact_edit_and_a_finalization_never_both_succeed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1_500_000).unwrap(),
@@ -1225,10 +1243,10 @@ async fn a_frozen_fact_edit_and_a_finalization_never_both_succeed(pool: PgPool) 
     // succeeding is the state ADR-0013 forbids: a frozen fact edited after
     // the finalization that re-reads it.
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
@@ -1240,9 +1258,9 @@ async fn a_frozen_fact_edit_and_a_finalization_never_both_succeed(pool: PgPool) 
     // and then write a FinalizedPayroll on top of a fact that changed under
     // it, with both calls reporting success.
     let (finalization, edit) = tokio::join!(
-        finalize_payroll_run(&pool, &run_id, "finalizer"),
+        finalize_payroll_run(&db, &run_id, "finalizer"),
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2026),
             PriorEmployment::Some(PriorEmploymentFigures::new(
@@ -1267,7 +1285,8 @@ async fn a_frozen_fact_edit_and_a_finalization_never_both_succeed(pool: PgPool) 
 /// calculate against it takes `FOR SHARE` on the same row.
 #[sqlx::test]
 async fn a_pay_schedule_change_waits_for_a_reader_of_that_schedule(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
     let mut holder = pool
         .acquire()
@@ -1325,9 +1344,10 @@ async fn a_pay_schedule_change_waits_for_a_reader_of_that_schedule(pool: PgPool)
 /// makes them conflict.
 #[sqlx::test]
 async fn storing_a_boundary_waits_for_a_pay_schedule_change(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 6, 1),
@@ -1352,12 +1372,12 @@ async fn storing_a_boundary_waits_for_a_pay_schedule_change(pool: PgPool) {
     .expect("take the schedule changer's row lock");
 
     let (started_sender, started_receiver) = oneshot::channel();
-    let racing_pool = pool.clone();
+    let racing_db = SaltDatabase::from_pool(pool.clone());
     let racing_employment_id = employment_id.clone();
     let racing_task = tokio::spawn(async move {
         started_sender.send(()).expect("notify the lock holder");
         record_opening_balance(
-            &racing_pool,
+            &racing_db,
             &racing_employment_id,
             TaxYear::starting(2026),
             date(2026, 6, 30),
@@ -1393,9 +1413,10 @@ async fn storing_a_boundary_waits_for_a_pay_schedule_change(pool: PgPool) {
 /// stored.
 #[sqlx::test]
 async fn a_pay_schedule_change_and_a_boundary_it_would_strand_never_both_succeed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-1"),
         date(2026, 6, 1),
@@ -1407,14 +1428,14 @@ async fn a_pay_schedule_change_and_a_boundary_it_would_strand_never_both_succeed
 
     let (change, store) = tokio::join!(
         change_pay_schedule(
-            &pool,
+            &db,
             &employer_id,
             twenty_fifth_schedule(),
             TaxYear::starting(2026),
             "actor",
         ),
         record_opening_balance(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2026),
             date(2026, 6, 30),

@@ -6,9 +6,10 @@ use payroll::{
     EmploymentId, PayPeriod, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
     validate_effective_from_is_a_period_start,
 };
-use sqlx::{Acquire, PgPool, Postgres};
+use sqlx::{Acquire, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 use crate::freeze::{
@@ -52,7 +53,7 @@ use crate::freeze::{
 /// *before* the write, on the same connection, so the read is consistent
 /// with the value about to replace it.
 pub async fn declare_unsupported_deduction_status(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     status: UnsupportedDeductionStatus,
@@ -78,7 +79,7 @@ pub async fn declare_unsupported_deduction_status(
         ),
     };
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // The Employer row is locked first, and `FOR SHARE` is what makes the
     // `effective_from` guard below hold: `change_pay_schedule` takes `FOR
@@ -222,11 +223,24 @@ pub async fn declare_unsupported_deduction_status(
 /// A missing or void Employment is refused rather than answered
 /// `Unknown`, exactly as in `get_prior_employment`.
 ///
+/// Public entry point over the opaque [`SaltDatabase`] handle. The
+/// generic connection-taking implementation is
+/// `get_unsupported_deduction_status_on`, used internally by
+/// `calculate.rs`, which already holds a transaction and needs this read
+/// on that same connection.
+pub async fn get_unsupported_deduction_status(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+    as_of: NaiveDate,
+) -> Result<UnsupportedDeductionStatus, PayrollAppError> {
+    get_unsupported_deduction_status_on(db.pool(), employment_id, as_of).await
+}
+
 /// Takes anything a connection can be acquired from — a `&PgPool` for a
 /// standalone read, or a `&mut Transaction` so a caller assembling several
 /// facts at once reads them all on the one connection, inside its own
 /// transaction and under whatever lock it already holds.
-pub async fn get_unsupported_deduction_status<'a>(
+pub(crate) async fn get_unsupported_deduction_status_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     as_of: NaiveDate,

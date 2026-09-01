@@ -9,10 +9,10 @@ use payroll::{
     PersonId, PriorEmployment, TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, PayrollRunCalculationRefusal, PayrollRunId, calculate_payroll_run,
-    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
-    declare_unsupported_deduction_status, record_compensation_terms, remove_employment_from_run,
-    set_run_earnings,
+    PayrollAppError, PayrollRunCalculationRefusal, PayrollRunId, SaltDatabase,
+    calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, record_compensation_terms,
+    remove_employment_from_run, set_run_earnings,
 };
 use sqlx::{PgPool, Row};
 
@@ -37,8 +37,8 @@ fn well_before_the_period() -> NaiveDate {
     date(2025, 1, 26)
 }
 
-async fn an_employer(pool: &PgPool) -> EmployerId {
-    create_employer(pool, twenty_sixth_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> EmployerId {
+    create_employer(db, twenty_sixth_schedule(), "actor")
         .await
         .unwrap()
 }
@@ -48,13 +48,13 @@ async fn an_employer(pool: &PgPool) -> EmployerId {
 /// confirmed absence of unsupported deductions. Ready to calculate the
 /// instant it is a run member.
 async fn a_fully_declared_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
     let employment_id = create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new(person),
         date(2024, 1, 1),
@@ -64,7 +64,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     record_compensation_terms(
-        pool,
+        db,
         &employment_id,
         well_before_the_period(),
         basic_pay,
@@ -75,7 +75,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_prior_employment(
-        pool,
+        db,
         &employment_id,
         TaxYear::starting(2025),
         PriorEmployment::None,
@@ -84,7 +84,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        pool,
+        db,
         &employment_id,
         well_before_the_period(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -145,19 +145,20 @@ async fn working_calculation_row(
 /// different facts.
 #[sqlx::test]
 async fn a_calculation_needs_only_the_one_connection_it_already_holds(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    set_run_earnings(&pool, &run_id, &employment_id, Vec::new())
+    set_run_earnings(&db, &run_id, &employment_id, Vec::new())
         .await
         .unwrap();
 
@@ -167,8 +168,9 @@ async fn a_calculation_needs_only_the_one_connection_it_already_holds(pool: PgPo
         .connect_with((*pool.connect_options()).clone())
         .await
         .unwrap();
+    let single_connection_db = SaltDatabase::from_pool(single_connection_pool);
 
-    let refusals = calculate_payroll_run(&single_connection_pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&single_connection_db, &run_id, "calculator")
         .await
         .expect("a calculation that needs a second connection times out here instead");
 
@@ -178,20 +180,21 @@ async fn a_calculation_needs_only_the_one_connection_it_already_holds(pool: PgPo
 
 #[sqlx::test]
 async fn a_fully_declared_single_member_run_calculates_and_becomes_calculated(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -226,26 +229,27 @@ async fn a_fully_declared_single_member_run_calculates_and_becomes_calculated(po
 async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation_carries_it(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(run_status(&pool, &run_id).await, "calculated");
 
     set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(
@@ -260,7 +264,7 @@ async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation
         "the stored calculation no longer accounts for the new line"
     );
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -283,13 +287,14 @@ async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation
 
 #[sqlx::test]
 async fn a_run_with_no_active_members_calculates_vacuously(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -299,9 +304,10 @@ async fn a_run_with_no_active_members_calculates_vacuously(pool: PgPool) {
 
 #[sqlx::test]
 async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let ready = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-ready",
         Money::from_cents(1500000).unwrap(),
@@ -309,7 +315,7 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
     .await;
     // No `UnsupportedDeductionStatus` declared at all for this one.
     let blocked = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-blocked"),
         date(2024, 1, 1),
@@ -319,7 +325,7 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
     .await
     .unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &blocked,
         well_before_the_period(),
         Money::from_cents(1200000).unwrap(),
@@ -330,7 +336,7 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
     .await
     .unwrap();
     declare_prior_employment(
-        &pool,
+        &db,
         &blocked,
         TaxYear::starting(2025),
         PriorEmployment::None,
@@ -339,11 +345,11 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
     .await
     .unwrap();
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -373,9 +379,10 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
 
 #[sqlx::test]
 async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let blocked = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-blocked"),
         date(2024, 1, 1),
@@ -385,7 +392,7 @@ async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
     .await
     .unwrap();
     record_compensation_terms(
-        &pool,
+        &db,
         &blocked,
         well_before_the_period(),
         Money::from_cents(1200000).unwrap(),
@@ -396,7 +403,7 @@ async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &blocked,
         well_before_the_period(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -408,11 +415,11 @@ async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
     .unwrap();
     // No `PriorEmployment` declared at all.
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -428,9 +435,10 @@ async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
 
 #[sqlx::test]
 async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
@@ -439,7 +447,7 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
     // A second, unresolved member keeps the run Draft across both
     // calculations, so `set_run_earnings` is still permitted between them.
     let unresolved = create_employment(
-        &pool,
+        &db,
         &employer_id,
         &PersonId::new("person-unresolved"),
         date(2024, 1, 1),
@@ -449,11 +457,11 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
     .await
     .unwrap();
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     let (before_input, _, before_calc, _) = working_calculation_row(&pool, &run_id, &employment_id)
@@ -462,14 +470,14 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
     assert_eq!(before_input["earnings"], serde_json::json!([]));
 
     set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(Money::from_cents(50000).unwrap())],
     )
     .await
     .unwrap();
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     let (after_input, _, after_calc, _) = working_calculation_row(&pool, &run_id, &employment_id)
@@ -506,20 +514,21 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
 
 #[sqlx::test]
 async fn a_member_that_starts_failing_has_its_stale_working_calculation_cleared(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
 
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     assert!(
@@ -533,7 +542,7 @@ async fn a_member_that_starts_failing_has_its_stale_working_calculation_cleared(
     // supersedes the earlier `ConfirmedNone` for this calculation, without
     // touching run membership or anything the run-lock would gate.
     declare_unsupported_deduction_status(
-        &pool,
+        &db,
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::Present(
@@ -548,7 +557,7 @@ async fn a_member_that_starts_failing_has_its_stale_working_calculation_cleared(
     )
     .await
     .unwrap();
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -569,23 +578,24 @@ async fn a_member_that_starts_failing_has_its_stale_working_calculation_cleared(
 
 #[sqlx::test]
 async fn a_removed_member_is_never_calculated(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    remove_employment_from_run(&pool, &run_id, &employment_id, "on unpaid leave", "actor")
+    remove_employment_from_run(&db, &run_id, &employment_id, "on unpaid leave", "actor")
         .await
         .unwrap();
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -606,26 +616,27 @@ async fn a_removed_member_is_never_calculated(pool: PgPool) {
 /// calculation that looks current and is not (§4.7, §4.9).
 #[sqlx::test]
 async fn removing_a_member_that_had_calculated_takes_its_working_calculation_with_it(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let stays = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let goes = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-2",
         Money::from_cents(900000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
     assert!(
@@ -635,15 +646,9 @@ async fn removing_a_member_that_had_calculated_takes_its_working_calculation_wit
         "the member must have calculated before it is removed"
     );
 
-    remove_employment_from_run(
-        &pool,
-        &run_id,
-        &goes,
-        "resigned before the pay date",
-        "actor",
-    )
-    .await
-    .unwrap();
+    remove_employment_from_run(&db, &run_id, &goes, "resigned before the pay date", "actor")
+        .await
+        .unwrap();
 
     assert!(
         working_calculation_row(&pool, &run_id, &goes)
@@ -652,7 +657,7 @@ async fn removing_a_member_that_had_calculated_takes_its_working_calculation_wit
         "a removed member keeps no working calculation"
     );
 
-    let refusals = calculate_payroll_run(&pool, &run_id, "calculator")
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -673,16 +678,17 @@ async fn removing_a_member_that_had_calculated_takes_its_working_calculation_wit
 
 #[sqlx::test]
 async fn recalculation_writes_no_action_log_entry(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM action_log_entry")
@@ -690,10 +696,10 @@ async fn recalculation_writes_no_action_log_entry(pool: PgPool) {
         .await
         .unwrap();
 
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
-    calculate_payroll_run(&pool, &run_id, "calculator")
+    calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
@@ -706,9 +712,10 @@ async fn recalculation_writes_no_action_log_entry(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_missing_run_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let made_up_id = create_ordinary_payroll_run(
-        &pool,
-        &an_employer(&pool).await,
+        &db,
+        &an_employer(&db).await,
         period(),
         date(2026, 3, 1),
         "actor",
@@ -721,16 +728,17 @@ async fn a_missing_run_is_refused(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = calculate_payroll_run(&pool, &made_up_id, "calculator").await;
+    let result = calculate_payroll_run(&db, &made_up_id, "calculator").await;
 
     assert_eq!(result, Err(PayrollAppError::PayrollRunNotFound(made_up_id)));
 }
 
 #[sqlx::test]
 async fn a_finalized_run_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
     // Nothing in this ticket can finalize a run — that is a separate, later
@@ -741,7 +749,7 @@ async fn a_finalized_run_is_refused(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = calculate_payroll_run(&pool, &run_id, "calculator").await;
+    let result = calculate_payroll_run(&db, &run_id, "calculator").await;
 
     assert_eq!(
         result,

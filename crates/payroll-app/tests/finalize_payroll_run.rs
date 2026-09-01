@@ -15,9 +15,10 @@ use payroll::{
     UnsupportedDeductionStatus, ruleset_for,
 };
 use payroll_app::{
-    PayrollAppError, PayrollRunId, SALT_VERSION, SNAPSHOT_SCHEMA_VERSION, calculate_payroll_run,
-    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
-    declare_unsupported_deduction_status, finalize_payroll_run, record_compensation_terms,
+    PayrollAppError, PayrollRunId, SALT_VERSION, SNAPSHOT_SCHEMA_VERSION, SaltDatabase,
+    calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
+    record_compensation_terms,
 };
 use sqlx::{Acquire, PgPool, Row};
 use tokio::sync::oneshot;
@@ -44,8 +45,8 @@ fn next_period() -> PayPeriod {
     PayPeriod::new(date(2026, 4, 1), date(2026, 4, 30)).unwrap()
 }
 
-async fn an_employer(pool: &PgPool) -> EmployerId {
-    create_employer(pool, monthly_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> EmployerId {
+    create_employer(db, monthly_schedule(), "actor")
         .await
         .unwrap()
 }
@@ -56,13 +57,13 @@ async fn an_employer(pool: &PgPool) -> EmployerId {
 /// absence of unsupported deductions. `period()` is this Employment's first
 /// payable period, so no `OpeningBalance` is required (§7.1 branch 1).
 async fn a_fully_declared_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
     let employment_id = create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new(person),
         period().start(),
@@ -72,7 +73,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     record_compensation_terms(
-        pool,
+        db,
         &employment_id,
         period().start(),
         basic_pay,
@@ -83,7 +84,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_prior_employment(
-        pool,
+        db,
         &employment_id,
         TaxYear::for_period_end(period().end()),
         PriorEmployment::None,
@@ -92,7 +93,7 @@ async fn a_fully_declared_employment(
     .await
     .unwrap();
     declare_unsupported_deduction_status(
-        pool,
+        db,
         &employment_id,
         period().start(),
         UnsupportedDeductionStatus::ConfirmedNone,
@@ -106,12 +107,11 @@ async fn a_fully_declared_employment(
 }
 
 /// Creates a March Ordinary run and calculates it to `Calculated`.
-async fn a_calculated_run(pool: &PgPool, employer_id: &EmployerId) -> PayrollRunId {
-    let run_id =
-        create_ordinary_payroll_run(pool, employer_id, period(), date(2026, 4, 5), "actor")
-            .await
-            .unwrap();
-    let refusals = calculate_payroll_run(pool, &run_id, "calculator")
+async fn a_calculated_run(db: &SaltDatabase, employer_id: &EmployerId) -> PayrollRunId {
+    let run_id = create_ordinary_payroll_run(db, employer_id, period(), date(2026, 4, 5), "actor")
+        .await
+        .unwrap();
+    let refusals = calculate_payroll_run(db, &run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new(), "the run must reach Calculated");
@@ -221,17 +221,18 @@ async fn working_calculation_input_json(
 async fn finalizing_a_calculated_run_freezes_the_complete_snapshot_and_marks_the_run_finalized(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
-    finalize_payroll_run(&pool, &run_id, "finalizer")
+    finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
@@ -286,10 +287,11 @@ async fn finalizing_a_calculated_run_freezes_the_complete_snapshot_and_marks_the
 
 #[sqlx::test]
 async fn a_run_with_no_active_members_finalizes_vacuously(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
-    finalize_payroll_run(&pool, &run_id, "finalizer")
+    finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
@@ -310,32 +312,28 @@ async fn a_run_with_no_active_members_finalizes_vacuously(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_later_periods_year_to_date_picks_up_the_finalized_figures(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let march_run_id = a_calculated_run(&pool, &employer_id).await;
-    finalize_payroll_run(&pool, &march_run_id, "finalizer")
+    let march_run_id = a_calculated_run(&db, &employer_id).await;
+    finalize_payroll_run(&db, &march_run_id, "finalizer")
         .await
         .unwrap();
     let march = finalized_payroll_row(&pool, &march_run_id, &employment_id)
         .await
         .unwrap();
 
-    let april_run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        next_period(),
-        date(2026, 5, 5),
-        "actor",
-    )
-    .await
-    .unwrap();
-    let refusals = calculate_payroll_run(&pool, &april_run_id, "calculator")
+    let april_run_id =
+        create_ordinary_payroll_run(&db, &employer_id, next_period(), date(2026, 5, 5), "actor")
+            .await
+            .unwrap();
+    let refusals = calculate_payroll_run(&db, &april_run_id, "calculator")
         .await
         .unwrap();
     assert_eq!(refusals, Vec::new());
@@ -355,28 +353,30 @@ async fn a_later_periods_year_to_date_picks_up_the_finalized_figures(pool: PgPoo
 
 #[sqlx::test]
 async fn finalizing_a_missing_run_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
     sqlx::query("DELETE FROM payroll_run WHERE id = $1::uuid")
         .bind(run_id.as_str())
         .execute(&pool)
         .await
         .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(result, Err(PayrollAppError::PayrollRunNotFound(run_id)));
 }
 
 #[sqlx::test]
 async fn finalizing_a_draft_run_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let run_id =
-        create_ordinary_payroll_run(&pool, &employer_id, period(), date(2026, 4, 5), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(
         result,
@@ -386,13 +386,14 @@ async fn finalizing_a_draft_run_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn finalizing_an_already_finalized_run_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
-    finalize_payroll_run(&pool, &run_id, "finalizer")
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
+    finalize_payroll_run(&db, &run_id, "finalizer")
         .await
         .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(
         result,
@@ -408,15 +409,16 @@ async fn finalizing_an_already_finalized_run_is_refused(pool: PgPool) {
 /// have not moved, since `calculate` is otherwise deterministic in them.
 #[sqlx::test]
 async fn finalization_refuses_when_the_recomputed_calculation_differs(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
     let calculation_json: serde_json::Value = sqlx::query_scalar(
         "SELECT payroll_calculation_json FROM working_payroll_calculation
@@ -444,7 +446,7 @@ async fn finalization_refuses_when_the_recomputed_calculation_differs(pool: PgPo
     .await
     .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert!(
         matches!(
@@ -479,15 +481,16 @@ async fn finalization_refuses_when_the_recomputed_calculation_differs(pool: PgPo
 async fn finalization_refuses_when_the_reassembled_input_differs_while_the_calculation_is_byte_identical(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
     let stored_calculation_json: serde_json::Value = sqlx::query_scalar(
         "SELECT payroll_calculation_json FROM working_payroll_calculation
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
@@ -509,7 +512,7 @@ async fn finalization_refuses_when_the_reassembled_input_differs_while_the_calcu
     .await
     .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert!(
         matches!(
@@ -563,15 +566,16 @@ async fn finalization_refuses_when_the_reassembled_input_differs_while_the_calcu
 async fn finalization_refuses_when_the_re_resolved_rules_differ_while_the_calculation_is_byte_identical(
     pool: PgPool,
 ) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
     let stored_calculation_json: serde_json::Value = sqlx::query_scalar(
         "SELECT payroll_calculation_json FROM working_payroll_calculation
@@ -615,7 +619,7 @@ async fn finalization_refuses_when_the_re_resolved_rules_differ_while_the_calcul
     .await
     .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert!(
         matches!(
@@ -662,16 +666,17 @@ async fn finalization_refuses_when_the_re_resolved_rules_differ_while_the_calcul
 /// would pass even if finalization wrote each member as it went.
 #[sqlx::test]
 async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_one(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let good = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-good",
         Money::from_cents(900000).unwrap(),
     )
     .await;
     let bad = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-bad",
         Money::from_cents(1500000).unwrap(),
@@ -681,7 +686,7 @@ async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_on
         good.as_str() < bad.as_str(),
         "UUIDv7 ids order by creation, so the tampered member must be rebuilt second"
     );
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
     let calculation_json: serde_json::Value = sqlx::query_scalar(
         "SELECT payroll_calculation_json FROM working_payroll_calculation
@@ -709,7 +714,7 @@ async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_on
     .await
     .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert!(result.is_err());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM finalized_payroll")
@@ -761,15 +766,16 @@ async fn a_later_members_mismatch_leaves_no_finalized_payroll_for_the_earlier_on
 // sees.
 #[sqlx::test]
 async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let employment_id = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         Money::from_cents(1500000).unwrap(),
     )
     .await;
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
     // Phase 1: prove the lock itself blocks a second transaction. A raw-SQL
     // connection takes the exact `FOR UPDATE` lock `finalize_payroll_run`
@@ -834,8 +840,8 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
     // decide and this test does not care; that exactly one does is the
     // whole invariant (§5.4).
     let (first, second) = tokio::join!(
-        finalize_payroll_run(&pool, &run_id, "finalizer-a"),
-        finalize_payroll_run(&pool, &run_id, "finalizer-b"),
+        finalize_payroll_run(&db, &run_id, "finalizer-a"),
+        finalize_payroll_run(&db, &run_id, "finalizer-b"),
     );
 
     let (winner, loser) = match (&first, &second) {
@@ -888,16 +894,17 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
 /// underneath an approved run.
 #[sqlx::test]
 async fn a_members_rebuild_refusal_names_the_employment_and_finalizes_nobody(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let good = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-good",
         Money::from_cents(900000).unwrap(),
     )
     .await;
     let bad = a_fully_declared_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-bad",
         Money::from_cents(1500000).unwrap(),
@@ -907,7 +914,7 @@ async fn a_members_rebuild_refusal_names_the_employment_and_finalizes_nobody(poo
         good.as_str() < bad.as_str(),
         "UUIDv7 ids order by creation, so the refusing member must be rebuilt second"
     );
-    let run_id = a_calculated_run(&pool, &employer_id).await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
 
     sqlx::query("DELETE FROM prior_employment_declaration WHERE employment_id = $1")
         .bind(bad.as_str())
@@ -915,7 +922,7 @@ async fn a_members_rebuild_refusal_names_the_employment_and_finalizes_nobody(poo
         .await
         .unwrap();
 
-    let result = finalize_payroll_run(&pool, &run_id, "finalizer").await;
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
 
     assert_eq!(
         result,

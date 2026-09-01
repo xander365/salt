@@ -5,15 +5,14 @@
 //! ADR-0015), so a single entry point taking a `kind` would branch on its
 //! first line and share nothing after it.
 
-use chrono::NaiveDate;
-use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, TaxYear};
-use sqlx::PgPool;
-
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::employer::{generates_the_period_end, pay_schedule_from_columns};
 use crate::error::PayrollAppError;
 use crate::freeze::finalized_period_ends_in;
 use crate::ids::app_id;
+use chrono::NaiveDate;
+use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, TaxYear};
 
 app_id! {
     /// `payroll-app`'s own id (§4.1): a native UUID, unlike the pure crate's
@@ -61,13 +60,13 @@ app_id! {
 /// through. It is what actually holds "a TaxYear never contains other than
 /// twelve periods": no further period of that year can be run.
 pub async fn create_ordinary_payroll_run(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     period: PayPeriod,
     pay_date: NaiveDate,
     created_by: &str,
 ) -> Result<PayrollRunId, PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // One read does two jobs: it proves the Employer exists and yields the
     // `PaySchedule` `period` is checked against, and it locks the Employer.
@@ -172,7 +171,7 @@ pub async fn create_ordinary_payroll_run(
 /// downstream — no walk-back (§7.4), no uniqueness index keyed on it — needs
 /// it to be one the *current* schedule still generates.
 pub async fn create_correction_run(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &EmployerId,
     period: PayPeriod,
     pay_date: NaiveDate,
@@ -183,7 +182,7 @@ pub async fn create_correction_run(
         return Err(PayrollAppError::CorrectionReasonCannotBeEmpty);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     let employer_exists: Option<bool> =
         sqlx::query_scalar("SELECT TRUE FROM employer WHERE id = $1")
@@ -482,7 +481,7 @@ pub(crate) async fn lock_and_reopen_run(
 /// calculation, and the next recalculation can make the run `Calculated`
 /// again from the members that remain (§4.7, §4.9).
 pub async fn remove_employment_from_run(
-    pool: &PgPool,
+    db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
     reason: &str,
@@ -495,7 +494,7 @@ pub async fn remove_employment_from_run(
         return Err(PayrollAppError::RemovalReasonCannotBeEmpty);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
     let run = lock_and_reopen_run(&mut tx, payroll_run_id).await?;
     if run.kind != RunKind::Ordinary {
         return Err(PayrollAppError::PayrollRunIsNotOrdinary(
@@ -578,7 +577,7 @@ pub async fn remove_employment_from_run(
 /// An Employment that is not an *active* member of the run is refused too:
 /// one that was never proposed, and one that was removed with a reason.
 pub async fn set_run_earnings(
-    pool: &PgPool,
+    db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
     earnings: Vec<Earning>,
@@ -590,7 +589,7 @@ pub async fn set_run_earnings(
         return Err(PayrollAppError::BasicPayCannotBeSetAsAnEarning);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
     lock_and_reopen_run(&mut tx, payroll_run_id).await?;
 
     // Earning lines are a fact about paying this Employment for this

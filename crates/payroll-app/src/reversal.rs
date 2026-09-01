@@ -10,12 +10,11 @@
 //! replacement identical to the original — a later, separate ticket. That
 //! design is enforced here simply by there being no function that does it.
 
-use payroll::EmployerId;
-use sqlx::PgPool;
-
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::finalize::FinalizedPayrollId;
+use payroll::EmployerId;
 
 /// Reverses `finalized_payroll_id`: deletes its `live_finalized_payroll` row
 /// so a `YearToDateContext` built afterwards drops the period immediately
@@ -36,7 +35,7 @@ use crate::finalize::FinalizedPayrollId;
 /// same named refusal, so a race is never the caller's problem to tell apart
 /// from a repeat.
 pub async fn reverse_finalized_payroll(
-    pool: &PgPool,
+    db: &SaltDatabase,
     finalized_payroll_id: &FinalizedPayrollId,
     reason: &str,
     reversed_by: &str,
@@ -45,7 +44,7 @@ pub async fn reverse_finalized_payroll(
         return Err(PayrollAppError::ReversalReasonCannotBeEmpty);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     let target: Option<(String,)> =
         sqlx::query_as("SELECT employer_id FROM finalized_payroll WHERE id = $1::uuid")

@@ -6,8 +6,8 @@
 use chrono::NaiveDate;
 use payroll::{DayOfMonth, Earning, EmploymentId, Money, PayPeriod, PeriodEndDay, PersonId};
 use payroll_app::{
-    PayrollAppError, PayrollRunId, create_employer, create_employment, create_ordinary_payroll_run,
-    remove_employment_from_run, set_run_earnings, void_employment,
+    PayrollAppError, PayrollRunId, SaltDatabase, create_employer, create_employment,
+    create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings, void_employment,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::oneshot;
@@ -26,21 +26,21 @@ fn march_period() -> PayPeriod {
     PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
 }
 
-async fn an_employer(pool: &PgPool) -> payroll::EmployerId {
-    create_employer(pool, twenty_sixth_schedule(), "actor")
+async fn an_employer(db: &SaltDatabase) -> payroll::EmployerId {
+    create_employer(db, twenty_sixth_schedule(), "actor")
         .await
         .unwrap()
 }
 
 async fn an_employment(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employer_id: &payroll::EmployerId,
     person: &str,
     start_date: NaiveDate,
     end_date: Option<NaiveDate>,
 ) -> EmploymentId {
     create_employment(
-        pool,
+        db,
         employer_id,
         &PersonId::new(person),
         start_date,
@@ -55,17 +55,13 @@ async fn an_employment(
 
 #[sqlx::test]
 async fn a_draft_ordinary_run_is_created_with_its_period_and_pay_date(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
-    let run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
 
     let row = sqlx::query(
         "SELECT employer_id, period_start, period_end, pay_date, kind, status, correction_reason
@@ -86,11 +82,12 @@ async fn a_draft_ordinary_run_is_created_with_its_period_and_pay_date(pool: PgPo
 
 #[sqlx::test]
 async fn every_employment_overlapping_the_period_is_proposed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    let continuing = an_employment(&pool, &employer_id, "person-1", date(2025, 1, 1), None).await;
-    let joiner = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 1), None).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let continuing = an_employment(&db, &employer_id, "person-1", date(2025, 1, 1), None).await;
+    let joiner = an_employment(&db, &employer_id, "person-2", date(2026, 2, 1), None).await;
     let leaver = an_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-3",
         date(2025, 1, 1),
@@ -98,15 +95,10 @@ async fn every_employment_overlapping_the_period_is_proposed(pool: PgPool) {
     )
     .await;
 
-    let run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
 
     let members: Vec<String> = sqlx::query_scalar(
         "SELECT employment_id FROM payroll_run_employment
@@ -127,26 +119,22 @@ async fn every_employment_overlapping_the_period_is_proposed(pool: PgPool) {
 
 #[sqlx::test]
 async fn an_employment_wholly_outside_the_period_is_not_proposed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     an_employment(
-        &pool,
+        &db,
         &employer_id,
         "person-1",
         date(2024, 1, 1),
         Some(date(2026, 1, 25)),
     )
     .await;
-    an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
+    an_employment(&db, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
-    let run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
 
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM payroll_run_employment WHERE payroll_run_id = $1::uuid",
@@ -160,20 +148,16 @@ async fn an_employment_wholly_outside_the_period_is_not_proposed(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_voided_employment_is_never_proposed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    let voided = an_employment(&pool, &employer_id, "person-1", date(2025, 1, 1), None).await;
-    void_employment(&pool, &voided, "actor").await.unwrap();
-    let live = an_employment(&pool, &employer_id, "person-2", date(2025, 1, 1), None).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let voided = an_employment(&db, &employer_id, "person-1", date(2025, 1, 1), None).await;
+    void_employment(&db, &voided, "actor").await.unwrap();
+    let live = an_employment(&db, &employer_id, "person-2", date(2025, 1, 1), None).await;
 
-    let run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
 
     let members: Vec<String> = sqlx::query_scalar(
         "SELECT employment_id FROM payroll_run_employment WHERE payroll_run_id = $1::uuid",
@@ -187,7 +171,8 @@ async fn a_voided_employment_is_never_proposed(pool: PgPool) {
 
 #[sqlx::test]
 async fn an_employment_committing_during_run_creation_is_proposed(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     let mut employment_transaction = pool.begin().await.unwrap();
 
     // This is the KEY SHARE lock create_employment's employer foreign key
@@ -201,12 +186,12 @@ async fn an_employment_committing_during_run_creation_is_proposed(pool: PgPool) 
         .unwrap();
 
     let (started_sender, started_receiver) = oneshot::channel();
-    let creating_pool = pool.clone();
+    let creating_db = SaltDatabase::from_pool(pool.clone());
     let creating_employer = employer_id.clone();
     let creating_run = tokio::spawn(async move {
         started_sender.send(()).unwrap();
         create_ordinary_payroll_run(
-            &creating_pool,
+            &creating_db,
             &creating_employer,
             march_period(),
             date(2026, 3, 1),
@@ -245,25 +230,15 @@ async fn an_employment_committing_during_run_creation_is_proposed(pool: PgPool) 
 
 #[sqlx::test]
 async fn a_second_ordinary_run_for_the_same_employer_and_period_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
-    create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+        .await
+        .unwrap();
 
-    let result = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 5),
-        "actor",
-    )
-    .await;
+    let result =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 5), "actor")
+            .await;
 
     assert!(
         matches!(result, Err(PayrollAppError::Database(_))),
@@ -278,24 +253,25 @@ async fn a_second_ordinary_run_for_the_same_employer_and_period_is_refused(pool:
 
 #[sqlx::test]
 async fn creating_a_run_against_a_missing_employer_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let missing = payroll::EmployerId::new("does-not-exist");
 
     let result =
-        create_ordinary_payroll_run(&pool, &missing, march_period(), date(2026, 3, 1), "actor")
-            .await;
+        create_ordinary_payroll_run(&db, &missing, march_period(), date(2026, 3, 1), "actor").await;
 
     assert_eq!(result, Err(PayrollAppError::EmployerNotFound(missing)));
 }
 
 #[sqlx::test]
 async fn a_period_the_employers_schedule_does_not_generate_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // Calendar February, under a schedule whose periods run the 26th to the
     // 25th. Nothing later could walk back from it to a preceding period.
     let calendar_february = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 28)).unwrap();
 
     let result = create_ordinary_payroll_run(
-        &pool,
+        &db,
         &employer_id,
         calendar_february,
         date(2026, 3, 1),
@@ -319,14 +295,15 @@ async fn a_period_the_employers_schedule_does_not_generate_is_refused(pool: PgPo
 
 #[sqlx::test]
 async fn a_period_ending_on_a_schedule_boundary_but_starting_elsewhere_is_refused(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
     // The end date the Ordinary uniqueness index keys on is correct, so only
     // checking that half would let this through — priced over a span nobody
     // works.
     let short_period = PayPeriod::new(date(2026, 2, 1), date(2026, 2, 25)).unwrap();
 
     let result =
-        create_ordinary_payroll_run(&pool, &employer_id, short_period, date(2026, 3, 1), "actor")
+        create_ordinary_payroll_run(&db, &employer_id, short_period, date(2026, 3, 1), "actor")
             .await;
 
     assert_eq!(
@@ -340,17 +317,13 @@ async fn a_period_ending_on_a_schedule_boundary_but_starting_elsewhere_is_refuse
 
 #[sqlx::test]
 async fn creating_a_run_writes_a_payroll_run_created_action_log_entry(pool: PgPool) {
-    let employer_id = an_employer(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
 
-    let run_id = create_ordinary_payroll_run(
-        &pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
 
     let row = sqlx::query(
         "SELECT employer_id, actor, action_type, target_type, target_id
@@ -368,34 +341,26 @@ async fn creating_a_run_writes_a_payroll_run_created_action_log_entry(pool: PgPo
 
 // ---- RemoveEmploymentFromRun (§4.8) ----
 
-async fn a_run_with_one_member(pool: &PgPool) -> (payroll::EmployerId, PayrollRunId, EmploymentId) {
-    let employer_id = an_employer(pool).await;
-    let employment_id = an_employment(pool, &employer_id, "person-1", date(2025, 1, 1), None).await;
-    let run_id = create_ordinary_payroll_run(
-        pool,
-        &employer_id,
-        march_period(),
-        date(2026, 3, 1),
-        "actor",
-    )
-    .await
-    .unwrap();
+async fn a_run_with_one_member(
+    db: &SaltDatabase,
+) -> (payroll::EmployerId, PayrollRunId, EmploymentId) {
+    let employer_id = an_employer(db).await;
+    let employment_id = an_employment(db, &employer_id, "person-1", date(2025, 1, 1), None).await;
+    let run_id =
+        create_ordinary_payroll_run(db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
     (employer_id, run_id, employment_id)
 }
 
 #[sqlx::test]
 async fn removing_a_member_records_the_reason_actor_and_time(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    remove_employment_from_run(
-        &pool,
-        &run_id,
-        &employment_id,
-        "on unpaid leave",
-        "reviewer",
-    )
-    .await
-    .unwrap();
+    remove_employment_from_run(&db, &run_id, &employment_id, "on unpaid leave", "reviewer")
+        .await
+        .unwrap();
 
     let row = sqlx::query(
         "SELECT removed_by, removal_reason, removed_at FROM payroll_run_employment
@@ -416,13 +381,14 @@ async fn removing_a_member_records_the_reason_actor_and_time(pool: PgPool) {
 
 #[sqlx::test]
 async fn removing_a_member_with_a_blank_reason_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     // A reason of `" "` states nothing while looking like it states
     // something, and the ActionLog it would land in cannot be corrected.
     for blank in ["", " ", "\t\n  "] {
-        let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+        let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
         let result =
-            remove_employment_from_run(&pool, &run_id, &employment_id, blank, "reviewer").await;
+            remove_employment_from_run(&db, &run_id, &employment_id, blank, "reviewer").await;
 
         assert_eq!(
             result,
@@ -444,11 +410,12 @@ async fn removing_a_member_with_a_blank_reason_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn removing_an_employment_that_is_not_a_member_is_refused(pool: PgPool) {
-    let (employer_id, run_id, _) = a_run_with_one_member(&pool).await;
-    let outsider = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (employer_id, run_id, _) = a_run_with_one_member(&db).await;
+    let outsider = an_employment(&db, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
     let result =
-        remove_employment_from_run(&pool, &run_id, &outsider, "wrong person", "reviewer").await;
+        remove_employment_from_run(&db, &run_id, &outsider, "wrong person", "reviewer").await;
 
     assert_eq!(
         result,
@@ -461,13 +428,14 @@ async fn removing_an_employment_that_is_not_a_member_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn removing_an_already_removed_member_is_refused(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
-    remove_employment_from_run(&pool, &run_id, &employment_id, "first reason", "reviewer")
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
+    remove_employment_from_run(&db, &run_id, &employment_id, "first reason", "reviewer")
         .await
         .unwrap();
 
     let result = remove_employment_from_run(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         "second reason",
@@ -506,14 +474,15 @@ async fn removing_an_already_removed_member_is_refused(pool: PgPool) {
 /// leaves, which is the definition of `Draft` (§4.7).
 #[sqlx::test]
 async fn removing_a_member_from_a_calculated_run_reopens_it(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     sqlx::query("UPDATE payroll_run SET status = 'calculated' WHERE id = $1::uuid")
         .bind(run_id.as_str())
         .execute(&pool)
         .await
         .unwrap();
 
-    remove_employment_from_run(&pool, &run_id, &employment_id, "unpaid leave", "actor")
+    remove_employment_from_run(&db, &run_id, &employment_id, "unpaid leave", "actor")
         .await
         .unwrap();
 
@@ -529,7 +498,8 @@ async fn removing_a_member_from_a_calculated_run_reopens_it(pool: PgPool) {
 /// working state can no longer change (§4.7).
 #[sqlx::test]
 async fn a_member_cannot_be_removed_after_finalization(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     sqlx::query("UPDATE payroll_run SET status = 'finalized' WHERE id = $1::uuid")
         .bind(run_id.as_str())
         .execute(&pool)
@@ -537,7 +507,7 @@ async fn a_member_cannot_be_removed_after_finalization(pool: PgPool) {
         .unwrap();
 
     let result =
-        remove_employment_from_run(&pool, &run_id, &employment_id, "unpaid leave", "actor").await;
+        remove_employment_from_run(&db, &run_id, &employment_id, "unpaid leave", "actor").await;
 
     assert_eq!(
         result,
@@ -549,17 +519,12 @@ async fn a_member_cannot_be_removed_after_finalization(pool: PgPool) {
 async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_its_reason(
     pool: PgPool,
 ) {
-    let (employer_id, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (employer_id, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    remove_employment_from_run(
-        &pool,
-        &run_id,
-        &employment_id,
-        "on unpaid leave",
-        "reviewer",
-    )
-    .await
-    .unwrap();
+    remove_employment_from_run(&db, &run_id, &employment_id, "on unpaid leave", "reviewer")
+        .await
+        .unwrap();
 
     let row = sqlx::query(
         "SELECT employer_id, actor, action_type, target_type, target_id, context
@@ -581,13 +546,14 @@ async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_
 
 #[sqlx::test]
 async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     let earnings = vec![
         Earning::TaxableAllowance(Money::from_cents(50_000).unwrap()),
         Earning::TaxableAllowance(Money::from_cents(10_000).unwrap()),
     ];
 
-    set_run_earnings(&pool, &run_id, &employment_id, earnings.clone())
+    set_run_earnings(&db, &run_id, &employment_id, earnings.clone())
         .await
         .unwrap();
 
@@ -615,9 +581,10 @@ async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
 
 #[sqlx::test]
 async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    set_run_earnings(&pool, &run_id, &employment_id, Vec::new())
+    set_run_earnings(&db, &run_id, &employment_id, Vec::new())
         .await
         .unwrap();
 
@@ -635,9 +602,10 @@ async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool
 
 #[sqlx::test]
 async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(
@@ -647,7 +615,7 @@ async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
     .await
     .unwrap();
 
-    set_run_earnings(&pool, &run_id, &employment_id, Vec::new())
+    set_run_earnings(&db, &run_id, &employment_id, Vec::new())
         .await
         .unwrap();
 
@@ -671,7 +639,8 @@ async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
 /// status stops claiming calculations that the new line has made stale.
 #[sqlx::test]
 async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     sqlx::query("UPDATE payroll_run SET status = 'calculated' WHERE id = $1::uuid")
         .bind(run_id.as_str())
         .execute(&pool)
@@ -679,7 +648,7 @@ async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
         .unwrap();
 
     set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(
@@ -699,7 +668,8 @@ async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
 
 #[sqlx::test]
 async fn earnings_cannot_change_after_finalization(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     sqlx::query("UPDATE payroll_run SET status = 'finalized' WHERE id = $1::uuid")
         .bind(run_id.as_str())
         .execute(&pool)
@@ -707,7 +677,7 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
         .unwrap();
 
     let result = set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(
@@ -724,10 +694,11 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_basic_pay_line_is_refused(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
     let result = set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::BasicPay(Money::from_cents(500_000).unwrap())],
@@ -749,10 +720,11 @@ async fn a_basic_pay_line_is_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_basic_pay_line_among_others_is_refused_and_writes_nothing(pool: PgPool) {
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
     let result = set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![
@@ -777,11 +749,12 @@ async fn a_basic_pay_line_among_others_is_refused_and_writes_nothing(pool: PgPoo
 
 #[sqlx::test]
 async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_refused(pool: PgPool) {
-    let (employer_id, run_id, _) = a_run_with_one_member(&pool).await;
-    let outsider = an_employment(&pool, &employer_id, "person-2", date(2026, 2, 26), None).await;
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (employer_id, run_id, _) = a_run_with_one_member(&db).await;
+    let outsider = an_employment(&db, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
     let result = set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &outsider,
         vec![Earning::TaxableAllowance(
@@ -801,22 +774,17 @@ async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_refused(
 
 #[sqlx::test]
 async fn setting_earnings_for_a_removed_member_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     // A removal is the Employer's deliberate statement that this person is
     // not paid this period. Lines written afterwards would sit in the run
     // looking like pay that was intended.
-    let (_, run_id, employment_id) = a_run_with_one_member(&pool).await;
-    remove_employment_from_run(
-        &pool,
-        &run_id,
-        &employment_id,
-        "on unpaid leave",
-        "reviewer",
-    )
-    .await
-    .unwrap();
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
+    remove_employment_from_run(&db, &run_id, &employment_id, "on unpaid leave", "reviewer")
+        .await
+        .unwrap();
 
     let result = set_run_earnings(
-        &pool,
+        &db,
         &run_id,
         &employment_id,
         vec![Earning::TaxableAllowance(

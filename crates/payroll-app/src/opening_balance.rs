@@ -8,14 +8,13 @@
 //! four guards below, since a frozen row refuses regardless of what it is
 //! being asked to change to.
 
-use chrono::NaiveDate;
-use payroll::{EmploymentId, Money, PayPeriod, PaySchedule, PayrollError, TaxYear};
-use sqlx::PgPool;
-
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
+use crate::database::SaltDatabase;
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 use crate::freeze::employment_has_a_finalization_in;
+use chrono::NaiveDate;
+use payroll::{EmploymentId, Money, PayPeriod, PaySchedule, PayrollError, TaxYear};
 
 /// Records the `OpeningBalance` for one (Employment, TaxYear), or replaces
 /// whichever one is already there.
@@ -37,7 +36,7 @@ use crate::freeze::employment_has_a_finalization_in;
 ///    row. Zero figures over a non-empty span are ordinary (unpaid leave,
 ///    nil PAYE) and are accepted.
 pub async fn record_opening_balance(
-    pool: &PgPool,
+    db: &SaltDatabase,
     employment_id: &EmploymentId,
     tax_year: TaxYear,
     salt_coverage_start: NaiveDate,
@@ -45,7 +44,7 @@ pub async fn record_opening_balance(
     prior_paye: Money,
     created_by: &str,
 ) -> Result<(), PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // The Employer row is locked first, and `FOR SHARE` is what makes the
     // `SaltCoverageStart` guard below hold: `change_pay_schedule` takes `FOR

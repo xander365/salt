@@ -13,18 +13,17 @@
 
 use std::collections::HashMap;
 
+use crate::database::SaltDatabase;
+use crate::employer::pay_schedule_for_employer;
+use crate::employment::get_employment_snapshot_on;
+use crate::error::PayrollAppError;
+use crate::payroll_run::{PayrollRunId, RunStatus, active_member_ids, lock_run};
+use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
+use crate::year_to_date::build_year_to_date_context_on;
 use payroll::{
     Earning, EmploymentId, PayPeriod, PaySchedule, PayrollCalculation, PayrollInput, PayrollRules,
     calculate, ruleset_for,
 };
-use sqlx::PgPool;
-
-use crate::employer::pay_schedule_for_employer;
-use crate::employment::get_employment_snapshot;
-use crate::error::PayrollAppError;
-use crate::payroll_run::{PayrollRunId, RunStatus, active_member_ids, lock_run};
-use crate::unsupported_deduction_status::get_unsupported_deduction_status;
-use crate::year_to_date::build_year_to_date_context;
 
 /// Why one member's calculation was refused, named alongside the
 /// Employment it blocked. A member with an Unknown `PriorEmployment` or
@@ -71,11 +70,11 @@ pub struct PayrollRunCalculationRefusal {
 /// exist or is already `Finalized` — working state can no longer change
 /// once history has been written (§4.7).
 pub async fn calculate_payroll_run(
-    pool: &PgPool,
+    db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     calculated_by: &str,
 ) -> Result<Vec<PayrollRunCalculationRefusal>, PayrollAppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db.pool().begin().await?;
 
     // Locking the run for the whole recalculation is what makes two
     // concurrent calls to this function serialize rather than race each
@@ -190,10 +189,11 @@ pub(crate) async fn assemble_and_calculate(
     earnings: Vec<Earning>,
     rules: &PayrollRules,
 ) -> Result<(PayrollInput, PayrollCalculation), PayrollAppError> {
-    let employment = get_employment_snapshot(&mut **tx, employment_id, period.end()).await?;
+    let employment = get_employment_snapshot_on(&mut **tx, employment_id, period.end()).await?;
     let unsupported_deductions =
-        get_unsupported_deduction_status(&mut **tx, employment_id, period.end()).await?;
-    let year_to_date = build_year_to_date_context(&mut **tx, employment_id, period.end()).await?;
+        get_unsupported_deduction_status_on(&mut **tx, employment_id, period.end()).await?;
+    let year_to_date =
+        build_year_to_date_context_on(&mut **tx, employment_id, period.end()).await?;
 
     let input = PayrollInput::new(
         employment,

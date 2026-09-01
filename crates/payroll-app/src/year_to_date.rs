@@ -6,8 +6,9 @@ use chrono::NaiveDate;
 use payroll::{EmploymentId, Money, PayrollError, PeriodsElapsed, TaxYear, YearToDateContext};
 use sqlx::{Acquire, Postgres};
 
+use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
-use crate::prior_employment::get_prior_employment;
+use crate::prior_employment::get_prior_employment_on;
 
 /// Builds the `YearToDateContext` for `employment_id` as of `period_end` —
 /// the end date of the `PayPeriod` being calculated (§8):
@@ -36,6 +37,19 @@ use crate::prior_employment::get_prior_employment;
 /// written now, to be exercised for real once they ship, rather than
 /// rewritten later.
 ///
+/// Public entry point over the opaque [`SaltDatabase`] handle. The
+/// generic connection-taking implementation is
+/// `build_year_to_date_context_on`, used internally by `calculate.rs`,
+/// which already holds a transaction and needs this read on that same
+/// connection.
+pub async fn build_year_to_date_context(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+    period_end: NaiveDate,
+) -> Result<YearToDateContext, PayrollAppError> {
+    build_year_to_date_context_on(db.pool(), employment_id, period_end).await
+}
+
 /// Takes anything a connection can be acquired from — a `&PgPool` for a
 /// standalone read, or a `&mut Transaction` so a caller assembling several
 /// facts at once reads them all on the one connection, inside its own
@@ -43,7 +57,7 @@ use crate::prior_employment::get_prior_employment;
 /// below share that connection, so the `OpeningBalance`, the live history
 /// and the `PriorEmployment` are one consistent account of the TaxYear
 /// rather than three snapshots taken moments apart.
-pub async fn build_year_to_date_context<'a>(
+pub(crate) async fn build_year_to_date_context_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     period_end: NaiveDate,
@@ -52,7 +66,7 @@ pub async fn build_year_to_date_context<'a>(
 
     let tax_year = TaxYear::for_period_end(period_end);
     let periods_elapsed = PeriodsElapsed::from_period_end(period_end);
-    let prior_employment = get_prior_employment(&mut *conn, employment_id, tax_year).await?;
+    let prior_employment = get_prior_employment_on(&mut *conn, employment_id, tax_year).await?;
 
     let opening: Option<(i64, i64)> = sqlx::query_as(
         "SELECT prior_taxable_remuneration, prior_paye
@@ -127,12 +141,12 @@ mod tests {
         payroll::PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap()))
     }
 
-    async fn an_employment(pool: &PgPool) -> EmploymentId {
-        let employer_id = create_employer(pool, twenty_sixth_schedule(), "actor")
+    async fn an_employment(db: &SaltDatabase) -> EmploymentId {
+        let employer_id = create_employer(db, twenty_sixth_schedule(), "actor")
             .await
             .unwrap();
         create_employment(
-            pool,
+            db,
             &employer_id,
             &PersonId::new("person-1"),
             date(2020, 1, 1),
@@ -147,9 +161,10 @@ mod tests {
     async fn with_no_opening_balance_and_no_finalized_history_the_prior_figures_are_zero(
         pool: PgPool,
     ) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::None,
@@ -158,7 +173,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 2, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2026, 2, 25))
             .await
             .unwrap();
 
@@ -168,9 +183,10 @@ mod tests {
 
     #[sqlx::test]
     async fn periods_elapsed_and_tax_year_are_derived_from_the_period_end_date_alone(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2026),
             PriorEmployment::None,
@@ -180,7 +196,7 @@ mod tests {
         .unwrap();
 
         // September: six full months after the tax year's March start.
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 9, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2026, 9, 25))
             .await
             .unwrap();
 
@@ -192,9 +208,10 @@ mod tests {
     async fn the_opening_balance_figures_are_carried_through_when_no_history_precedes_them(
         pool: PgPool,
     ) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::None,
@@ -214,7 +231,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2025, 10, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2025, 10, 25))
             .await
             .unwrap();
 
@@ -233,9 +250,10 @@ mod tests {
     /// finalization's own, later ticket).
     #[sqlx::test]
     async fn a_live_finalized_payroll_row_for_an_earlier_period_is_summed_on_top(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::None,
@@ -255,7 +273,7 @@ mod tests {
         .await
         .unwrap();
         insert_live_finalized_payroll(
-            &pool,
+            &db,
             &employment_id,
             date(2025, 9, 26),
             date(2025, 10, 25),
@@ -265,7 +283,7 @@ mod tests {
         )
         .await;
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2025, 11, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2025, 11, 25))
             .await
             .unwrap();
 
@@ -281,9 +299,10 @@ mod tests {
     /// later one, not year-to-date history.
     #[sqlx::test]
     async fn a_finalized_row_on_or_after_the_period_being_calculated_is_not_summed(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::None,
@@ -292,7 +311,7 @@ mod tests {
         .await
         .unwrap();
         insert_live_finalized_payroll(
-            &pool,
+            &db,
             &employment_id,
             date(2025, 9, 26),
             date(2025, 10, 25),
@@ -302,7 +321,7 @@ mod tests {
         )
         .await;
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2025, 10, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2025, 10, 25))
             .await
             .unwrap();
 
@@ -314,9 +333,10 @@ mod tests {
     /// though it is a live row for the same Employment.
     #[sqlx::test]
     async fn a_finalized_row_from_a_different_tax_year_is_not_summed(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2026),
             PriorEmployment::None,
@@ -326,7 +346,7 @@ mod tests {
         .unwrap();
         // 25 February 2026 falls in the TaxYear starting 2025, not 2026.
         insert_live_finalized_payroll(
-            &pool,
+            &db,
             &employment_id,
             date(2026, 1, 26),
             date(2026, 2, 25),
@@ -336,7 +356,7 @@ mod tests {
         )
         .await;
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 3, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2026, 3, 25))
             .await
             .unwrap();
 
@@ -349,9 +369,10 @@ mod tests {
     /// of the sum with no query ever mentioning `reversal`.
     #[sqlx::test]
     async fn a_reversed_finalized_row_with_no_replacement_is_not_summed(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::None,
@@ -360,7 +381,7 @@ mod tests {
         .await
         .unwrap();
         let finalized_payroll_id = insert_finalized_payroll(
-            &pool,
+            &db,
             &employment_id,
             date(2025, 9, 26),
             date(2025, 10, 25),
@@ -381,7 +402,7 @@ mod tests {
         // No corresponding `live_finalized_payroll` row: reversal deletes
         // it, exactly as a later reversal ticket will do.
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2025, 11, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2025, 11, 25))
             .await
             .unwrap();
 
@@ -396,9 +417,10 @@ mod tests {
     /// ordering would swap both answers.
     #[sqlx::test]
     async fn history_is_ordered_by_period_end_and_never_by_when_it_was_finalized(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::None,
@@ -408,7 +430,7 @@ mod tests {
         .unwrap();
         // An earlier period, finalized months after the one being built.
         insert_live_finalized_payroll_finalized_on(
-            &pool,
+            &db,
             &employment_id,
             date(2025, 9, 26),
             date(2025, 10, 25),
@@ -420,7 +442,7 @@ mod tests {
         .await;
         // A later period, finalized long before it.
         insert_live_finalized_payroll_finalized_on(
-            &pool,
+            &db,
             &employment_id,
             date(2025, 11, 26),
             date(2025, 12, 25),
@@ -431,7 +453,7 @@ mod tests {
         )
         .await;
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2025, 11, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2025, 11, 25))
             .await
             .unwrap();
 
@@ -449,9 +471,10 @@ mod tests {
     /// tell the two readings apart.
     #[sqlx::test]
     async fn periods_elapsed_is_the_periods_position_and_never_a_count_of_history(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2026),
             PriorEmployment::None,
@@ -464,7 +487,7 @@ mod tests {
             (date(2026, 8, 26), date(2026, 9, 25)),
         ] {
             insert_live_finalized_payroll(
-                &pool,
+                &db,
                 &employment_id,
                 period_start,
                 period_end,
@@ -477,7 +500,7 @@ mod tests {
 
         // 25 October 2026 sits seven full months after the TaxYear's March
         // start, whatever Salt happens to hold history for.
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 10, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2026, 10, 25))
             .await
             .unwrap();
 
@@ -486,9 +509,10 @@ mod tests {
 
     #[sqlx::test]
     async fn an_established_prior_employment_fact_is_carried_through(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
         declare_prior_employment(
-            &pool,
+            &db,
             &employment_id,
             TaxYear::starting(2025),
             PriorEmployment::Some(payroll::PriorEmploymentFigures::new(
@@ -500,7 +524,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 2, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2026, 2, 25))
             .await
             .unwrap();
 
@@ -517,9 +541,10 @@ mod tests {
     /// default of `None` — §4.5b's whole point.
     #[sqlx::test]
     async fn no_prior_employment_declaration_reads_back_as_unknown(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
 
-        let ytd = build_year_to_date_context(&pool, &employment_id, date(2026, 2, 25))
+        let ytd = build_year_to_date_context(&db, &employment_id, date(2026, 2, 25))
             .await
             .unwrap();
 
@@ -528,12 +553,11 @@ mod tests {
 
     #[sqlx::test]
     async fn a_void_employment_is_refused(pool: PgPool) {
-        let employment_id = an_employment(&pool).await;
-        void_employment(&pool, &employment_id, "actor")
-            .await
-            .unwrap();
+        let db = SaltDatabase::from_pool(pool.clone());
+        let employment_id = an_employment(&db).await;
+        void_employment(&db, &employment_id, "actor").await.unwrap();
 
-        let result = build_year_to_date_context(&pool, &employment_id, date(2026, 2, 25)).await;
+        let result = build_year_to_date_context(&db, &employment_id, date(2026, 2, 25)).await;
 
         assert_eq!(
             result,
@@ -542,7 +566,7 @@ mod tests {
     }
 
     async fn insert_live_finalized_payroll(
-        pool: &PgPool,
+        db: &SaltDatabase,
         employment_id: &EmploymentId,
         period_start: NaiveDate,
         period_end: NaiveDate,
@@ -551,7 +575,7 @@ mod tests {
         paye_cents: i64,
     ) {
         insert_live_finalized_payroll_finalized_on(
-            pool,
+            db,
             employment_id,
             period_start,
             period_end,
@@ -570,7 +594,7 @@ mod tests {
     /// it must never use.
     #[allow(clippy::too_many_arguments)]
     async fn insert_live_finalized_payroll_finalized_on(
-        pool: &PgPool,
+        db: &SaltDatabase,
         employment_id: &EmploymentId,
         period_start: NaiveDate,
         period_end: NaiveDate,
@@ -580,7 +604,7 @@ mod tests {
         finalized_at: NaiveDate,
     ) {
         let finalized_payroll_id = insert_finalized_payroll(
-            pool,
+            db,
             employment_id,
             period_start,
             period_end,
@@ -597,7 +621,7 @@ mod tests {
         .bind(employment_id.as_str())
         .bind(period_end)
         .bind(&finalized_payroll_id)
-        .execute(pool)
+        .execute(db.pool())
         .await
         .unwrap();
     }
@@ -609,7 +633,7 @@ mod tests {
     /// this ticket calculates or finalizes that run.
     #[allow(clippy::too_many_arguments)]
     async fn insert_finalized_payroll(
-        pool: &PgPool,
+        db: &SaltDatabase,
         employment_id: &EmploymentId,
         period_start: NaiveDate,
         period_end: NaiveDate,
@@ -618,6 +642,7 @@ mod tests {
         paye_cents: i64,
         finalized_at: NaiveDate,
     ) -> String {
+        let pool = db.pool();
         let employer_id: String =
             sqlx::query_scalar("SELECT employer_id FROM employment WHERE id = $1")
                 .bind(employment_id.as_str())
@@ -626,7 +651,7 @@ mod tests {
                 .unwrap();
 
         let run_id = crate::create_ordinary_payroll_run(
-            pool,
+            db,
             &payroll::EmployerId::new(employer_id.clone()),
             payroll::PayPeriod::new(period_start, period_end).unwrap(),
             period_end,
