@@ -13,3 +13,13 @@ The five canonical triage labels, using their default names. See `docs/agents/tr
 ### Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Local test database
+
+The local PostgreSQL server accepts peer authentication for the OS user `alex`, who is a superuser. Run SQLx integration tests with:
+
+```sh
+DATABASE_URL='postgresql:///postgres?user=alex' cargo test --locked
+```
+
+Do not use the CI Docker URL (`postgres://postgres:postgres@localhost:5432/postgres`) locally; its password authentication fails against this server.
