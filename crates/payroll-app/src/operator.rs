@@ -9,7 +9,7 @@
 use argon2::password_hash::phc::PasswordHash;
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 
-use crate::database::SaltDatabase;
+use crate::database::{SaltDatabase, is_unique_violation};
 use crate::error::PayrollAppError;
 use crate::ids::{app_id, new_id};
 
@@ -51,6 +51,12 @@ pub struct OperatorSnapshot {
 const DUMMY_VERIFIER: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdGR1bW15dmVyaWZpZXJzYWx0Zm9yNDF4eA$\
      6gfr+ZD2aJP77k3KUWJnrPmvgefDG4meLGL0DMD7Oy8";
 
+/// Password limits required by the credential-handling design. Length is
+/// measured in Unicode scalar values, so a password's limit is not changed
+/// merely because it contains non-ASCII characters.
+const MIN_PASSWORD_LENGTH: usize = 8;
+const MAX_PASSWORD_LENGTH: usize = 1024;
+
 /// The name PostgreSQL gives migration 0028's `UNIQUE INDEX
 /// operator_email_folded_key ON operator (lower(email))` — the index that
 /// makes "unique case-insensitively" true regardless of how two concurrent
@@ -79,6 +85,17 @@ pub async fn create_operator(
     }
     if display_name.trim().is_empty() {
         return Err(PayrollAppError::OperatorDisplayNameCannotBeEmpty);
+    }
+    let password_length = password.chars().count();
+    if password_length < MIN_PASSWORD_LENGTH {
+        return Err(PayrollAppError::OperatorPasswordTooShort {
+            minimum: MIN_PASSWORD_LENGTH,
+        });
+    }
+    if password_length > MAX_PASSWORD_LENGTH {
+        return Err(PayrollAppError::OperatorPasswordTooLong {
+            maximum: MAX_PASSWORD_LENGTH,
+        });
     }
 
     let password_verifier = hash_password(password)?;
@@ -245,16 +262,6 @@ fn operator_status_from_column(status: &str) -> OperatorStatus {
         "disabled" => OperatorStatus::Disabled,
         other => panic!("operator CHECK: status is 'active' or 'disabled', found {other:?}"),
     }
-}
-
-/// True when `err` is PostgreSQL's unique violation (SQLSTATE 23505) raised
-/// by `constraint` — the same check `finalize.rs` and `reversal.rs` make of
-/// their own UNIQUE constraints.
-fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
-    let sqlx::Error::Database(db_err) = err else {
-        return false;
-    };
-    db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
 }
 
 #[cfg(test)]

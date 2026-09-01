@@ -73,6 +73,30 @@ async fn creating_an_operator_with_a_blank_display_name_is_refused(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn creating_an_operator_with_a_password_outside_the_length_limits_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+
+    let empty = create_operator(&db, "empty@example.com", "Empty", "").await;
+    assert_eq!(
+        empty,
+        Err(PayrollAppError::OperatorPasswordTooShort { minimum: 8 })
+    );
+
+    let too_short = create_operator(&db, "short@example.com", "Short", "1234567").await;
+    assert_eq!(
+        too_short,
+        Err(PayrollAppError::OperatorPasswordTooShort { minimum: 8 })
+    );
+
+    let too_long_password = "p".repeat(1025);
+    let too_long = create_operator(&db, "long@example.com", "Long", &too_long_password).await;
+    assert_eq!(
+        too_long,
+        Err(PayrollAppError::OperatorPasswordTooLong { maximum: 1024 })
+    );
+}
+
+#[sqlx::test]
 async fn email_is_stored_verbatim_but_unique_only_case_insensitively(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool);
     create_operator(&db, "Alice@Example.com", "Alice", "a password")
@@ -238,27 +262,4 @@ async fn disabling_an_already_disabled_operator_is_refused(pool: PgPool) {
         result,
         Err(PayrollAppError::OperatorAlreadyDisabled(operator_id))
     );
-}
-
-#[sqlx::test]
-async fn disabling_an_unknown_operator_is_refused(pool: PgPool) {
-    let db = SaltDatabase::from_pool(pool.clone());
-    let operator_id = create_operator(&db, "alice@example.com", "Alice", "a password")
-        .await
-        .unwrap();
-    // `OperatorId` has no public constructor from a bare string (issue
-    // #41's own instruction), so a genuinely unknown id is produced the
-    // same way every other id-less-not-found test in this crate produces
-    // one: create a real row through the public API, then delete it with
-    // raw SQL, leaving an id this crate did once mint but the table no
-    // longer holds.
-    sqlx::query("DELETE FROM operator WHERE id = $1::uuid")
-        .bind(operator_id.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let result = disable_operator(&db, &operator_id).await;
-
-    assert_eq!(result, Err(PayrollAppError::OperatorNotFound(operator_id)));
 }

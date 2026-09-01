@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
 use crate::correction::{validate_correction_target, verify_null_lineage_is_legitimate};
-use crate::database::SaltDatabase;
+use crate::database::{SaltDatabase, is_unique_violation};
 use crate::employer::pay_schedule_for_employer;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
@@ -636,13 +636,3 @@ const CORRECTION_TARGET_REPLACED_AT_MOST_ONCE: &str =
 /// FinalizedPayroll per Employment and PayPeriod" true (§6.2), and decides
 /// between two runs that would both pay one Employment for one period.
 const ONE_LIVE_PAYROLL_PER_EMPLOYMENT_AND_PERIOD: &str = "live_finalized_payroll_pkey";
-
-/// True when `err` is PostgreSQL's unique violation (SQLSTATE 23505) raised
-/// by `constraint` — the same check `reversal.rs` makes of its own UNIQUE
-/// constraint.
-fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
-    let sqlx::Error::Database(db_err) = err else {
-        return false;
-    };
-    db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
-}

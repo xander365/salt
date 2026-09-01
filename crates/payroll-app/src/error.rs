@@ -426,6 +426,12 @@ pub enum PayrollAppError {
     /// `CreateOperator` was given a display name that is empty or only
     /// whitespace.
     OperatorDisplayNameCannotBeEmpty,
+    /// `CreateOperator` was given a password shorter than the minimum
+    /// credential length required by the password-handling design.
+    OperatorPasswordTooShort { minimum: usize },
+    /// `CreateOperator` was given a password longer than the maximum
+    /// credential length required by the password-handling design.
+    OperatorPasswordTooLong { maximum: usize },
     /// `CreateOperator` was given an email that collides, case-insensitively,
     /// with an email already recorded for another Operator — the folded
     /// form the `operator_email_folded_key` UNIQUE index compares (issue
@@ -830,6 +836,14 @@ impl std::fmt::Display for PayrollAppError {
             Self::OperatorDisplayNameCannotBeEmpty => {
                 write!(f, "an Operator display name must not be empty")
             }
+            Self::OperatorPasswordTooShort { minimum } => write!(
+                f,
+                "an Operator password must contain at least {minimum} characters"
+            ),
+            Self::OperatorPasswordTooLong { maximum } => write!(
+                f,
+                "an Operator password must contain at most {maximum} characters"
+            ),
             Self::OperatorEmailAlreadyInUse => write!(
                 f,
                 "an Operator with this email already exists (email is unique case-insensitively)"
@@ -914,6 +928,8 @@ impl std::error::Error for PayrollAppError {
             | Self::CompensationTermsAlreadyExistAt { .. }
             | Self::OperatorEmailCannotBeEmpty
             | Self::OperatorDisplayNameCannotBeEmpty
+            | Self::OperatorPasswordTooShort { .. }
+            | Self::OperatorPasswordTooLong { .. }
             | Self::OperatorEmailAlreadyInUse
             | Self::PasswordHashingFailed(_)
             | Self::OperatorNotFound(_)

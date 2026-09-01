@@ -99,6 +99,17 @@ async fn set_restricted_role(conn: &mut PgConnection) -> Result<(), sqlx::Error>
     Ok(())
 }
 
+/// True when `err` is PostgreSQL's unique violation (SQLSTATE 23505) raised
+/// by `constraint`. All use cases that translate a particular unique
+/// constraint use this shared check so they cannot drift in how database
+/// refusals are classified.
+pub(crate) fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
+    let sqlx::Error::Database(db_err) = err else {
+        return false;
+    };
+    db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
+}
+
 /// Refuses unless the database's applied migrations are at least the
 /// version compiled into this build. Comparing versions rather than
 /// applying migrations here: a schema behind this build's expectations is

@@ -11,7 +11,7 @@
 //! design is enforced here simply by there being no function that does it.
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
-use crate::database::SaltDatabase;
+use crate::database::{SaltDatabase, is_unique_violation};
 use crate::error::PayrollAppError;
 use crate::finalize::FinalizedPayrollId;
 use payroll::EmployerId;
@@ -122,14 +122,3 @@ pub async fn reverse_finalized_payroll(
 /// The name PostgreSQL gives migration 0011's `UNIQUE (finalized_payroll_id)`
 /// on `reversal` — the constraint that makes "reversed only once" true.
 const REVERSAL_ONE_PER_FINALIZED_PAYROLL: &str = "reversal_finalized_payroll_id_key";
-
-/// True when `err` is PostgreSQL's unique violation (SQLSTATE 23505) raised
-/// by `constraint`. Named rather than matched on the message text, so a
-/// different unique constraint failing here is still reported as the database
-/// error it is, never mistaken for this one.
-fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
-    let sqlx::Error::Database(db_err) = err else {
-        return false;
-    };
-    db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
-}
