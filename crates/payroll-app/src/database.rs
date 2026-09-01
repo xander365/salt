@@ -78,7 +78,14 @@ impl SaltDatabase {
             .connect_with(connect_options)
             .await?;
 
-        verify_schema_version(&pool).await?;
+        // Refusing "as a whole" means leaving nothing behind: a pool whose
+        // schema check fails is closed here rather than left for a drop to
+        // reap, so a caller that retries does not stack up idle server-side
+        // connections for every refusal.
+        if let Err(refusal) = verify_schema_version(&pool).await {
+            pool.close().await;
+            return Err(refusal);
+        }
 
         Ok(Self { pool })
     }
@@ -98,23 +105,18 @@ async fn set_restricted_role(conn: &mut PgConnection) -> Result<(), sqlx::Error>
 /// refused as a whole, exactly as an ahead one is accepted as a whole —
 /// `connect` never mutates the schema it is handed.
 ///
+/// A database that has never been migrated at all has no migrations table
+/// to read, which is the same refusal and not a different one, so it is
+/// answered with the same typed variant rather than the raw "relation
+/// does not exist" a bare `list_applied_migrations` would surface.
+///
 /// Turning this refusal into a refusal for `salt-server` to *start* is a
 /// later ticket's job (issue #39's own note), not this function's.
 async fn verify_schema_version(pool: &PgPool) -> Result<(), PayrollAppError> {
-    let compiled = MIGRATOR
-        .iter()
-        .map(|migration| migration.version)
-        .max()
-        .expect("payroll-app ships at least one migration");
+    let compiled = compiled_migration_version();
 
     let mut conn = pool.acquire().await?;
-    let applied = conn
-        .list_applied_migrations()
-        .await
-        .map_err(|err| PayrollAppError::Database(err.to_string()))?
-        .into_iter()
-        .map(|migration| migration.version)
-        .max();
+    let applied = applied_migration_version(&mut conn).await?;
 
     if applied.is_some_and(|applied| applied >= compiled) {
         return Ok(());
@@ -123,24 +125,83 @@ async fn verify_schema_version(pool: &PgPool) -> Result<(), PayrollAppError> {
     Err(PayrollAppError::SchemaOutOfDate { compiled, applied })
 }
 
+/// The highest migration version compiled into this build.
+fn compiled_migration_version() -> i64 {
+    MIGRATOR
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .expect("payroll-app ships at least one migration")
+}
+
+/// The highest migration version applied to the database, or `None` when
+/// none has been — including when the migrations table itself is absent,
+/// which is what a never-migrated database looks like. The table is looked
+/// up first rather than letting the read fail, so "never migrated" stays a
+/// version answer and does not become a database error.
+async fn applied_migration_version(
+    conn: &mut PgConnection,
+) -> Result<Option<i64>, PayrollAppError> {
+    let (migrations_table_exists,): (bool,) =
+        sqlx::query_as("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+    if !migrations_table_exists {
+        return Ok(None);
+    }
+
+    Ok(conn
+        .list_applied_migrations()
+        .await
+        .map_err(|err| PayrollAppError::Database(err.to_string()))?
+        .into_iter()
+        .map(|migration| migration.version)
+        .max())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const INSUFFICIENT_PRIVILEGE: &str = "42501";
 
-    /// Builds a pool exactly the way [`SaltDatabase::connect`] does —
-    /// same `after_connect` hook, same connection — but from the
-    /// `PgConnectOptions` a `#[sqlx::test]` pool already resolved, so the
-    /// test needs no `DATABASE_URL` round-trip through a `String` to reach
-    /// the same ephemeral, already-migrated database.
-    async fn connect_like_salt_database_does(pool: &PgPool) -> SaltDatabase {
-        let pool = PgPoolOptions::new()
-            .after_connect(|conn, _meta| Box::pin(set_restricted_role(conn)))
-            .connect_with((*pool.connect_options()).clone())
-            .await
-            .expect("connect with the role hook installed");
-        SaltDatabase::from_pool(pool)
+    /// The `DatabaseConfig` that reaches the ephemeral database a
+    /// `#[sqlx::test]` just migrated: the suite's own `DATABASE_URL` with
+    /// its database name swapped for this test's. Going the long way round
+    /// through a URL string is the point — it is the only way a test can
+    /// exercise [`SaltDatabase::connect`] itself rather than a hand-built
+    /// copy of it, and a copy is exactly what would let the real
+    /// constructor drift out from under these assertions.
+    fn config_for(pool: &PgPool) -> DatabaseConfig {
+        let database = (*pool.connect_options())
+            .clone()
+            .get_database()
+            .expect("a #[sqlx::test] pool names its throwaway database")
+            .to_string();
+        let suite_url = std::env::var("DATABASE_URL")
+            .expect("the test suite is run with DATABASE_URL set (see AGENTS.md)");
+
+        let (authority, query) = match suite_url.split_once('?') {
+            Some((authority, query)) => (authority, Some(query)),
+            None => (suite_url.as_str(), None),
+        };
+        let without_database = authority
+            .rsplit_once('/')
+            .expect("a postgres URL names a database after its final '/'")
+            .0;
+
+        let mut url = format!("{without_database}/{database}");
+        if let Some(query) = query {
+            url.push('?');
+            url.push_str(query);
+        }
+
+        DatabaseConfig {
+            url,
+            max_connections: 2,
+            acquire_timeout: Duration::from_secs(10),
+            idle_timeout: None,
+        }
     }
 
     /// Prior art: `database_immutability.rs`'s own proof of the same
@@ -201,7 +262,9 @@ mod tests {
         .await
         .expect("insert finalized_payroll");
 
-        let db = connect_like_salt_database_does(&pool).await;
+        let db = SaltDatabase::connect(&config_for(&pool))
+            .await
+            .expect("connect against the migrated test database");
 
         let result = sqlx::query("UPDATE finalized_payroll SET paye = 0 WHERE id = $1::uuid")
             .bind(&finalized_id.0)
@@ -217,11 +280,7 @@ mod tests {
 
     #[sqlx::test]
     async fn connect_refuses_a_database_behind_the_compiled_migration_version(pool: PgPool) {
-        let compiled = MIGRATOR
-            .iter()
-            .map(|migration| migration.version)
-            .max()
-            .expect("payroll-app ships at least one migration");
+        let compiled = compiled_migration_version();
 
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
             .bind(compiled)
@@ -229,7 +288,7 @@ mod tests {
             .await
             .expect("roll the applied version back for this test");
 
-        let err = verify_schema_version(&pool)
+        let err = SaltDatabase::connect(&config_for(&pool))
             .await
             .expect_err("a database behind the compiled version must be refused");
 
@@ -246,6 +305,33 @@ mod tests {
             }
             other => panic!("expected SchemaOutOfDate, got {other:?}"),
         }
+    }
+
+    /// The refusal a fresh, never-migrated database earns. It is the same
+    /// refusal as "behind", not a different one, so it must arrive as the
+    /// same typed variant rather than as the raw "relation does not exist"
+    /// that reading a missing migrations table would otherwise produce.
+    #[sqlx::test]
+    async fn connect_refuses_a_database_that_has_never_been_migrated(pool: PgPool) {
+        sqlx::query("DROP TABLE _sqlx_migrations")
+            .execute(&pool)
+            .await
+            .expect("drop the migrations table for this test");
+
+        let err = SaltDatabase::connect(&config_for(&pool))
+            .await
+            .expect_err("a never-migrated database must be refused");
+
+        assert!(
+            matches!(
+                err,
+                PayrollAppError::SchemaOutOfDate {
+                    compiled,
+                    applied: None,
+                } if compiled == compiled_migration_version()
+            ),
+            "expected SchemaOutOfDate with no applied version, got {err:?}"
+        );
     }
 
     #[tokio::test]
