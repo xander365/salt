@@ -23,6 +23,12 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION))
 }
 
+const NOT_NULL_VIOLATION: &str = "23502";
+
+fn is_not_null_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(NOT_NULL_VIOLATION))
+}
+
 async fn an_employer_and_two_employments(conn: &mut sqlx::PgConnection) {
     sqlx::query(
         "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
@@ -1338,6 +1344,27 @@ async fn compensation_terms_state_only_when_they_begin(pool: PgPool) {
         !columns.iter().any(|c| c == "effective_until"),
         "a row is in force until the next row's effective_from, so no column may \
          state an end independently, found {columns:?}"
+    );
+}
+
+/// §0.2 gives an Employer one human-readable name, so the application has
+/// something to show a person other than an id (issue #40). `NOT NULL` is what
+/// makes "has a name" a fact about every row rather than a habit of the one
+/// use case that writes them: an Employer recorded without a name is an
+/// Employer no screen can title.
+#[sqlx::test]
+async fn an_employer_is_always_named(pool: PgPool) {
+    let result = sqlx::query(
+        "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-1', 'day', 25, 'actor')",
+    )
+    .execute(&pool)
+    .await;
+
+    let error = result.expect_err("an Employer with no name must be refused");
+    assert!(
+        is_not_null_violation(&error),
+        "expected a NOT NULL violation, got {error}"
     );
 }
 
