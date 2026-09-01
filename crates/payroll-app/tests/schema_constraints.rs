@@ -1365,6 +1365,11 @@ async fn an_actor_and_a_reason_are_never_only_whitespace(pool: PgPool) {
              VALUES ('employer-3', ' ', 'day', 25, 'actor')",
         ),
         (
+            "an Employer named only tabs and newlines",
+            "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+             VALUES ('employer-4', E'\\t\\n', 'day', 25, 'actor')",
+        ),
+        (
             "an Employment created by nobody",
             "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
              VALUES ('emp-3', 'employer-1', 'person-3', '2026-03-01', '  ')",
