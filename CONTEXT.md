@@ -18,6 +18,14 @@ _Avoid_: Employee (as a record), user
 The relationship between one Person and one Employer over a period of time. The central payroll concept — payroll is calculated per Employment, never per Person.
 _Avoid_: Employee, staff member, contract
 
+**Operator**:
+A human being who signs into Salt and acts on an Employer's payroll. Distinct from a Person, who is the subject of an Employment and never signs in. An Operator is one global identity that gains access to Employers through EmployerMembership, so the same human working for two Employers is one Operator, not two.
+_Avoid_: User, account, login
+
+**EmployerMembership**:
+The grant that lets one Operator act on one Employer, carrying a role. It is the whole of authorization: an EmployerId a caller happens to know grants nothing. Two roles exist — **Owner**, who may also administer memberships and Employer configuration, and **PayrollOperator**, who may run payroll and nothing else.
+_Avoid_: Permission, access, tenancy, role (unqualified)
+
 ### Compensation
 
 **CompensationTerms**:
