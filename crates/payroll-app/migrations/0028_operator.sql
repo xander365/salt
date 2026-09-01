@@ -42,6 +42,23 @@ ALTER TABLE operator
 ALTER TABLE operator
     ADD CONSTRAINT operator_display_name_is_not_blank
     CHECK (btrim(display_name) <> '' AND display_name ~ '[^[:space:]]');
+
+-- Folding case is not enough on its own to make two emails that a person
+-- reads as one collide: ' alice@x' and 'alice@x' fold to different strings,
+-- so without this the unique index above would happily admit both and Salt
+-- would hold two accounts distinguishable only by characters nobody can
+-- see. `create_operator` trims before it writes; this constraint is what
+-- makes that true of every row rather than of the rows one function wrote.
+-- Stated as a leading/trailing whitespace refusal rather than
+-- `email = btrim(email)` because PostgreSQL's single-argument `btrim` would
+-- again miss a leading tab.
+ALTER TABLE operator
+    ADD CONSTRAINT operator_email_has_no_surrounding_whitespace
+    CHECK (email !~ '^[[:space:]]' AND email !~ '[[:space:]]$');
+ALTER TABLE operator
+    ADD CONSTRAINT operator_display_name_has_no_surrounding_whitespace
+    CHECK (display_name !~ '^[[:space:]]' AND display_name !~ '[[:space:]]$');
+
 -- Never human-typed — this column only ever holds what `create_operator`
 -- writes — so the simpler guard already used for attribution columns
 -- (migration 0023) is enough.
@@ -55,3 +72,10 @@ ALTER TABLE operator
 -- provably intended rather than merely inherited.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO payroll_app;
 REVOKE UPDATE, DELETE ON finalized_payroll, reversal, action_log_entry FROM payroll_app;
+-- An Operator is disabled by `status`, never removed (§6). A deleted row
+-- would take an id out of the world that the audit trail still names, and
+-- ADR-0019 already refuses to rewrite history to keep a schema tidy. `UPDATE`
+-- stays, because disabling is an update; only the erasure is taken away, so
+-- the rule is a permission rather than a convention the next use case could
+-- forget.
+REVOKE DELETE ON operator FROM payroll_app;

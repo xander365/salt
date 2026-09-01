@@ -41,19 +41,26 @@ pub struct OperatorSnapshot {
     pub status: OperatorStatus,
 }
 
-/// A fixed, valid Argon2id PHC string, generated once offline against this
-/// module's own `Argon2::default()` parameters and a fixed salt — never
-/// regenerated at runtime. It verifies no real Operator's password; its only
-/// purpose is to give an unknown email in [`verify_operator_credential`] the
-/// same Argon2id work a real row costs (§0.12a: "An unknown email does the
-/// same Argon2id work against a fixed dummy verifier, so the response time
-/// does not separate 'no such account' from 'wrong password'").
+/// A fixed, valid Argon2id PHC string, generated once offline against
+/// [`hasher`]'s parameters and a fixed salt — never regenerated at runtime.
+/// It verifies no real Operator's password; its only purpose is to give an
+/// unknown email in [`verify_operator_credential`] the same Argon2id work a
+/// real row costs (§0.12a: "An unknown email does the same Argon2id work
+/// against a fixed dummy verifier, so the response time does not separate
+/// 'no such account' from 'wrong password'").
+///
+/// Being a constant, it cannot follow a later change to [`hasher`]'s
+/// parameters, and a dummy cheaper than a real row would turn the timing
+/// property into a timing oracle. `the_dummy_verifier_costs_what_a_real_row_costs`
+/// is what makes that drift a failing build rather than a silent regression.
 const DUMMY_VERIFIER: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdGR1bW15dmVyaWZpZXJzYWx0Zm9yNDF4eA$\
      6gfr+ZD2aJP77k3KUWJnrPmvgefDG4meLGL0DMD7Oy8";
 
 /// Password limits required by the credential-handling design. Length is
 /// measured in Unicode scalar values, so a password's limit is not changed
-/// merely because it contains non-ASCII characters.
+/// merely because it contains non-ASCII characters. The maximum also bounds
+/// what [`verify_operator_credential`] will hash, so an unauthenticated
+/// caller cannot choose how much Argon2id work one attempt costs.
 const MIN_PASSWORD_LENGTH: usize = 8;
 const MAX_PASSWORD_LENGTH: usize = 1024;
 
@@ -70,9 +77,10 @@ const OPERATOR_EMAIL_FOLDED_KEY: &str = "operator_email_folded_key";
 /// module's default parameters still verifies rows hashed under the old
 /// ones.
 ///
-/// `email` is stored exactly as given; a second Operator whose email folds
-/// to the same lower-cased form is refused by the database's own unique
-/// index, not by an application-side check racing it (see
+/// `email` is stored with its own capitalisation intact and only its
+/// surrounding whitespace removed; a second Operator whose email folds to
+/// the same lower-cased form is refused by the database's own unique index,
+/// not by an application-side check racing it (see
 /// `OPERATOR_EMAIL_FOLDED_KEY`).
 pub async fn create_operator(
     db: &SaltDatabase,
@@ -80,10 +88,18 @@ pub async fn create_operator(
     display_name: &str,
     password: &str,
 ) -> Result<OperatorId, PayrollAppError> {
-    if email.trim().is_empty() {
+    // Trimmed, not merely checked for blankness: an email is unique only
+    // case-insensitively, and folding case does not make ' alice@x' collide
+    // with 'alice@x'. Storing the surrounding whitespace would let two
+    // accounts exist that every human reads as one. The capitalisation issue
+    // #41 asks to preserve is inside the address, not around it.
+    let email = email.trim();
+    let display_name = display_name.trim();
+
+    if email.is_empty() {
         return Err(PayrollAppError::OperatorEmailCannotBeEmpty);
     }
-    if display_name.trim().is_empty() {
+    if display_name.is_empty() {
         return Err(PayrollAppError::OperatorDisplayNameCannotBeEmpty);
     }
     let password_length = password.chars().count();
@@ -137,7 +153,7 @@ pub async fn find_operator_by_email(
         "SELECT id::text, email, display_name, status FROM operator
          WHERE lower(email) = lower($1)",
     )
-    .bind(email)
+    .bind(email.trim())
     .fetch_optional(db.pool())
     .await?;
 
@@ -202,18 +218,33 @@ pub async fn verify_operator_credential(
     email: &str,
     password: &str,
 ) -> Result<OperatorId, PayrollAppError> {
+    // Refused before the database is touched, and before any Argon2id work:
+    // a credential this long cannot belong to any Operator, because
+    // `create_operator` would have refused to record it. Answering the length
+    // early costs an unauthenticated caller nothing, whereas hashing whatever
+    // they sent would let them choose how much work Salt does per attempt.
+    // It says nothing about any account, so it is the same refusal as every
+    // other one here.
+    if password.chars().count() > MAX_PASSWORD_LENGTH {
+        return Err(PayrollAppError::OperatorCredentialInvalid);
+    }
+
     type Row = (String, String, String);
 
     let row: Option<Row> = sqlx::query_as(
         "SELECT id::text, password_verifier, status FROM operator
          WHERE lower(email) = lower($1)",
     )
-    .bind(email)
+    .bind(email.trim())
     .fetch_optional(db.pool())
     .await?;
 
     let Some((id, password_verifier, status)) = row else {
-        password_matches(password, DUMMY_VERIFIER);
+        // `black_box` so the discarded result cannot become a reason to
+        // elide the call: this line exists for its cost, and a compiler that
+        // optimised it away would remove the property without removing the
+        // code that claims it.
+        std::hint::black_box(password_matches(password, DUMMY_VERIFIER));
         return Err(PayrollAppError::OperatorCredentialInvalid);
     };
 
@@ -231,7 +262,7 @@ pub async fn verify_operator_credential(
 /// Hashes `password` to an Argon2id PHC string (§0.13), with a fresh random
 /// salt per call.
 fn hash_password(password: &str) -> Result<String, PayrollAppError> {
-    Argon2::default()
+    hasher()
         .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|err| PayrollAppError::PasswordHashingFailed(err.to_string()))
@@ -246,9 +277,16 @@ fn password_matches(password: &str, phc: &str) -> bool {
     let Ok(hash) = PasswordHash::new(phc) else {
         return false;
     };
+    hasher().verify_password(password.as_bytes(), &hash).is_ok()
+}
+
+/// This module's Argon2id configuration, named once so hashing and
+/// verifying cannot drift apart and so a later parameter change is a single
+/// edit. Verification still reads its parameters from the stored PHC string
+/// rather than from here, which is what lets rows hashed under older
+/// parameters keep verifying after this function changes.
+fn hasher() -> Argon2<'static> {
     Argon2::default()
-        .verify_password(password.as_bytes(), &hash)
-        .is_ok()
 }
 
 /// The inverse of the `status` column's CHECK constraint. Panics rather than
@@ -266,6 +304,8 @@ fn operator_status_from_column(status: &str) -> OperatorStatus {
 
 #[cfg(test)]
 mod tests {
+    use argon2::{Params, Version};
+
     use super::*;
 
     /// Proves `DUMMY_VERIFIER` is itself a well-formed Argon2id PHC string
@@ -278,6 +318,40 @@ mod tests {
         let parsed =
             PasswordHash::new(DUMMY_VERIFIER).expect("DUMMY_VERIFIER must parse as a PHC string");
         assert_eq!(parsed.algorithm.as_str(), "argon2id");
+    }
+
+    /// The unknown-email path is only indistinguishable from a real one
+    /// while the dummy costs what a real row costs. `DUMMY_VERIFIER` is a
+    /// constant, so changing [`hasher`]'s parameters without regenerating it
+    /// would quietly leave the two apart and turn issue #41's timing
+    /// property into the timing oracle it exists to prevent. Comparing the
+    /// parameters rather than the elapsed time makes that drift a failing
+    /// build on any machine.
+    #[test]
+    fn the_dummy_verifier_costs_what_a_real_row_costs() {
+        let parsed =
+            PasswordHash::new(DUMMY_VERIFIER).expect("DUMMY_VERIFIER must parse as a PHC string");
+
+        let dummy = Params::try_from(&parsed).expect("DUMMY_VERIFIER must carry Argon2 parameters");
+        let hasher = hasher();
+        let current = hasher.params();
+
+        // The three cost parameters, and only those: `output_len` reads back
+        // as `Some(32)` from an encoded hash but is left `None` on the
+        // configured default that produces exactly that length, so comparing
+        // whole `Params` values would fail while nothing had drifted.
+        assert_eq!(
+            (dummy.m_cost(), dummy.t_cost(), dummy.p_cost()),
+            (current.m_cost(), current.t_cost(), current.p_cost()),
+            "DUMMY_VERIFIER was generated under different Argon2 parameters than this \
+             module now hashes with; regenerate it against the new parameters"
+        );
+
+        assert_eq!(
+            parsed.version,
+            Some(Version::default() as u32),
+            "DUMMY_VERIFIER names an Argon2 version this module does not hash with"
+        );
     }
 
     #[test]

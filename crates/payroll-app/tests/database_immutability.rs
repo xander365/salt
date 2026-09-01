@@ -262,8 +262,12 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
         "payroll_run_earning",
         "working_payroll_calculation",
         "live_finalized_payroll",
-        "operator",
     ];
+    // Revisable but never erasable. An Operator is disabled by `status`
+    // (issue #38 §6), and the audit trail keeps naming the id of one that is
+    // gone, so `UPDATE` is exactly what disabling needs and `DELETE` is the
+    // one thing no use case should ever be able to do.
+    let no_delete = ["operator"];
 
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -281,6 +285,8 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
             vec!["INSERT", "SELECT"]
         } else if mutable.contains(&table.as_str()) {
             vec!["DELETE", "INSERT", "SELECT", "UPDATE"]
+        } else if no_delete.contains(&table.as_str()) {
+            vec!["INSERT", "SELECT", "UPDATE"]
         } else {
             panic!(
                 "table {table} is not named by this test, so nobody has decided what the \
@@ -304,7 +310,11 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
         );
     }
 
-    for table in append_only.iter().chain(mutable.iter()) {
+    for table in append_only
+        .iter()
+        .chain(mutable.iter())
+        .chain(no_delete.iter())
+    {
         assert!(
             tables.iter().any(|t| t == table),
             "this test names {table}, but the migrations do not create it"
@@ -338,5 +348,42 @@ fn there_are_no_down_migrations() {
         !forward.is_empty(),
         "expected the migrations directory to hold the schema, found nothing in {}",
         migrations.display()
+    );
+}
+
+/// An Operator is disabled, never deleted (issue #38 §6): a removed row would
+/// take an id out of the world that the audit trail still names, and ADR-0019
+/// already refuses to rewrite history to tidy a schema. Asserted as a
+/// permission the restricted role does not hold, so a later use case cannot
+/// delete one by forgetting the rule.
+#[sqlx::test]
+async fn the_restricted_role_can_disable_an_operator_but_not_delete_one(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .expect("switch to the restricted role");
+
+    sqlx::query(
+        "INSERT INTO operator (id, email, display_name, password_verifier)
+         VALUES (gen_random_uuid(), 'alice@example.com', 'Alice', '$argon2id$not-a-real-hash')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("the restricted role can create an Operator");
+
+    sqlx::query("UPDATE operator SET status = 'disabled' WHERE email = 'alice@example.com'")
+        .execute(&mut *conn)
+        .await
+        .expect("the restricted role can disable an Operator");
+
+    let err = sqlx::query("DELETE FROM operator WHERE email = 'alice@example.com'")
+        .execute(&mut *conn)
+        .await
+        .expect_err("the restricted role cannot delete an Operator");
+    assert!(
+        is_insufficient_privilege(&err),
+        "expected an insufficient_privilege refusal while attempting to delete an Operator,          got {err:?}"
     );
 }

@@ -1437,3 +1437,97 @@ async fn an_actor_and_a_reason_are_never_only_whitespace(pool: PgPool) {
         assert!(result.is_err(), "{case} must be refused");
     }
 }
+
+/// Issue #41 makes an Operator's email unique case-insensitively, and issue
+/// #38 §0.12a makes a sign-in refuse without saying which account exists. Both
+/// rest on two emails a person reads as one resolving to one row. Folding case
+/// alone does not do that — ` alice@x` and `alice@x` fold apart — so the
+/// database refuses surrounding whitespace outright rather than trusting the
+/// one use case that writes the column to have trimmed it. Stated here as a
+/// schema fact because two concurrent inserts cannot be made to agree by
+/// application discipline.
+#[sqlx::test]
+async fn an_operator_email_that_folds_to_another_is_refused(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+
+    sqlx::query(
+        "INSERT INTO operator (id, email, display_name, password_verifier)
+         VALUES (gen_random_uuid(), 'Alice@Example.com', 'Alice', '$argon2id$verifier')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("the first Operator is recorded with its own capitalisation");
+
+    let collision = sqlx::query(
+        "INSERT INTO operator (id, email, display_name, password_verifier)
+         VALUES (gen_random_uuid(), 'alice@example.com', 'Alice Two', '$argon2id$verifier')",
+    )
+    .execute(&mut *conn)
+    .await;
+
+    let error = collision.expect_err("a differently-cased duplicate email must be refused");
+    assert!(
+        is_unique_violation(&error),
+        "expected a unique violation, got {error}"
+    );
+}
+
+/// The other half of that rule: a padded email is not a different email, so
+/// the padding never reaches a row in the first place.
+#[sqlx::test]
+async fn an_operator_is_never_recorded_with_a_blank_or_padded_name_or_email(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+
+    for (case, statement) in [
+        (
+            "an Operator with a blank email",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), ' ', 'Alice', '$argon2id$verifier')",
+        ),
+        (
+            "an Operator with an email of only tabs and newlines",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), E'\\t\\n', 'Alice', '$argon2id$verifier')",
+        ),
+        (
+            "an Operator with a leading-space email",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), ' alice@example.com', 'Alice', '$argon2id$verifier')",
+        ),
+        (
+            "an Operator with a trailing-tab email",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), E'alice@example.com\\t', 'Alice', '$argon2id$verifier')",
+        ),
+        (
+            "an Operator with a blank display name",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), 'alice@example.com', ' ', '$argon2id$verifier')",
+        ),
+        (
+            "an Operator with a padded display name",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), 'alice@example.com', 'Alice ', '$argon2id$verifier')",
+        ),
+        (
+            "an Operator with a blank password verifier",
+            "INSERT INTO operator (id, email, display_name, password_verifier)
+             VALUES (gen_random_uuid(), 'alice@example.com', 'Alice', ' ')",
+        ),
+        (
+            "an Operator with a status the design does not name",
+            "INSERT INTO operator (id, email, display_name, password_verifier, status)
+             VALUES (gen_random_uuid(), 'alice@example.com', 'Alice', '$argon2id$v', 'deleted')",
+        ),
+        (
+            "an Operator with a negative failed-attempt count",
+            "INSERT INTO operator
+                (id, email, display_name, password_verifier, failed_attempt_count)
+             VALUES (gen_random_uuid(), 'alice@example.com', 'Alice', '$argon2id$v', -1)",
+        ),
+    ] {
+        let result = sqlx::query(statement).execute(&mut *conn).await;
+
+        assert!(result.is_err(), "{case} must be refused");
+    }
+}

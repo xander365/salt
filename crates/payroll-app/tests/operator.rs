@@ -263,3 +263,112 @@ async fn disabling_an_already_disabled_operator_is_refused(pool: PgPool) {
         Err(PayrollAppError::OperatorAlreadyDisabled(operator_id))
     );
 }
+
+/// Folding case does not make ` alice@x` collide with `alice@x`, so without
+/// trimming, Salt would hold two Operators that every human reads as one and
+/// a sign-in would land on whichever the typist happened to reproduce. The
+/// address's own capitalisation still survives; only the whitespace around it
+/// does not.
+#[sqlx::test]
+async fn an_email_padded_with_whitespace_is_the_same_email(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let created = create_operator(&db, "  Alice@Example.com\t", "Alice", "a password")
+        .await
+        .unwrap();
+
+    let collision = create_operator(&db, "alice@example.com", "Alice Two", "a password").await;
+    assert_eq!(collision, Err(PayrollAppError::OperatorEmailAlreadyInUse));
+
+    let found = find_operator_by_email(&db, "\n alice@example.com ")
+        .await
+        .unwrap()
+        .expect("a padded lookup must find the Operator");
+    assert_eq!(found.id, created);
+    assert_eq!(
+        found.email, "Alice@Example.com",
+        "the stored email keeps its capitalisation and loses only the padding"
+    );
+
+    let verified = verify_operator_credential(&db, " alice@example.com ", "a password")
+        .await
+        .unwrap();
+    assert_eq!(verified, created);
+}
+
+/// A display name is trimmed for the same reason, so the name Salt shows a
+/// person is not silently indented by whatever a form submitted.
+#[sqlx::test]
+async fn a_display_name_padded_with_whitespace_is_stored_trimmed(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    create_operator(&db, "alice@example.com", "  Alice  ", "a password")
+        .await
+        .unwrap();
+
+    let found = find_operator_by_email(&db, "alice@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.display_name, "Alice");
+}
+
+/// `verify_operator_credential` is reachable by anyone who can reach a sign-in
+/// route, so the work one attempt costs must not be the caller's to choose. A
+/// password longer than `create_operator` would ever have recorded is refused
+/// with the same opaque refusal as every other failure — it says nothing about
+/// any account — rather than being hashed.
+#[sqlx::test]
+async fn verifying_an_over_long_password_is_refused_without_hashing_it(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    create_operator(&db, "alice@example.com", "Alice", "a password")
+        .await
+        .unwrap();
+
+    let over_long = "p".repeat(1025);
+
+    let known = verify_operator_credential(&db, "alice@example.com", &over_long).await;
+    let unknown = verify_operator_credential(&db, "nobody@example.com", &over_long).await;
+
+    assert_eq!(known, Err(PayrollAppError::OperatorCredentialInvalid));
+    assert_eq!(unknown, Err(PayrollAppError::OperatorCredentialInvalid));
+}
+
+/// Issue #41's timing criterion, asserted as work rather than as a source
+/// comment: an unknown email must still pay the Argon2id cost a real row
+/// costs, so response time does not separate "no such account" from "wrong
+/// password".
+///
+/// Only a *lower* bound is asserted, and a generous one. A loaded machine
+/// makes both measurements slower, never the unknown-email one faster, so the
+/// direction that could fail spuriously is not the direction being asserted.
+/// A short-circuit on "no row" — the mistake this guards — removes an entire
+/// Argon2id hash and lands orders of magnitude below the bound, not near it.
+#[sqlx::test]
+async fn verifying_an_unknown_email_still_pays_the_argon2id_cost(pool: PgPool) {
+    use std::time::Instant;
+
+    let db = SaltDatabase::from_pool(pool);
+    create_operator(&db, "alice@example.com", "Alice", "a password")
+        .await
+        .unwrap();
+
+    async fn fastest_of_three(db: &SaltDatabase, email: &str) -> std::time::Duration {
+        let mut fastest = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let started = Instant::now();
+            let refused = verify_operator_credential(db, email, "the wrong password").await;
+            assert_eq!(refused, Err(PayrollAppError::OperatorCredentialInvalid));
+            fastest = fastest.min(started.elapsed());
+        }
+        fastest
+    }
+
+    // The fastest run of each, so a scheduling stall inflates neither side.
+    let wrong_password = fastest_of_three(&db, "alice@example.com").await;
+    let unknown_email = fastest_of_three(&db, "nobody@example.com").await;
+
+    assert!(
+        unknown_email * 2 >= wrong_password,
+        "an unknown email took {unknown_email:?} against {wrong_password:?} for a wrong \
+         password, so it is not doing the same Argon2id work"
+    );
+}
