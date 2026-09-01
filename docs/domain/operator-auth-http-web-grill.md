@@ -23,15 +23,55 @@ asked. This section is the answer set. Where the two disagree, this section wins
 **0.1 Deployment model.** Hosted service, multi-Employer safe from the first
 migration, but no public signup. Operators are created deliberately.
 
-**0.2 First Owner.** `salt-server bootstrap --email … --employer-name …` creates
-the Operator, the Employer and the Owner membership in one transaction, and
-refuses if any Operator already exists. The password is read from stdin, never a
-flag.
+**0.2 First Owner and first Employer.**
 
-**0.3 Delivery order.** Three specs, not one: (1) identity, membership, session,
-bootstrap and the authorization extractor, provable with no payroll routes;
-(2) the HTTP surface — DTOs, error contract, route table, read models; (3) the
-React application and its Playwright tracer bullet.
+```text
+salt-server bootstrap \
+    --email <operator email> \
+    --display-name <operator display name> \
+    --employer-name <employer name> \
+    --period-end-day <1..28 | last-day-of-month>
+```
+
+It creates the Operator,
+the Employer and the Owner membership in one transaction, and refuses if any
+Operator already exists. The password is read from stdin, never a flag.
+
+The review found the Employer half incomplete: the `employer` table carries a
+PaySchedule and **no name**, so `--employer-name` had nowhere to go, and a
+PaySchedule is required and must not be guessed. Both are settled here.
+
+*Name.* `employer` gains one column, `name TEXT NOT NULL`, non-blank by CHECK like
+every other attribution column in the schema. One human-readable field, because the
+web app must title a page and a list row with something a person recognises. It is
+**mutable**, and the capability that will change it is Owner's Employer
+configuration — which is deferred (§0.39), so for Specs 1–3 it is set once at
+bootstrap and never edited. Nothing about payroll reads it; a FinalizedPayroll
+explains itself and does not look back at a name.
+
+*PaySchedule.* Never defaulted. `bootstrap` takes an explicit
+`--period-end-day <1..28|last-day-of-month>` and **refuses without it**, printing
+what the options mean. "Last day of month" is the common answer and is still typed
+deliberately, because a wrong pay schedule is not a display bug: ADR-0005 makes it
+the thing every period boundary is generated from, and it cannot be changed
+mid-tax-year.
+
+**0.3 Delivery order — three specs, not one.** This clause is authoritative. Any
+sentence elsewhere in this document calling for a single implementation spec is
+stale and superseded. The three are not merged, and each is shippable and
+independently testable.
+
+> **SPEC 1 — Identity and the authorized request.**
+> Operator, EmployerMembership, opaque sessions, the bootstrap command, the
+> runtime-database seam (§0.17), and `AuthorizedEmployerContext`. Provable with
+> zero payroll routes.
+>
+> **SPEC 2 — The HTTP surface.**
+> `payroll-app` read models (§0.30, §0.31), HTTP DTOs, the error contract, the
+> route table (§0.22), and the ordinary-payroll HTTP tracer bullet.
+>
+> **SPEC 3 — The browser.**
+> The React/Vite application and the single Playwright tracer bullet.
 
 ## Identity and authorization
 
@@ -39,13 +79,16 @@ React application and its Playwright tracer bullet.
 `CONTEXT.md` — "user" is warned off under Person, "account" under Employer.
 
 **0.5 Identity shape.** One global Operator identity gaining Employers through
-**EmployerMembership**. Two roles: `Owner` and `PayrollOperator`.
+**EmployerMembership**. Two roles: `Owner` and `PayrollOperator`. An Operator is
+global; a **Person is Employer-scoped** (§0.38, ADR-0020) — the two identities are
+deliberately different shapes, because an Operator signs in and a Person does not.
 
 **0.6 Role capabilities.** `Owner` is required only for membership administration
 and Employer configuration (create/remove membership, change pay schedule, create
 Employer). Everything payroll — employments, compensation terms, declarations,
 runs, calculate, finalize — is `PayrollOperator` or above. Reads are open to both.
-A route not on the Owner list checks no role at all.
+A route not on the Owner list checks no role at all. **The Owner-only capabilities
+have no route in Specs 1–3** — see §0.39.
 
 **0.7 The authorization seam.** An Axum extractor yields
 `AuthorizedEmployerContext { operator_id, employer_id, role }`. Handlers take the
@@ -67,10 +110,45 @@ ADR-0019.
 
 ## Authentication
 
-**0.12 Mechanism.** Opaque server-side sessions in PostgreSQL, token stored hashed,
-`HttpOnly; Secure; SameSite=Lax; Path=/`, no `Domain`. See ADR-0016. Idle expiry
-8 hours, absolute expiry 12 hours, many sessions per Operator, logout deletes the
-row, token rotates on login.
+**0.12 Mechanism.** Opaque server-side sessions in PostgreSQL,
+`HttpOnly; Secure; SameSite=Lax; Path=/`, no `Domain`. See ADR-0016. Many sessions
+per Operator, logout deletes the row, token rotates on login.
+
+*Token.* At least **256 bits** from the operating system's cryptographic random
+source, URL-safe base64 for the cookie value. Only a **SHA-256 hash** of it is
+stored, and lookup is by that hash. Not a password hash: the token is already
+high-entropy, so a slow KDF buys nothing and would cost a hash on every request.
+The plaintext token exists in the response that mints it and nowhere else — never
+in a log line.
+
+*Timers.* The row carries `created_at`, `last_seen_at` and `expires_at`. A session
+is valid when `now < created_at + 12h` (absolute) **and**
+`now < last_seen_at + 8h` (idle). Both are checked in the same query that loads
+the session, so an expired row is never treated as valid even before it is deleted.
+
+*Extending the idle window.* An authenticated request updates `last_seen_at` — but
+**throttled: only when it is more than 5 minutes stale**. A page that fires six
+queries must not cost six writes. Five minutes of drift against an eight-hour
+window is not a security property, and the write happens outside the request's own
+transaction so it can never roll a handler back.
+
+*Expired rows.* **Lazy deletion.** A lookup that finds an expired row deletes it and
+answers 401; login deletes that Operator's other expired rows. No sweeper process,
+no cron. Validity is decided by the timestamps, never by the row's existence, so a
+row that outlives its expiry authorizes nothing.
+
+**0.12a Account lockout.** Per account, in PostgreSQL, with the counters on the
+`operator` row: **10 failed attempts within 15 minutes locks the account for 15
+minutes**, after which it unlocks by itself with no administrator in the loop. A
+successful login resets the counter to zero. Ten is chosen to be far above human
+mistyping and far below useful guessing. A locked account returns the same 401
+`invalid_credentials` as any other failure — saying "locked" would confirm the
+email exists.
+
+An **unknown** email does the same Argon2id work against a fixed dummy verifier, so
+the response time does not separate "no such account" from "wrong password".
+Unknown emails have no row and therefore no counter; Caddy's per-IP limit is what
+answers a flood of them, and this is the boundary between the two mechanisms.
 
 **0.13 Passwords.** Argon2id via the `argon2` crate. Failed login always returns the
 same 401 `invalid_credentials` and spends the same time, hashing against a dummy
@@ -91,10 +169,47 @@ the router so HTTP tests build the real thing in-process. It does not depend on
 `sqlx` and writes no SQL — see ADR-0018, which also settles that the `operator`,
 `employer_membership` and `session` tables live in `payroll-app`'s schema.
 
-**0.17 Startup.** Deploy runs migrations with the admin credential. The server
-checks the schema version at boot and refuses to start if it is behind. The runtime
-connects as a login role granted `payroll_app` and issues `SET ROLE payroll_app` on
-checkout; the migration credential is absent from the server's environment.
+**0.17 The runtime database seam.** ADR-0018 said what `salt-server` may not do; it
+did not say how the server then owns a pool. Today every use case takes
+`pool: &PgPool`, so naming one would itself require the `sqlx` dependency the ADR
+forbids. Settled: `payroll-app` exports one opaque handle and one constructor, and
+every existing use-case signature changes from `&PgPool` to `&SaltDatabase`.
+
+```text
+payroll_app::SaltDatabase          opaque; wraps a PgPool with no public accessor,
+                                   no Deref, no Into
+payroll_app::SaltDatabase::connect(&DatabaseConfig)
+                                   builds the pool, installs the after-connect
+                                   hook, verifies the schema version, or refuses
+payroll_app::SaltDatabase::from_pool(PgPool)
+                                   test-only in practice: constructing the argument
+                                   needs sqlx, which salt-server does not have
+```
+
+`connect` does the three things §0.17's startup sequence needs, all inside the crate
+that owns the schema:
+
+1. **Pool construction.** Size, timeouts and connect options come from a
+   `DatabaseConfig` struct of plain values — url, max connections, timeouts —
+   that `salt-server` fills from the environment. No `sqlx` type appears in it.
+2. **`SET ROLE payroll_app` per connection.** Installed as an `after_connect` hook
+   on the pool, so it holds for every checkout including ones a future pool
+   refill creates. Not a per-call responsibility, and not something a caller can
+   forget.
+3. **Schema version check.** Compares the applied migration version against the
+   version compiled into `payroll-app` and returns a refusal if the database is
+   behind. The server turns that into a refusal to start.
+
+This is a pool type and a constructor, not a `Database` trait or a repository
+seam — ADR-0009 refused a seam with one implementation and that refusal stands.
+The opacity is what makes ADR-0018 structural rather than a convention: a
+`SaltDatabase` cannot be unwrapped, and the escape hatch `from_pool` needs a
+`PgPool` value, which a crate without `sqlx` cannot produce.
+
+**0.17a Startup.** Deploy runs migrations with the admin credential. The server calls
+`SaltDatabase::connect`, and a schema-behind refusal from it aborts startup — loud
+and early. The runtime credential is a login role granted `payroll_app`; the
+migration credential is absent from the server's environment entirely.
 
 **0.18 Config.** Environment variables only, read once at startup into one struct
 that refuses to build on a missing or malformed value, with secrets redacted in its
@@ -126,7 +241,7 @@ GET    /api/session                      who am I
 
 GET    /api/employers
 GET    /api/employers/{e}/employments
-POST   /api/employers/{e}/employments
+POST   /api/employers/{e}/employments      personId or fullName, exactly one
 GET    /api/employers/{e}/employments/{em}
 POST   /api/employers/{e}/employments/{em}/compensation-terms
 POST   /api/employers/{e}/employments/{em}/prior-employment
@@ -144,7 +259,8 @@ GET    /api/employers/{e}/finalized-payroll/{f}
 GET    /api/employers/{e}/finalized-payroll/{f}/traces
 ```
 
-Nothing else. No Employer creation route, no reversal, no correction, no ActionLog.
+Nothing else. No Employer creation route, no membership routes (§0.39), no Person
+routes (§0.38), no reversal, no correction, no ActionLog.
 Earnings is `PUT` because `set_run_earnings` replaces the whole list, and calling
 that a `POST` would hide the fact that it is idempotent.
 
@@ -201,14 +317,44 @@ GetFinalizedPayrollDetail(employer_id, finalized_payroll_id)
 
 **0.31 Failed calculation after refresh — the answer to §31 and §44 J.** Nothing is
 persisted and nothing is recomputed by the calculator. `GetPayrollRunDetail` reports
-per member a `blockers: [{ code, details }]` list, computed by reading which facts
-exist, using the same stable codes as the error contract:
-`prior_employment_unknown`, `unsupported_deduction_status_unknown`,
-`no_compensation_terms_in_force`. Empty means ready. This is not duplicated logic —
-the crate that refuses is the crate that reports readiness, and "no declaration row
-exists" is a fact lookup, not a payroll rule. Persisting the last refusal was
-rejected because it stores an opinion that goes stale the moment someone fixes the
-fact.
+per member a `blockers: [{ code, details }]` list, computed by **reading standing
+facts**, under the same stable codes as the error contract. Empty means ready.
+
+The five states it must distinguish:
+
+```text
+prior_employment_unknown                  no declaration in force
+prior_employment_treatment_unconfirmed    declared with figures; treatment is
+                                          unconfirmed, so it is refused too
+unsupported_deduction_status_unknown      no declaration in force
+unsupported_deductions_present            declared present; details.kinds names them
+no_compensation_terms_in_force            no CompensationTerms row covers the
+                                          period end
+```
+
+The two "present" states matter as much as the two "unknown" ones: `CONTEXT.md`
+records that known PriorEmployment figures are refused while their treatment is
+unconfirmed, and that a present UnsupportedDeductionStatus is refused as firmly as
+an unknown one. A UI that showed only the unknowns would tell an Operator they were
+ready when they were not. `details.kinds` is carried for the present case because
+"you have unsupported deductions" without naming them is unactionable.
+
+Three limits, stated so `/to-spec` does not widen them:
+
+1. **`blockers` is not a persisted copy of the last Calculate refusal.** Nothing is
+   stored. It is derived on every read from the facts as they stand now, so
+   clearing a blocker clears it from the page.
+2. **It does not promise to reproduce every `PayrollError`.** It covers exactly the
+   states above — the ones knowable from standing facts. A refusal that only
+   appears once arithmetic runs is out of its reach by construction.
+3. **A GET never runs the calculator.** If Calculate previously failed for a reason
+   not in the list, refresh shows the run as `Draft` with no blocker naming it, and
+   the Operator recalculates to reproduce the refusal. That is the honest answer:
+   the alternative is either a stale stored opinion or arithmetic behind a GET, and
+   both were rejected.
+
+This is not duplicated logic — the crate that refuses is the crate that reports
+readiness, and "no declaration row exists" is a fact lookup, not a payroll rule.
 
 ## React
 
@@ -227,18 +373,95 @@ so adding a switcher later changes nothing behind it.
 **0.35 First UI scope.** The minimum standing-data screens that make one Employment
 payable — Employment, CompensationTerms, PriorEmployment,
 UnsupportedDeductionStatus and **OpeningBalance** — then the ordinary payroll flow.
+The Employment form takes the person's name directly (§0.38); there is no separate
+Person screen, and an Operator never types a `PersonId`.
 OpeningBalance is in because the first real customer will be adopting Salt mid-year,
 and without it their first Calculate refuses with a blocker no screen can clear.
 Reversal, correction and ActionLog screens stay out.
 
 ## Tests
 
-**0.36 HTTP.** `#[sqlx::test]` plus the real router in-process via
+**0.36 HTTP.** `#[sqlx::test]` hands the test a `PgPool`, which it wraps with
+`SaltDatabase::from_pool` — the one place that constructor is used, and a place that
+already depends on `sqlx` (§0.17). Plus the real router in-process via
 `tower::ServiceExt::oneshot` — no port, no browser. These own the eight proofs in
 §33, in particular "Employer A cannot fetch Employer B's run by known id" and
 "ActionLog actor comes from the session, not the body".
 
 **0.37 Browser.** One Playwright test for the whole journey. One, not a suite.
+
+## Closed after review
+
+**0.38 Person — the minimum model.** `employment.person_id` is a bare `TEXT` column
+today with no table behind it, so an Operator would be asked to type opaque ids.
+A `person` table is added, and no more of one than this slice needs.
+
+*Ownership and scope.* A Person is **Employer-scoped**: `person` carries
+`employer_id`, and the same human employed by two Employers is two Person rows.
+This looks wrong beside `CONTEXT.md`, which defines Person as "a human being,
+independent of any job they hold" — and it is a deliberate narrowing, recorded here
+so nobody thinks it was missed. Salt has no way to know two rows are the same human
+(no national-id matching, no identity resolution, and no consent story for sharing
+one Employer's personal data with another). A global Person would be a claim Salt
+cannot substantiate, and the claim it would make wrongly — this Employer may see
+that this human works elsewhere — is exactly the isolation §13 exists to defend.
+Employer-scoped Persons are also what makes §0.30's "every read filters on
+`employer_id`" total, with no exception carved out for people.
+
+*Fields.* `id`, `employer_id`, `full_name`, `created_at`, `created_by`. One name
+field, not given/family, because Salt does not yet render anything that needs the
+halves separately and splitting names correctly across cultures is a real problem
+not worth solving speculatively. **No** date of birth, tax number, address, bank
+details or contact — payroll may want them one day, and "one day" is not a reason.
+
+*Id.* `payroll-app` mints the `PersonId` (UUIDv7, like every other id it owns),
+the same way it already mints `EmployerId` and `EmploymentId`. The pure crate's
+`PersonId` type is unchanged; only the caller of `PersonId::new` moves.
+
+*Creation.* `POST /api/employers/{e}/employments` takes `personId` **or**
+`fullName`, exactly one. Given a name it creates the Person and the Employment in
+one transaction; given an id it verifies the Person belongs to the authorized
+Employer and refuses with 404 otherwise. Two calls and a client-side join would let
+a browser abandon a Person with no Employment, which is a row nobody will ever
+clean up. There is no separate Person creation route and no Person list route in
+Specs 1–3.
+
+*Display.* `ListEmployments` returns `fullName` beside the ids; `GetEmploymentDetail`
+returns it too. Every screen an Operator reads names a human, never only a
+`PersonId`. This is the whole point of the clause.
+
+**0.39 Membership administration is deferred.** §0.6 names Owner capabilities that
+§0.22 exposes no routes for. That gap is deliberate and is now stated: **for Specs
+1–3, Employer creation after bootstrap and membership administration have no HTTP
+route and no UI.**
+
+- Both roles are **modelled now** — the `role` column exists and every route
+  enforces §0.6 — because retrofitting a role column onto live memberships is far
+  more expensive than carrying an enum with one route-relevant distinction.
+- **Bootstrap creates the first Owner membership** (§0.2), and that is the only way
+  a membership comes into existence in these three specs.
+- **Tests construct further memberships through `payroll-app` use cases**, not
+  through HTTP. The `PayrollOperator`-is-refused test and the non-member-gets-404
+  test both need a second Operator, and both set it up in Rust.
+- `/to-spec` must not infer `POST /api/employers`, membership routes, or an
+  invitation flow from §0.6. If a route is not in §0.22, it does not exist.
+
+**0.40 Which spec owns which schema change.** Three migrations fall out of the
+clauses above, and each belongs to exactly one spec so neither `/to-spec` invocation
+writes the other's.
+
+```text
+SPEC 1   operator, employer_membership, session tables
+SPEC 1   employer gains name TEXT NOT NULL, non-blank by CHECK   (§0.2)
+SPEC 1   every use case moves from &PgPool to &SaltDatabase       (§0.17)
+SPEC 2   person table, and employment.person_id gains its
+         foreign key to it                                        (§0.38)
+SPEC 3   none
+```
+
+The `&SaltDatabase` change is not a migration but belongs in SPEC 1 for the same
+reason: it touches every existing use case once, and doing it twice would be worse
+than doing it early.
 
 ---
 
@@ -1843,7 +2066,7 @@ Bob loses membership while his session remains open.
 
 Which next request fails and why?
 
-If these are precise, proceed to `/to-spec`.
+If these are precise, proceed to `/to-spec` for **SPEC 1** (§0.3). Not one spec.
 
 ---
 
@@ -1885,6 +2108,8 @@ Do not introduce authorization concepts with no user story.
 
 Do not weaken any `payroll-app` invariant to make HTTP easier.
 
-The next artifact after the grill should be one implementation spec for:
-
-> **Authenticate and authorize one payroll operator, expose the ordinary payroll workflow through HTTP, and complete one ordinary payroll in a minimal React application without bypassing `payroll-app`.**
+~~The next artifact after the grill should be one implementation spec.~~
+**Superseded by §0.3.** The grill found the single spec too large to review, and
+found a boundary — identity is provable with no payroll routes at all — that
+splits it honestly. The next artifacts are the three specs of §0.3, in order,
+beginning with SPEC 1.

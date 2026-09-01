@@ -11,7 +11,7 @@ The legal entity that employs people and owes remuneration, PAYE, and social sec
 _Avoid_: Company, tenant, client, account
 
 **Person**:
-A human being, independent of any job they hold.
+A human being, independent of any job they hold. What Salt *records* is narrower: a Person is known to one Employer, so the same human employed by two Employers is two records (ADR-0020). Salt cannot substantiate that two records are one human, and saying so would tell one Employer where its people work elsewhere.
 _Avoid_: Employee (as a record), user
 
 **Employment**:
