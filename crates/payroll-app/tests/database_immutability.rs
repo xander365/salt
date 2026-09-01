@@ -262,6 +262,7 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
         "payroll_run_earning",
         "working_payroll_calculation",
         "live_finalized_payroll",
+        "operator",
     ];
 
     let tables: Vec<String> = sqlx::query_scalar(

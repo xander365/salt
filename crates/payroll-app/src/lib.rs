@@ -19,6 +19,7 @@ mod finalize;
 mod freeze;
 mod ids;
 mod opening_balance;
+mod operator;
 mod payroll_run;
 mod prior_employment;
 mod reversal;
@@ -38,6 +39,10 @@ pub use finalize::{
     FinalizationOutcome, FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run,
 };
 pub use opening_balance::record_opening_balance;
+pub use operator::{
+    OperatorId, OperatorSnapshot, OperatorStatus, create_operator, disable_operator,
+    find_operator_by_email, verify_operator_credential,
+};
 pub use payroll_run::{
     PayrollRunId, create_correction_run, create_ordinary_payroll_run, remove_employment_from_run,
     set_run_earnings,

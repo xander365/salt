@@ -5,6 +5,7 @@ use payroll::{
 };
 
 use crate::finalize::FinalizedPayrollId;
+use crate::operator::OperatorId;
 use crate::payroll_run::PayrollRunId;
 
 /// `payroll-app`'s own error type. It wraps [`PayrollError`] rather than
@@ -420,6 +421,33 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         effective_from: NaiveDate,
     },
+    /// `CreateOperator` was given an email that is empty or only whitespace.
+    OperatorEmailCannotBeEmpty,
+    /// `CreateOperator` was given a display name that is empty or only
+    /// whitespace.
+    OperatorDisplayNameCannotBeEmpty,
+    /// `CreateOperator` was given an email that collides, case-insensitively,
+    /// with an email already recorded for another Operator — the folded
+    /// form the `operator_email_folded_key` UNIQUE index compares (issue
+    /// #41).
+    OperatorEmailAlreadyInUse,
+    /// Argon2id hashing itself failed while creating an Operator — a
+    /// hashing-library or RNG failure, never a fact about the password
+    /// given. Distinct from [`Self::Database`] because it names a different
+    /// dependency: PostgreSQL was never involved.
+    PasswordHashingFailed(String),
+    /// No Operator exists with this id.
+    OperatorNotFound(OperatorId),
+    /// `DisableOperator` was asked to disable an Operator already disabled.
+    /// The disabling has already happened, so a second act would record one
+    /// that did not.
+    OperatorAlreadyDisabled(OperatorId),
+    /// `VerifyOperatorCredential` refused. Deliberately the *only* refusal
+    /// this use case ever raises, and it carries no data: an unknown email,
+    /// a wrong password, and a disabled Operator all reach this one variant,
+    /// because a caller — or an attacker — must not be able to tell the
+    /// three apart (issue #41).
+    OperatorCredentialInvalid,
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -796,6 +824,22 @@ impl std::fmt::Display for PayrollAppError {
                 "Employment {employment_id} already has a CompensationTerms row effective \
                  {effective_from}"
             ),
+            Self::OperatorEmailCannotBeEmpty => {
+                write!(f, "an Operator email must not be empty")
+            }
+            Self::OperatorDisplayNameCannotBeEmpty => {
+                write!(f, "an Operator display name must not be empty")
+            }
+            Self::OperatorEmailAlreadyInUse => write!(
+                f,
+                "an Operator with this email already exists (email is unique case-insensitively)"
+            ),
+            Self::PasswordHashingFailed(message) => {
+                write!(f, "password hashing failed: {message}")
+            }
+            Self::OperatorNotFound(id) => write!(f, "no Operator exists with id {id}"),
+            Self::OperatorAlreadyDisabled(id) => write!(f, "Operator {id} is already disabled"),
+            Self::OperatorCredentialInvalid => write!(f, "the Operator credential is invalid"),
         }
     }
 }
@@ -867,7 +911,14 @@ impl std::error::Error for PayrollAppError {
             | Self::NoCompensationTermsRowAt { .. }
             | Self::UnsupportedDeductionDeclarationReasonCannotBeEmpty
             | Self::MasterDataDivergenceNotAcknowledged { .. }
-            | Self::CompensationTermsAlreadyExistAt { .. } => None,
+            | Self::CompensationTermsAlreadyExistAt { .. }
+            | Self::OperatorEmailCannotBeEmpty
+            | Self::OperatorDisplayNameCannotBeEmpty
+            | Self::OperatorEmailAlreadyInUse
+            | Self::PasswordHashingFailed(_)
+            | Self::OperatorNotFound(_)
+            | Self::OperatorAlreadyDisabled(_)
+            | Self::OperatorCredentialInvalid => None,
         }
     }
 }
