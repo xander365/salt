@@ -31,7 +31,9 @@ async fn an_employer_and_employment(
     schedule: payroll::PaySchedule,
     start_date: NaiveDate,
 ) -> (EmployerId, EmploymentId) {
-    let employer_id = create_employer(db, schedule, "actor").await.unwrap();
+    let employer_id = create_employer(db, "Employer", schedule, "actor")
+        .await
+        .unwrap();
     let employment_id = create_employment(
         db,
         &employer_id,
@@ -633,7 +635,7 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
 #[sqlx::test]
 async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
-    let employer_id = create_employer(&db, calendar_month_schedule(), "actor")
+    let employer_id = create_employer(&db, "Employer", calendar_month_schedule(), "actor")
         .await
         .unwrap();
     let continuing = create_employment(

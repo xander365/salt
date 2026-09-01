@@ -54,8 +54,8 @@ async fn migrations_create_the_schema_this_design_names(pool: PgPool) {
 /// dependency on `uuid`).
 async fn a_finalized_payroll(conn: &mut sqlx::PgConnection) -> String {
     sqlx::query(
-        "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
-         VALUES ('employer-1', 'day', 25, 'test-actor')",
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-1', 'Employer', 'day', 25, 'test-actor')",
     )
     .execute(&mut *conn)
     .await

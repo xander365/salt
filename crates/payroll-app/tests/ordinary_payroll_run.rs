@@ -27,7 +27,7 @@ fn march_period() -> PayPeriod {
 }
 
 async fn an_employer(db: &SaltDatabase) -> payroll::EmployerId {
-    create_employer(db, twenty_sixth_schedule(), "actor")
+    create_employer(db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap()
 }

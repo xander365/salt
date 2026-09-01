@@ -36,7 +36,7 @@ fn next_period() -> PayPeriod {
 }
 
 async fn an_employer(db: &SaltDatabase) -> EmployerId {
-    create_employer(db, monthly_schedule(), "actor")
+    create_employer(db, "Employer", monthly_schedule(), "actor")
         .await
         .unwrap()
 }

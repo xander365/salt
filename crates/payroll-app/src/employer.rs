@@ -14,22 +14,30 @@ use payroll::{
     validate_effective_from_is_a_period_start,
 };
 
-/// Records a new Employer with the given `PaySchedule`. Changing it later is
-/// [`change_pay_schedule`].
+/// Records a new Employer with the given human-readable `name` and
+/// `PaySchedule`. `name` is written once, here — the Owner capability that
+/// would let it change later is deferred (§0.39), so there is no companion
+/// rename use case. Changing the `PaySchedule` later is [`change_pay_schedule`].
 pub async fn create_employer(
     db: &SaltDatabase,
+    name: &str,
     pay_schedule: PaySchedule,
     created_by: &str,
 ) -> Result<EmployerId, PayrollAppError> {
+    if name.trim().is_empty() {
+        return Err(PayrollAppError::EmployerNameCannotBeEmpty);
+    }
+
     let pool = db.pool();
     let id = EmployerId::new(new_id());
     let (kind, value) = period_end_day_columns(pay_schedule.period_end_day());
 
     sqlx::query(
-        "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(id.as_str())
+    .bind(name)
     .bind(kind)
     .bind(value)
     .bind(created_by)

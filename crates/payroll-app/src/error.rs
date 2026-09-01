@@ -41,6 +41,11 @@ pub enum PayrollAppError {
         /// `None` when no migration has ever been applied to it.
         applied: Option<i64>,
     },
+    /// `CreateEmployer` was given a name that is empty or only whitespace. A
+    /// blank name shows a person nothing, the same demand every mandatory
+    /// reason and attribution column in this crate makes of its own text
+    /// (issue #40).
+    EmployerNameCannotBeEmpty,
     /// No Employer exists with this id.
     EmployerNotFound(EmployerId),
     /// No Employment exists with this id.
@@ -464,6 +469,9 @@ impl std::fmt::Display for PayrollAppError {
                      migration version {compiled}"
                 ),
             },
+            Self::EmployerNameCannotBeEmpty => {
+                write!(f, "an Employer name must not be empty")
+            }
             Self::EmployerNotFound(id) => write!(f, "no Employer exists with id {id}"),
             Self::EmploymentNotFound(id) => write!(f, "no Employment exists with id {id}"),
             Self::EmploymentIsVoid(id) => write!(f, "Employment {id} is void"),
@@ -811,6 +819,7 @@ impl std::error::Error for PayrollAppError {
             Self::FinalizationRebuildRefused { refusal, .. } => refusal.source(),
             Self::Database(_)
             | Self::SchemaOutOfDate { .. }
+            | Self::EmployerNameCannotBeEmpty
             | Self::EmployerNotFound(_)
             | Self::EmploymentNotFound(_)
             | Self::EmploymentIsVoid(_)

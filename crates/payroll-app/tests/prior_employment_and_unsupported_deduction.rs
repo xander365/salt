@@ -27,7 +27,7 @@ fn twenty_sixth_schedule() -> payroll::PaySchedule {
 }
 
 async fn an_employer_and_employment(db: &SaltDatabase) -> (payroll::EmployerId, EmploymentId) {
-    let employer_id = create_employer(db, twenty_sixth_schedule(), "actor")
+    let employer_id = create_employer(db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
     let employment_id = create_employment(

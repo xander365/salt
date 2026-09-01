@@ -38,7 +38,7 @@ fn well_before_the_period() -> NaiveDate {
 }
 
 async fn an_employer(db: &SaltDatabase) -> EmployerId {
-    create_employer(db, twenty_sixth_schedule(), "actor")
+    create_employer(db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap()
 }

@@ -213,8 +213,8 @@ mod tests {
         pool: PgPool,
     ) {
         sqlx::query(
-            "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
-             VALUES ('employer-1', 'day', 25, 'test-actor')",
+            "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+             VALUES ('employer-1', 'Employer', 'day', 25, 'test-actor')",
         )
         .execute(&pool)
         .await

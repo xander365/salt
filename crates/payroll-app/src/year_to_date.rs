@@ -142,7 +142,7 @@ mod tests {
     }
 
     async fn an_employment(db: &SaltDatabase) -> EmploymentId {
-        let employer_id = create_employer(db, twenty_sixth_schedule(), "actor")
+        let employer_id = create_employer(db, "Employer", twenty_sixth_schedule(), "actor")
             .await
             .unwrap();
         create_employment(

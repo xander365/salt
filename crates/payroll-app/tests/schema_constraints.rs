@@ -25,8 +25,8 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 
 async fn an_employer_and_two_employments(conn: &mut sqlx::PgConnection) {
     sqlx::query(
-        "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
-         VALUES ('employer-1', 'day', 25, 'actor')",
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-1', 'Employer', 'day', 25, 'actor')",
     )
     .execute(&mut *conn)
     .await
@@ -1072,8 +1072,8 @@ async fn a_finalized_payroll_agrees_with_the_run_it_came_from(pool: PgPool) {
     an_employer_and_two_employments(&mut conn).await;
 
     sqlx::query(
-        "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
-         VALUES ('employer-2', 'day', 25, 'actor')",
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-2', 'Employer', 'day', 25, 'actor')",
     )
     .execute(&mut *conn)
     .await
@@ -1356,8 +1356,13 @@ async fn an_actor_and_a_reason_are_never_only_whitespace(pool: PgPool) {
     for (case, statement) in [
         (
             "an Employer created by nobody",
-            "INSERT INTO employer (id, period_end_day_kind, period_end_day_value, created_by)
-             VALUES ('employer-2', 'day', 25, ' ')",
+            "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+             VALUES ('employer-2', 'Employer', 'day', 25, ' ')",
+        ),
+        (
+            "an Employer named only whitespace",
+            "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+             VALUES ('employer-3', ' ', 'day', 25, 'actor')",
         ),
         (
             "an Employment created by nobody",

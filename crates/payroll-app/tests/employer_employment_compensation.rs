@@ -27,7 +27,9 @@ fn twenty_sixth_schedule() -> payroll::PaySchedule {
 async fn an_employer_is_created_with_exactly_one_pay_schedule(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let schedule = twenty_sixth_schedule();
-    let employer_id = create_employer(&db, schedule, "actor").await.unwrap();
+    let employer_id = create_employer(&db, "Employer", schedule, "actor")
+        .await
+        .unwrap();
 
     let row =
         sqlx::query("SELECT period_end_day_kind, period_end_day_value FROM employer WHERE id = $1")
@@ -40,9 +42,40 @@ async fn an_employer_is_created_with_exactly_one_pay_schedule(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn an_employer_is_created_with_its_name(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = create_employer(&db, "Acme Corp", twenty_sixth_schedule(), "actor")
+        .await
+        .unwrap();
+
+    let name: String = sqlx::query_scalar("SELECT name FROM employer WHERE id = $1")
+        .bind(employer_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(name, "Acme Corp");
+}
+
+#[sqlx::test]
+async fn creating_an_employer_with_a_blank_name_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    // A name of `" "` shows a person nothing while looking like it shows
+    // something, and this column is never edited after creation (§0.39).
+    for blank in ["", " ", "\t\n  "] {
+        let result = create_employer(&db, blank, twenty_sixth_schedule(), "actor").await;
+
+        assert_eq!(
+            result,
+            Err(PayrollAppError::EmployerNameCannotBeEmpty),
+            "a name of {blank:?} must be refused"
+        );
+    }
+}
+
+#[sqlx::test]
 async fn an_employment_is_created_with_a_start_date_and_an_optional_end_date(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
-    let employer_id = create_employer(&db, twenty_sixth_schedule(), "actor")
+    let employer_id = create_employer(&db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
     let person_id = PersonId::new("person-1");
@@ -88,7 +121,7 @@ async fn an_employment_is_created_with_a_start_date_and_an_optional_end_date(poo
 async fn an_employer_and_employment(
     db: &SaltDatabase,
 ) -> (payroll::EmployerId, payroll::EmploymentId) {
-    let employer_id = create_employer(db, twenty_sixth_schedule(), "actor")
+    let employer_id = create_employer(db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
     let employment_id = create_employment(
@@ -467,7 +500,7 @@ async fn voiding_an_already_void_employment_writes_no_second_action_log_entry(po
 #[sqlx::test]
 async fn an_employment_that_ends_before_it_starts_is_a_domain_refusal(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
-    let employer_id = create_employer(&db, twenty_sixth_schedule(), "actor")
+    let employer_id = create_employer(&db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
 
