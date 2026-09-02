@@ -2,12 +2,16 @@
 //! `VerifyOperatorCredential` — the global human identity Salt can name
 //! (issue #41, parent #38;
 //! `docs/domain/operator-auth-http-web-grill.md` §6, §9, §0.12a-§0.13).
+//! `VerifyOperatorCredential` also carries issue #42's lockout: ten failures
+//! inside a fifteen-minute window locks the account for that same fifteen
+//! minutes, self-lifting rather than administrator-cleared.
 //!
 //! An Operator is authenticated here; authorizing one against an Employer
 //! through `EmployerMembership` is a later spec's table, not this one's.
 
 use argon2::password_hash::phc::PasswordHash;
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::database::{SaltDatabase, is_unique_violation};
 use crate::error::PayrollAppError;
@@ -63,6 +67,20 @@ const DUMMY_VERIFIER: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdGR1bW15dmVyaWZ
 /// caller cannot choose how much Argon2id work one attempt costs.
 const MIN_PASSWORD_LENGTH: usize = 8;
 const MAX_PASSWORD_LENGTH: usize = 1024;
+
+/// Issue #42's lockout threshold: ten failures is "far above human
+/// mistyping and far below useful guessing" (the issue's own words), and is
+/// deliberately not configurable in this spec.
+const LOCKOUT_THRESHOLD: i32 = 10;
+
+/// Both the width of the window failures are counted in and how long a lock
+/// lasts (the issue's own words: "locks the account for fifteen minutes").
+/// Reusing one constant for both keeps the two facts from drifting apart:
+/// a lock lifts by itself exactly when the window that caused it would have
+/// reset anyway.
+fn lockout_window() -> Duration {
+    Duration::minutes(15)
+}
 
 /// The name PostgreSQL gives migration 0028's `UNIQUE INDEX
 /// operator_email_folded_key ON operator (lower(email))` — the index that
@@ -201,22 +219,30 @@ pub async fn disable_operator(
 }
 
 /// Verifies `password` against the Operator whose email folds to `email`,
-/// and returns their [`OperatorId`] only when it is correct **and** the
-/// Operator is `active`.
+/// and returns their [`OperatorId`] only when it is correct, the Operator is
+/// `active`, **and** the account is not locked. `now` is the caller's clock
+/// reading (issue #42's own instruction: tests pass it in rather than this
+/// function sleeping on the wall clock), against which the fifteen-minute
+/// window and lock are measured.
 ///
 /// Every other outcome — no such email, a wrong password, a disabled
-/// Operator — is the single [`PayrollAppError::OperatorCredentialInvalid`],
-/// deliberately carrying nothing that would let a caller tell the three
-/// apart (§0.12a, §0.13, acceptance criteria of issue #41).
+/// Operator, a locked account — is the single
+/// [`PayrollAppError::OperatorCredentialInvalid`], deliberately carrying
+/// nothing that would let a caller tell them apart (§0.12a, §0.13,
+/// acceptance criteria of issues #41 and #42).
 ///
 /// An unknown email still pays the real Argon2id cost, against
 /// `DUMMY_VERIFIER`, **inside this branch** rather than short-circuited
 /// before it: that is the whole timing property §0.12a describes, and
-/// returning early on "no row" is exactly what would defeat it.
+/// returning early on "no row" is exactly what would defeat it. An unknown
+/// email has no row and therefore no counter, so it never locks (issue #42's
+/// own instruction): a flood of unknown emails is Caddy's per-IP limit to
+/// answer, not this function's.
 pub async fn verify_operator_credential(
     db: &SaltDatabase,
     email: &str,
     password: &str,
+    now: DateTime<Utc>,
 ) -> Result<OperatorId, PayrollAppError> {
     // Refused before the database is touched, and before any Argon2id work:
     // a credential this long cannot belong to any Operator, because
@@ -229,17 +255,18 @@ pub async fn verify_operator_credential(
         return Err(PayrollAppError::OperatorCredentialInvalid);
     }
 
-    type Row = (String, String, String);
+    type Row = (String, String, String, i32, Option<DateTime<Utc>>);
 
     let row: Option<Row> = sqlx::query_as(
-        "SELECT id::text, password_verifier, status FROM operator
+        "SELECT id::text, password_verifier, status, failed_attempt_count, first_failure_at
+         FROM operator
          WHERE lower(email) = lower($1)",
     )
     .bind(email.trim())
     .fetch_optional(db.pool())
     .await?;
 
-    let Some((id, password_verifier, status)) = row else {
+    let Some((id, password_verifier, status, failed_attempt_count, first_failure_at)) = row else {
         // `black_box` so the discarded result cannot become a reason to
         // elide the call: this line exists for its cost, and a compiler that
         // optimised it away would remove the property without removing the
@@ -248,15 +275,82 @@ pub async fn verify_operator_credential(
         return Err(PayrollAppError::OperatorCredentialInvalid);
     };
 
-    // Computed unconditionally, before the status check: a disabled
-    // Operator's row must cost exactly what an active one's does, or the
-    // response time itself would say "this account exists and is disabled".
+    // Still within the window a prior failure opened: ten or more failures
+    // inside it locks the account until the window closes, at which point
+    // this is false again with no administrator having touched the row.
+    let locked = failed_attempt_count >= LOCKOUT_THRESHOLD
+        && first_failure_at
+            .is_some_and(|first_failure_at| now < first_failure_at + lockout_window());
+
+    // Computed unconditionally, before the status and lock checks: a
+    // disabled or locked Operator's row must cost exactly what an active,
+    // unlocked one's does, or the response time itself would say which case
+    // this is.
     let matches = password_matches(password, &password_verifier);
-    if !matches || status != "active" {
+
+    if locked || !matches || status != "active" {
+        // Only a wrong password against an unlocked row is a new failure to
+        // record: a lock already in effect does not need extending, and a
+        // disabled row's correct password is neither a failure nor a
+        // success worth touching the counter for.
+        if !locked && !matches {
+            record_failed_attempt(db, &id, now).await?;
+        }
         return Err(PayrollAppError::OperatorCredentialInvalid);
     }
 
+    record_successful_login(db, &id).await?;
     Ok(OperatorId::new(id))
+}
+
+/// Records one failed attempt against `operator_id` at `now` (§ issue #42).
+/// A failure outside the fifteen-minute window a prior failure opened starts
+/// a new window at `now` with a count of one; a failure inside it just
+/// increments the count. Expressed as one `UPDATE` with `now` bound in,
+/// rather than read-then-write in Rust, so the decision is made against the
+/// same instant SQL's `first_failure_at` comparison uses.
+async fn record_failed_attempt(
+    db: &SaltDatabase,
+    operator_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), PayrollAppError> {
+    sqlx::query(
+        "UPDATE operator SET
+             failed_attempt_count = CASE
+                 WHEN first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes'
+                     THEN 1
+                 ELSE failed_attempt_count + 1
+             END,
+             first_failure_at = CASE
+                 WHEN first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes'
+                     THEN $2
+                 ELSE first_failure_at
+             END
+         WHERE id = $1::uuid",
+    )
+    .bind(operator_id)
+    .bind(now)
+    .execute(db.pool())
+    .await?;
+
+    Ok(())
+}
+
+/// Resets the lockout counter on a successful login (issue #42's own
+/// acceptance criterion): the next wrong password, if any, starts a fresh
+/// window rather than picking up where an old one left off.
+async fn record_successful_login(
+    db: &SaltDatabase,
+    operator_id: &str,
+) -> Result<(), PayrollAppError> {
+    sqlx::query(
+        "UPDATE operator SET failed_attempt_count = 0, first_failure_at = NULL WHERE id = $1::uuid",
+    )
+    .bind(operator_id)
+    .execute(db.pool())
+    .await?;
+
+    Ok(())
 }
 
 /// Hashes `password` to an Argon2id PHC string (§0.13), with a fresh random

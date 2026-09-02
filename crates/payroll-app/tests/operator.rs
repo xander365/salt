@@ -3,6 +3,7 @@
 //! `verify_operator_credential` — reached through the public API a later
 //! ticket's HTTP layer calls, not raw SQL.
 
+use chrono::Utc;
 use payroll_app::{
     OperatorStatus, PayrollAppError, SaltDatabase, create_operator, disable_operator,
     find_operator_by_email, verify_operator_credential,
@@ -129,10 +130,14 @@ async fn a_correct_credential_verifies(pool: PgPool) {
     .await
     .unwrap();
 
-    let verified =
-        verify_operator_credential(&db, "alice@example.com", "correct horse battery staple")
-            .await
-            .unwrap();
+    let verified = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        Utc::now(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(verified, created);
 }
@@ -149,7 +154,8 @@ async fn a_wrong_password_does_not_verify(pool: PgPool) {
     .await
     .unwrap();
 
-    let result = verify_operator_credential(&db, "alice@example.com", "wrong password").await;
+    let result =
+        verify_operator_credential(&db, "alice@example.com", "wrong password", Utc::now()).await;
 
     assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
 }
@@ -167,8 +173,13 @@ async fn a_disabled_operators_credential_does_not_verify(pool: PgPool) {
     .unwrap();
     disable_operator(&db, &operator_id).await.unwrap();
 
-    let result =
-        verify_operator_credential(&db, "alice@example.com", "correct horse battery staple").await;
+    let result = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        Utc::now(),
+    )
+    .await;
 
     assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
 }
@@ -192,11 +203,18 @@ async fn an_unknown_email_a_wrong_password_and_a_disabled_operator_refuse_identi
     .unwrap();
     disable_operator(&db, &operator_id).await.unwrap();
 
-    let unknown_email = verify_operator_credential(&db, "nobody@example.com", "anything").await;
+    let now = Utc::now();
+    let unknown_email =
+        verify_operator_credential(&db, "nobody@example.com", "anything", now).await;
     let wrong_password =
-        verify_operator_credential(&db, "alice@example.com", "wrong password").await;
-    let disabled =
-        verify_operator_credential(&db, "alice@example.com", "correct horse battery staple").await;
+        verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+    let disabled = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now,
+    )
+    .await;
 
     assert_eq!(
         unknown_email,
@@ -289,7 +307,7 @@ async fn an_email_padded_with_whitespace_is_the_same_email(pool: PgPool) {
         "the stored email keeps its capitalisation and loses only the padding"
     );
 
-    let verified = verify_operator_credential(&db, " alice@example.com ", "a password")
+    let verified = verify_operator_credential(&db, " alice@example.com ", "a password", Utc::now())
         .await
         .unwrap();
     assert_eq!(verified, created);
@@ -325,8 +343,9 @@ async fn verifying_an_over_long_password_is_refused_without_hashing_it(pool: PgP
 
     let over_long = "p".repeat(1025);
 
-    let known = verify_operator_credential(&db, "alice@example.com", &over_long).await;
-    let unknown = verify_operator_credential(&db, "nobody@example.com", &over_long).await;
+    let now = Utc::now();
+    let known = verify_operator_credential(&db, "alice@example.com", &over_long, now).await;
+    let unknown = verify_operator_credential(&db, "nobody@example.com", &over_long, now).await;
 
     assert_eq!(known, Err(PayrollAppError::OperatorCredentialInvalid));
     assert_eq!(unknown, Err(PayrollAppError::OperatorCredentialInvalid));
@@ -355,7 +374,8 @@ async fn verifying_an_unknown_email_still_pays_the_argon2id_cost(pool: PgPool) {
         let mut fastest = std::time::Duration::MAX;
         for _ in 0..3 {
             let started = Instant::now();
-            let refused = verify_operator_credential(db, email, "the wrong password").await;
+            let refused =
+                verify_operator_credential(db, email, "the wrong password", Utc::now()).await;
             assert_eq!(refused, Err(PayrollAppError::OperatorCredentialInvalid));
             fastest = fastest.min(started.elapsed());
         }
@@ -370,5 +390,210 @@ async fn verifying_an_unknown_email_still_pays_the_argon2id_cost(pool: PgPool) {
         unknown_email * 2 >= wrong_password,
         "an unknown email took {unknown_email:?} against {wrong_password:?} for a wrong \
          password, so it is not doing the same Argon2id work"
+    );
+}
+
+/// Issue #42's own acceptance criterion: nine wrong passwords still let the
+/// tenth attempt so much as check the password, and a correct one on the
+/// tenth still verifies. Ten is the first count that locks, not the last
+/// that is allowed through.
+#[sqlx::test]
+async fn nine_failures_do_not_lock_the_account(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let created = create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    for _ in 0..9 {
+        let result =
+            verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+        assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+    }
+
+    let verified = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified, created);
+}
+
+/// Ten failures inside the fifteen-minute window locks the account, and the
+/// lock refuses even the correct password (issue #42's acceptance criteria).
+#[sqlx::test]
+async fn ten_failures_inside_the_window_lock_the_account_even_against_the_right_password(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool);
+    create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    for _ in 0..10 {
+        let result =
+            verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+        assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+    }
+
+    let result = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now,
+    )
+    .await;
+    assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+}
+
+/// The lock lifts by itself fifteen minutes later, with no administrator in
+/// the loop (issue #42's own acceptance criterion) — proven by passing a
+/// later `now` rather than sleeping on the wall clock.
+#[sqlx::test]
+async fn the_lock_lifts_by_itself_fifteen_minutes_later(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let created = create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    for _ in 0..10 {
+        let result =
+            verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+        assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+    }
+
+    let still_locked = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now + chrono::Duration::minutes(14),
+    )
+    .await;
+    assert_eq!(
+        still_locked,
+        Err(PayrollAppError::OperatorCredentialInvalid)
+    );
+
+    let unlocked = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now + chrono::Duration::minutes(15),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unlocked, created);
+}
+
+/// A successful login resets the counter to zero (issue #42's own acceptance
+/// criterion): nine failures followed by a success must not leave the tenth
+/// wrong password after it locking the account.
+#[sqlx::test]
+async fn a_successful_login_resets_the_failure_counter(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let created = create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    for _ in 0..9 {
+        let result =
+            verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+        assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+    }
+
+    verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now,
+    )
+    .await
+    .unwrap();
+
+    // The counter is zero again, so one more wrong password is only the
+    // first failure of a new window, not the tenth of the old one.
+    let result = verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+    assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+
+    let verified = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified, created);
+}
+
+/// A locked account's refusal is indistinguishable from a wrong password
+/// (issue #42's own acceptance criterion): the same enum variant, carrying
+/// nothing that would let a caller tell "locked" apart from "wrong
+/// password" or "no such account".
+#[sqlx::test]
+async fn a_locked_account_refuses_identically_to_a_wrong_password(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    for _ in 0..10 {
+        verify_operator_credential(&db, "alice@example.com", "wrong password", now)
+            .await
+            .unwrap_err();
+    }
+
+    let locked = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "correct horse battery staple",
+        now,
+    )
+    .await;
+    let wrong_password =
+        verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+    let unknown_email =
+        verify_operator_credential(&db, "nobody@example.com", "anything", now).await;
+
+    assert_eq!(locked, Err(PayrollAppError::OperatorCredentialInvalid));
+    assert_eq!(
+        wrong_password,
+        Err(PayrollAppError::OperatorCredentialInvalid)
+    );
+    assert_eq!(
+        unknown_email,
+        Err(PayrollAppError::OperatorCredentialInvalid)
     );
 }
