@@ -120,7 +120,16 @@ async fn diagnose_missing_parent(
 
 /// Every EmployerMembership `operator_id` holds, active or revoked, in
 /// creation order — what lets an Operator belong to several Employers under
-/// a single identity and have all of them found.
+/// a single identity and have all of them found. Only that Operator's own
+/// memberships: the `WHERE` below is the explicit filter ADR-0017 names as
+/// the second layer, in place of a database policy.
+///
+/// `employer_id` breaks a tie on `created_at`, which is `now()` and so is
+/// the *transaction's* timestamp: two memberships granted in one
+/// transaction carry the identical instant, and without the tiebreaker
+/// PostgreSQL would be free to return them in either order on either call.
+/// Creation order is not observable inside one transaction anyway, so the
+/// tiebreaker costs nothing and makes the order total and stable.
 pub async fn list_employer_memberships(
     db: &SaltDatabase,
     operator_id: &OperatorId,
@@ -130,7 +139,7 @@ pub async fn list_employer_memberships(
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT employer_id, role, status FROM employer_membership
          WHERE operator_id = $1::uuid
-         ORDER BY created_at",
+         ORDER BY created_at, employer_id",
     )
     .bind(operator_id.as_str())
     .fetch_all(db.pool())
@@ -153,6 +162,15 @@ pub async fn list_employer_memberships(
 /// session and Operator status (ADR-0017, §0.7, §0.8): one indexed query,
 /// read fresh on every call and never cached, so a revocation grants nothing
 /// from its very next read with no invalidation mechanism to design.
+///
+/// It answers one question only — *does this membership grant this role
+/// right now* — and deliberately says nothing about the Operator. A
+/// disabled Operator still holds their memberships, and this function still
+/// reports them, because disabling is a fact about the Operator and not
+/// about the grant. Operator status is the **separate** condition ADR-0017
+/// puts in the same joined query, so a caller authorizing a request must
+/// check it too; `Some(role)` here is one of three answers that must all
+/// hold, never authorization on its own.
 pub async fn active_membership_role(
     db: &SaltDatabase,
     operator_id: &OperatorId,

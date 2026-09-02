@@ -5,9 +5,10 @@
 
 use payroll::{DayOfMonth, PeriodEndDay};
 use payroll_app::{
-    EmployerMembershipSnapshot, MembershipRole, MembershipStatus, PayrollAppError, SaltDatabase,
-    active_membership_role, create_employer, create_employer_membership, create_operator,
-    list_employer_memberships, revoke_employer_membership,
+    EmployerMembershipSnapshot, MembershipRole, MembershipStatus, OperatorStatus, PayrollAppError,
+    SaltDatabase, active_membership_role, create_employer, create_employer_membership,
+    create_operator, disable_operator, find_operator_by_email, list_employer_memberships,
+    revoke_employer_membership,
 };
 use sqlx::PgPool;
 
@@ -278,4 +279,155 @@ async fn an_operator_with_no_memberships_lists_none(pool: PgPool) {
     let memberships = list_employer_memberships(&db, &operator_id).await.unwrap();
 
     assert_eq!(memberships, vec![]);
+}
+
+/// ADR-0017's central claim, stated as a test: holding an `EmployerId`
+/// grants nothing. The Employer here exists and the Operator here exists —
+/// what is missing is only the membership, and that alone is the whole
+/// difference between access and none.
+#[sqlx::test]
+async fn an_employer_id_alone_grants_nothing_without_a_membership(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let stranger = create_operator(&db, "stranger@example.com", "Stranger", "a password")
+        .await
+        .unwrap();
+    let member = create_operator(&db, "member@example.com", "Member", "a password")
+        .await
+        .unwrap();
+    let employer_id = create_employer(&db, "Acme Corp", schedule(), "actor")
+        .await
+        .unwrap();
+    create_employer_membership(&db, &member, &employer_id, MembershipRole::Owner)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        active_membership_role(&db, &stranger, &employer_id)
+            .await
+            .unwrap(),
+        None,
+        "an Operator who is not a member holds no role, however real the Employer is"
+    );
+}
+
+/// The membership one Operator holds is not a membership another Operator
+/// holds. The `WHERE operator_id` filter ADR-0017 names as the second layer
+/// is what this pins.
+#[sqlx::test]
+async fn listing_returns_only_that_operators_own_memberships(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let alice = create_operator(&db, "alice@example.com", "Alice", "a password")
+        .await
+        .unwrap();
+    let bob = create_operator(&db, "bob@example.com", "Bob", "a password")
+        .await
+        .unwrap();
+    let alice_employer = create_employer(&db, "Alice Corp", schedule(), "actor")
+        .await
+        .unwrap();
+    let bob_employer = create_employer(&db, "Bob Corp", schedule(), "actor")
+        .await
+        .unwrap();
+    create_employer_membership(&db, &alice, &alice_employer, MembershipRole::Owner)
+        .await
+        .unwrap();
+    create_employer_membership(&db, &bob, &bob_employer, MembershipRole::Owner)
+        .await
+        .unwrap();
+
+    let alices = list_employer_memberships(&db, &alice).await.unwrap();
+
+    assert_eq!(
+        alices,
+        vec![EmployerMembershipSnapshot {
+            employer_id: alice_employer,
+            role: MembershipRole::Owner,
+            status: MembershipStatus::Active,
+        }]
+    );
+    assert_eq!(
+        active_membership_role(&db, &alice, &bob_employer)
+            .await
+            .unwrap(),
+        None,
+        "Alice holds no role for Bob's Employer"
+    );
+}
+
+/// Revocation is not a delete, so the pair still has a row, so the table's
+/// own primary key still refuses a second grant. This ticket ships no path
+/// back from a revoked membership to an active one, and this is what makes
+/// that true rather than merely intended.
+#[sqlx::test]
+async fn a_revoked_membership_cannot_be_re_granted(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let operator_id = create_operator(&db, "alice@example.com", "Alice", "a password")
+        .await
+        .unwrap();
+    let employer_id = create_employer(&db, "Acme Corp", schedule(), "actor")
+        .await
+        .unwrap();
+    create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
+        .await
+        .unwrap();
+    revoke_employer_membership(&db, &operator_id, &employer_id)
+        .await
+        .unwrap();
+
+    let result =
+        create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner).await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmployerMembershipAlreadyExists {
+            operator_id: operator_id.clone(),
+            employer_id: employer_id.clone(),
+        })
+    );
+    assert_eq!(
+        active_membership_role(&db, &operator_id, &employer_id)
+            .await
+            .unwrap(),
+        None,
+        "the refused re-grant left the revocation standing"
+    );
+}
+
+/// Disabling an Operator is a fact about the Operator, not about the grant:
+/// the membership survives untouched, and `active_membership_role` still
+/// reports it. That is deliberate and is why ADR-0017 makes Operator status
+/// a *separate* condition in the same joined query — this test exists so a
+/// later extractor's author reads the division rather than assuming a
+/// membership read alone is authorization.
+#[sqlx::test]
+async fn disabling_an_operator_does_not_touch_their_memberships(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let operator_id = create_operator(&db, "alice@example.com", "Alice", "a password")
+        .await
+        .unwrap();
+    let employer_id = create_employer(&db, "Acme Corp", schedule(), "actor")
+        .await
+        .unwrap();
+    create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
+        .await
+        .unwrap();
+
+    disable_operator(&db, &operator_id).await.unwrap();
+
+    assert_eq!(
+        active_membership_role(&db, &operator_id, &employer_id)
+            .await
+            .unwrap(),
+        Some(MembershipRole::Owner),
+        "the grant is unchanged; a caller authorizing a request must check Operator status too"
+    );
+    assert_eq!(
+        find_operator_by_email(&db, "alice@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        OperatorStatus::Disabled,
+        "and the Operator really is disabled, so the two facts are independent"
+    );
 }
