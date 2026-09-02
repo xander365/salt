@@ -25,6 +25,7 @@ mod payroll_run;
 mod prior_employment;
 mod reversal;
 mod sequencing;
+mod session;
 mod unsupported_deduction_status;
 mod year_to_date;
 
@@ -54,6 +55,9 @@ pub use payroll_run::{
 };
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use reversal::reverse_finalized_payroll;
+pub use session::{
+    CreatedSession, SessionId, SessionSnapshot, create_session, delete_session, load_session,
+};
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,
 };

@@ -257,6 +257,11 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
         "opening_balance",
         "prior_employment_declaration",
         "unsupported_deduction_declaration",
+        // A session is lazily deleted by the lookup that finds it expired
+        // (issue #44), so DELETE is exactly what its own lifecycle needs —
+        // unlike an Operator or an EmployerMembership, nothing here should
+        // ever be recoverable once its timers have passed.
+        "session",
         "payroll_run",
         "payroll_run_employment",
         "payroll_run_earning",

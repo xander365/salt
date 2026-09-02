@@ -978,9 +978,13 @@ name = "payroll-app"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "base64",
  "chrono",
+ "hex",
  "payroll",
+ "rand",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "uuid",
