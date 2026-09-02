@@ -150,9 +150,15 @@ pub async fn create_session(
 /// A valid row's `last_seen_at` is advanced to `now` only once it is more
 /// than [`idle_extension_threshold`] stale, and that write reaches the
 /// database on its own statement, outside whatever transaction the caller
-/// may itself hold open — a `Debug` build for the caller cannot roll it
-/// back, and eight hours of idle budget can absorb five minutes of drift
-/// without that write becoming a security property.
+/// may itself hold open — a rollback by the caller cannot undo it, and
+/// eight hours of idle budget can absorb five minutes of drift without that
+/// write becoming a security property.
+///
+/// That write only ever moves `last_seen_at` forward. Two requests reading
+/// the same session can each take their own clock reading, reach the
+/// database in the other's order, and the later-arriving one may hold the
+/// earlier time; without the guard it would shorten the idle window it was
+/// supposed to extend.
 pub async fn load_session(
     db: &SaltDatabase,
     token: &str,
@@ -180,11 +186,14 @@ pub async fn load_session(
     };
 
     if now > last_seen_at + idle_extension_threshold() {
-        sqlx::query("UPDATE session SET last_seen_at = $2 WHERE id = $1::uuid")
-            .bind(&id)
-            .bind(now)
-            .execute(db.pool())
-            .await?;
+        sqlx::query(
+            "UPDATE session SET last_seen_at = $2
+             WHERE id = $1::uuid AND last_seen_at < $2",
+        )
+        .bind(&id)
+        .bind(now)
+        .execute(db.pool())
+        .await?;
     }
 
     Ok(Some(SessionSnapshot {
