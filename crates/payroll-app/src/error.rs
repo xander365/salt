@@ -454,6 +454,24 @@ pub enum PayrollAppError {
     /// because a caller — or an attacker — must not be able to tell the
     /// three apart (issue #41).
     OperatorCredentialInvalid,
+    /// `CreateEmployerMembership` was asked to grant a pair that already has
+    /// a membership row, active or revoked (issue #43: unique on the pair).
+    EmployerMembershipAlreadyExists {
+        operator_id: OperatorId,
+        employer_id: EmployerId,
+    },
+    /// No EmployerMembership exists for this Operator and Employer.
+    EmployerMembershipNotFound {
+        operator_id: OperatorId,
+        employer_id: EmployerId,
+    },
+    /// `RevokeEmployerMembership` was asked to revoke a membership already
+    /// revoked. The revocation has already happened, so a second one would
+    /// record an act that did not.
+    EmployerMembershipAlreadyRevoked {
+        operator_id: OperatorId,
+        employer_id: EmployerId,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -854,6 +872,27 @@ impl std::fmt::Display for PayrollAppError {
             Self::OperatorNotFound(id) => write!(f, "no Operator exists with id {id}"),
             Self::OperatorAlreadyDisabled(id) => write!(f, "Operator {id} is already disabled"),
             Self::OperatorCredentialInvalid => write!(f, "the Operator credential is invalid"),
+            Self::EmployerMembershipAlreadyExists {
+                operator_id,
+                employer_id,
+            } => write!(
+                f,
+                "Operator {operator_id} already has a membership for Employer {employer_id}"
+            ),
+            Self::EmployerMembershipNotFound {
+                operator_id,
+                employer_id,
+            } => write!(
+                f,
+                "no EmployerMembership exists for Operator {operator_id} and Employer {employer_id}"
+            ),
+            Self::EmployerMembershipAlreadyRevoked {
+                operator_id,
+                employer_id,
+            } => write!(
+                f,
+                "the membership for Operator {operator_id} and Employer {employer_id} is already revoked"
+            ),
         }
     }
 }
@@ -934,7 +973,10 @@ impl std::error::Error for PayrollAppError {
             | Self::PasswordHashingFailed(_)
             | Self::OperatorNotFound(_)
             | Self::OperatorAlreadyDisabled(_)
-            | Self::OperatorCredentialInvalid => None,
+            | Self::OperatorCredentialInvalid
+            | Self::EmployerMembershipAlreadyExists { .. }
+            | Self::EmployerMembershipNotFound { .. }
+            | Self::EmployerMembershipAlreadyRevoked { .. } => None,
         }
     }
 }

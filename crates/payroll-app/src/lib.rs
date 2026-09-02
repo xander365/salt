@@ -18,6 +18,7 @@ mod error;
 mod finalize;
 mod freeze;
 mod ids;
+mod membership;
 mod opening_balance;
 mod operator;
 mod payroll_run;
@@ -37,6 +38,10 @@ pub use employment::{create_employment, get_employment_snapshot, void_employment
 pub use error::{PayrollAppError, ScheduleBoundedFact};
 pub use finalize::{
     FinalizationOutcome, FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run,
+};
+pub use membership::{
+    EmployerMembershipSnapshot, MembershipRole, MembershipStatus, active_membership_role,
+    create_employer_membership, list_employer_memberships, revoke_employer_membership,
 };
 pub use opening_balance::record_opening_balance;
 pub use operator::{

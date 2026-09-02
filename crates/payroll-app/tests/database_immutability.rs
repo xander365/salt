@@ -266,8 +266,9 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
     // Revisable but never erasable. An Operator is disabled by `status`
     // (issue #38 §6), and the audit trail keeps naming the id of one that is
     // gone, so `UPDATE` is exactly what disabling needs and `DELETE` is the
-    // one thing no use case should ever be able to do.
-    let no_delete = ["operator"];
+    // one thing no use case should ever be able to do. An EmployerMembership
+    // is revoked the same way (issue #43), for the same reason.
+    let no_delete = ["operator", "employer_membership"];
 
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
