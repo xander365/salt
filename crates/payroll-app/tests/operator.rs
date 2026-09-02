@@ -8,7 +8,7 @@ use payroll_app::{
     OperatorStatus, PayrollAppError, SaltDatabase, create_operator, disable_operator,
     find_operator_by_email, verify_operator_credential,
 };
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 
 #[sqlx::test]
 async fn an_operator_is_created_and_found_by_its_own_email(pool: PgPool) {
@@ -494,6 +494,21 @@ async fn the_lock_lifts_by_itself_fifteen_minutes_later(pool: PgPool) {
         Err(PayrollAppError::OperatorCredentialInvalid)
     );
 
+    // A locked wrong password receives the same refusal but must not restart
+    // the window. It is still the window opened by the first failure that
+    // ends at the fifteen-minute boundary below.
+    let locked_wrong_password = verify_operator_credential(
+        &db,
+        "alice@example.com",
+        "wrong password",
+        now + chrono::Duration::minutes(14),
+    )
+    .await;
+    assert_eq!(
+        locked_wrong_password,
+        Err(PayrollAppError::OperatorCredentialInvalid)
+    );
+
     let unlocked = verify_operator_credential(
         &db,
         "alice@example.com",
@@ -503,6 +518,68 @@ async fn the_lock_lifts_by_itself_fifteen_minutes_later(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(unlocked, created);
+}
+
+/// The decision to authenticate and the counter transition are one operation:
+/// a correct attempt that waits behind a concurrent tenth failure must inspect
+/// the committed lock and refuse. This holds the tenth failure uncommitted so
+/// the test distinguishes a locking read from a stale ordinary `SELECT`.
+#[sqlx::test]
+async fn a_correct_credential_waiting_behind_the_tenth_failure_is_refused(pool: PgPool) {
+    use tokio::sync::oneshot;
+
+    let db = SaltDatabase::from_pool(pool.clone());
+    let operator_id = create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    for _ in 0..9 {
+        let result =
+            verify_operator_credential(&db, "alice@example.com", "wrong password", now).await;
+        assert_eq!(result, Err(PayrollAppError::OperatorCredentialInvalid));
+    }
+
+    // This direct SQL is test control rather than use-case setup: only an
+    // uncommitted writer can put the credential check on the dangerous side
+    // of the read/write race that the row lock must close.
+    let mut holder = pool.acquire().await.unwrap();
+    let mut holder_tx = holder.begin().await.unwrap();
+    sqlx::query("UPDATE operator SET failed_attempt_count = 10 WHERE id = $1::uuid")
+        .bind(operator_id.as_str())
+        .execute(&mut *holder_tx)
+        .await
+        .unwrap();
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let racing_db = SaltDatabase::from_pool(pool);
+    let credential_check = tokio::spawn(async move {
+        started_sender.send(()).unwrap();
+        verify_operator_credential(
+            &racing_db,
+            "alice@example.com",
+            "correct horse battery staple",
+            now,
+        )
+        .await
+    });
+
+    started_receiver.await.unwrap();
+    // Without `FOR UPDATE`, the check reads the pre-lock count, completes
+    // Argon2id, then waits only when it tries to clear the counter below.
+    // With the lock it is already waiting at the read.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    holder_tx.commit().await.unwrap();
+
+    assert_eq!(
+        credential_check.await.unwrap(),
+        Err(PayrollAppError::OperatorCredentialInvalid)
+    );
 }
 
 /// A successful login resets the counter to zero (issue #42's own acceptance

@@ -257,13 +257,21 @@ pub async fn verify_operator_credential(
 
     type Row = (String, String, String, i32, Option<DateTime<Utc>>);
 
+    // The row lock makes deciding whether this account is locked and changing
+    // its counter one operation. Without it, a correct request and the tenth
+    // failure could both read nine; the failure could commit the lock and the
+    // already-approved success could then clear it and authenticate anyway.
+    // Holding this one account's row while Argon2 runs deliberately serializes
+    // credential attempts for that account, but not for any other Operator.
+    let mut tx = db.pool().begin().await?;
     let row: Option<Row> = sqlx::query_as(
         "SELECT id::text, password_verifier, status, failed_attempt_count, first_failure_at
          FROM operator
-         WHERE lower(email) = lower($1)",
+         WHERE lower(email) = lower($1)
+         FOR UPDATE",
     )
     .bind(email.trim())
-    .fetch_optional(db.pool())
+    .fetch_optional(&mut *tx)
     .await?;
 
     let Some((id, password_verifier, status, failed_attempt_count, first_failure_at)) = row else {
@@ -272,6 +280,7 @@ pub async fn verify_operator_credential(
         // optimised it away would remove the property without removing the
         // code that claims it.
         std::hint::black_box(password_matches(password, DUMMY_VERIFIER));
+        tx.commit().await?;
         return Err(PayrollAppError::OperatorCredentialInvalid);
     };
 
@@ -282,47 +291,52 @@ pub async fn verify_operator_credential(
         && first_failure_at
             .is_some_and(|first_failure_at| now < first_failure_at + lockout_window());
 
-    // Computed unconditionally, before the status and lock checks: a
-    // disabled or locked Operator's row must cost exactly what an active,
-    // unlocked one's does, or the response time itself would say which case
-    // this is.
+    // Computed unconditionally, before the status and lock checks. Every
+    // known-Operator path below also executes the same one-row UPDATE, even
+    // when it deliberately leaves the counter unchanged, so lock status does
+    // not add an observable database-work difference to a failed sign-in.
     let matches = password_matches(password, &password_verifier);
+    let successful = !locked && matches && status == "active";
+    let record_failure = !locked && !matches;
 
-    if locked || !matches || status != "active" {
-        // Only a wrong password against an unlocked row is a new failure to
-        // record: a lock already in effect does not need extending, and a
-        // disabled row's correct password is neither a failure nor a
-        // success worth touching the counter for.
-        if !locked && !matches {
-            record_failed_attempt(db, &id, now).await?;
-        }
-        return Err(PayrollAppError::OperatorCredentialInvalid);
+    // The UPDATE is deliberately unconditional for known accounts. On a
+    // locked refusal or a disabled Operator's correct password it preserves
+    // both columns, so neither can extend or clear a lock; it still gives
+    // those refusals the same database write as a wrong password.
+    record_credential_attempt(&mut tx, &id, now, successful, record_failure).await?;
+    tx.commit().await?;
+
+    if successful {
+        Ok(OperatorId::new(id))
+    } else {
+        Err(PayrollAppError::OperatorCredentialInvalid)
     }
-
-    record_successful_login(db, &id).await?;
-    Ok(OperatorId::new(id))
 }
 
-/// Records one failed attempt against `operator_id` at `now` (§ issue #42).
-/// A failure outside the fifteen-minute window a prior failure opened starts
-/// a new window at `now` with a count of one; a failure inside it just
-/// increments the count. Expressed as one `UPDATE` with `now` bound in,
-/// rather than read-then-write in Rust, so the decision is made against the
-/// same instant SQL's `first_failure_at` comparison uses.
-async fn record_failed_attempt(
-    db: &SaltDatabase,
+/// Records the already-verified credential result in the transaction holding
+/// this Operator's row lock. A failure outside the prior window starts a new
+/// one; a success clears it; every other result writes the existing values
+/// back unchanged so the failed known-account paths have matching database
+/// work without changing lockout semantics.
+async fn record_credential_attempt(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operator_id: &str,
     now: DateTime<Utc>,
+    successful: bool,
+    record_failure: bool,
 ) -> Result<(), PayrollAppError> {
     sqlx::query(
         "UPDATE operator SET
              failed_attempt_count = CASE
-                 WHEN first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes'
+                 WHEN $3 THEN 0
+                 WHEN $4 AND (first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes')
                      THEN 1
-                 ELSE failed_attempt_count + 1
+                 WHEN $4 THEN failed_attempt_count + 1
+                 ELSE failed_attempt_count
              END,
              first_failure_at = CASE
-                 WHEN first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes'
+                 WHEN $3 THEN NULL
+                 WHEN $4 AND (first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes')
                      THEN $2
                  ELSE first_failure_at
              END
@@ -330,24 +344,9 @@ async fn record_failed_attempt(
     )
     .bind(operator_id)
     .bind(now)
-    .execute(db.pool())
-    .await?;
-
-    Ok(())
-}
-
-/// Resets the lockout counter on a successful login (issue #42's own
-/// acceptance criterion): the next wrong password, if any, starts a fresh
-/// window rather than picking up where an old one left off.
-async fn record_successful_login(
-    db: &SaltDatabase,
-    operator_id: &str,
-) -> Result<(), PayrollAppError> {
-    sqlx::query(
-        "UPDATE operator SET failed_attempt_count = 0, first_failure_at = NULL WHERE id = $1::uuid",
-    )
-    .bind(operator_id)
-    .execute(db.pool())
+    .bind(successful)
+    .bind(record_failure)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
