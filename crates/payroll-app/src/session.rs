@@ -64,10 +64,20 @@ fn idle_extension_threshold() -> Duration {
 /// only place this ever appears — its plaintext bearer token. The database
 /// holds only [`hash_token`]'s digest of it; nothing here or later stores,
 /// logs, or `Debug`-prints the token itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CreatedSession {
     pub id: SessionId,
     pub token: String,
+}
+
+impl std::fmt::Debug for CreatedSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedSession")
+            .field("id", &self.id)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A live session read back by [`load_session`]: the two facts an
@@ -266,6 +276,19 @@ mod tests {
             result,
             Err(PayrollAppError::OperatorNotFound(unknown_operator))
         );
+    }
+
+    #[test]
+    fn a_created_sessions_debug_output_redacts_its_token() {
+        let session = CreatedSession {
+            id: SessionId::new(new_id()),
+            token: "a-live-bearer-token".to_owned(),
+        };
+
+        let debug = format!("{session:?}");
+
+        assert!(!debug.contains(&session.token));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
