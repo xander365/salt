@@ -3,8 +3,8 @@
 //! (issue #41, parent #38;
 //! `docs/domain/operator-auth-http-web-grill.md` §6, §9, §0.12a-§0.13).
 //! `VerifyOperatorCredential` also carries issue #42's lockout: ten failures
-//! inside a fifteen-minute window locks the account for that same fifteen
-//! minutes, self-lifting rather than administrator-cleared.
+//! inside a fifteen-minute window lock the account for fifteen minutes from
+//! the failure that locked it, self-lifting rather than administrator-cleared.
 //!
 //! An Operator is authenticated here; authorizing one against an Employer
 //! through `EmployerMembership` is a later spec's table, not this one's.
@@ -74,13 +74,40 @@ const MAX_PASSWORD_LENGTH: usize = 1024;
 const LOCKOUT_THRESHOLD: i32 = 10;
 
 /// Both the width of the window failures are counted in and how long a lock
-/// lasts (the issue's own words: "locks the account for fifteen minutes").
-/// Reusing one constant for both keeps the two facts from drifting apart:
-/// a lock lifts by itself exactly when the window that caused it would have
-/// reset anyway.
+/// lasts (the issue's own words: "Ten failed attempts within fifteen minutes
+/// locks the account for fifteen minutes"). Those are two separate fifteen
+/// minutes, not one: the window is measured from the first failure, and the
+/// lock from the tenth. `next_attempt_counters` restarts the window at the
+/// failure that locks, which is what makes the second of them a full fifteen
+/// minutes however far apart the ten failures were spread.
+///
+/// One constant serves both so they cannot drift apart, and it is the *only*
+/// statement of the duration: the counter transition is computed here in
+/// Rust and written as two bound values, rather than as an `INTERVAL` literal
+/// inside the UPDATE that would restate the same fifteen minutes in a second
+/// place.
 fn lockout_window() -> Duration {
     Duration::minutes(15)
 }
+
+/// How long [`verify_operator_credential`] waits for another attempt on the
+/// *same* Operator to release the row lock before refusing.
+///
+/// The row lock is what makes deciding the lock and moving the counter one
+/// operation, and it is deliberately held across Argon2id, so concurrent
+/// attempts on one account queue. Unbounded, that queue is a denial of
+/// service against the whole application rather than against one account:
+/// every waiter holds a connection out of a pool every other Employer's
+/// requests draw on. Bounding the wait turns "the pool is gone" into "this
+/// attempt is refused". Generous next to the tens of milliseconds one
+/// Argon2id verification costs, so an Operator with two open tabs never
+/// reaches it, and a caller cannot tell the refusal from a wrong password.
+const LOCK_WAIT_TIMEOUT: Duration = Duration::seconds(5);
+
+/// PostgreSQL's SQLSTATE for `lock_timeout` elapsing — the one database
+/// error [`verify_operator_credential`] answers as a refusal rather than
+/// propagating.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 /// The name PostgreSQL gives migration 0028's `UNIQUE INDEX
 /// operator_email_folded_key ON operator (lower(email))` — the index that
@@ -264,7 +291,20 @@ pub async fn verify_operator_credential(
     // Holding this one account's row while Argon2 runs deliberately serializes
     // credential attempts for that account, but not for any other Operator.
     let mut tx = db.pool().begin().await?;
-    let row: Option<Row> = sqlx::query_as(
+
+    // `SET LOCAL`, so it is scoped to this transaction and released with it
+    // rather than left on a pooled connection for the next use case to
+    // inherit. The value is a compile-time constant of this module, never a
+    // caller's, which is why it is formatted into the statement — `SET` takes
+    // no bind parameters.
+    sqlx::query(&format!(
+        "SET LOCAL lock_timeout = {}",
+        LOCK_WAIT_TIMEOUT.num_milliseconds()
+    ))
+    .execute(&mut *tx)
+    .await?;
+
+    let row: Result<Option<Row>, _> = sqlx::query_as(
         "SELECT id::text, password_verifier, status, failed_attempt_count, first_failure_at
          FROM operator
          WHERE lower(email) = lower($1)
@@ -272,7 +312,19 @@ pub async fn verify_operator_credential(
     )
     .bind(email.trim())
     .fetch_optional(&mut *tx)
-    .await?;
+    .await;
+
+    let row = match row {
+        Ok(row) => row,
+        // Too many attempts against this one account are already queued for
+        // its row. Refusing is the same opaque refusal as every other failure
+        // here and leaves the counters untouched, so a caller learns nothing
+        // and a queue cannot consume the pool the rest of Salt shares.
+        Err(err) if is_lock_not_available(&err) => {
+            return Err(PayrollAppError::OperatorCredentialInvalid);
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     let Some((id, password_verifier, status, failed_attempt_count, first_failure_at)) = row else {
         // `black_box` so the discarded result cannot become a reason to
@@ -284,9 +336,10 @@ pub async fn verify_operator_credential(
         return Err(PayrollAppError::OperatorCredentialInvalid);
     };
 
-    // Still within the window a prior failure opened: ten or more failures
-    // inside it locks the account until the window closes, at which point
-    // this is false again with no administrator having touched the row.
+    // Still within the open window: ten or more failures inside one window
+    // locks the account, and the failure that locked it restarted the window
+    // at itself, so this is the lock's own fifteen minutes. It becomes false
+    // again by the clock alone, with no administrator having touched the row.
     let locked = failed_attempt_count >= LOCKOUT_THRESHOLD
         && first_failure_at
             .is_some_and(|first_failure_at| now < first_failure_at + lockout_window());
@@ -296,14 +349,22 @@ pub async fn verify_operator_credential(
     // when it deliberately leaves the counter unchanged, so lock status does
     // not add an observable database-work difference to a failed sign-in.
     let matches = password_matches(password, &password_verifier);
-    let successful = !locked && matches && status == "active";
+    let active = operator_status_from_column(&status) == OperatorStatus::Active;
+    let successful = !locked && matches && active;
     let record_failure = !locked && !matches;
 
     // The UPDATE is deliberately unconditional for known accounts. On a
     // locked refusal or a disabled Operator's correct password it preserves
     // both columns, so neither can extend or clear a lock; it still gives
     // those refusals the same database write as a wrong password.
-    record_credential_attempt(&mut tx, &id, now, successful, record_failure).await?;
+    let next = next_attempt_counters(
+        failed_attempt_count,
+        first_failure_at,
+        now,
+        successful,
+        record_failure,
+    );
+    write_attempt_counters(&mut tx, &id, next).await?;
     tx.commit().await?;
 
     if successful {
@@ -313,43 +374,100 @@ pub async fn verify_operator_credential(
     }
 }
 
-/// Records the already-verified credential result in the transaction holding
-/// this Operator's row lock. A failure outside the prior window starts a new
-/// one; a success clears it; every other result writes the existing values
-/// back unchanged so the failed known-account paths have matching database
-/// work without changing lockout semantics.
-async fn record_credential_attempt(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    operator_id: &str,
+/// The Operator row's two lockout columns: how many failures the current
+/// window holds, and when that window opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttemptCounters {
+    failed_attempt_count: i32,
+    first_failure_at: Option<DateTime<Utc>>,
+}
+
+/// The counter values an attempt leaves behind, decided in Rust from the
+/// values read under this Operator's row lock. Pure, so the whole lockout
+/// rule is provable without a database and stated in exactly one place —
+/// the UPDATE that follows only writes what this returns.
+///
+/// A success clears the window. A counted failure either opens a new window
+/// (there was none, or the previous one has closed) or extends the current
+/// one. The failure that reaches [`LOCKOUT_THRESHOLD`] **restarts** the
+/// window at `now`, which is what makes the lock last the full fifteen
+/// minutes the issue names rather than only the remainder of a window that
+/// ten slowly-spread failures may have all but used up. Any other outcome —
+/// a locked account, or a disabled Operator's correct password — leaves both
+/// columns exactly as they were, so neither can extend nor clear a lock.
+fn next_attempt_counters(
+    failed_attempt_count: i32,
+    first_failure_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     successful: bool,
     record_failure: bool,
+) -> AttemptCounters {
+    if successful {
+        return AttemptCounters {
+            failed_attempt_count: 0,
+            first_failure_at: None,
+        };
+    }
+
+    if !record_failure {
+        return AttemptCounters {
+            failed_attempt_count,
+            first_failure_at,
+        };
+    }
+
+    let window_is_open =
+        first_failure_at.is_some_and(|opened_at| now < opened_at + lockout_window());
+
+    let failed_attempt_count = if window_is_open {
+        failed_attempt_count.saturating_add(1)
+    } else {
+        1
+    };
+
+    AttemptCounters {
+        failed_attempt_count,
+        // The failure that locks starts the lock's own fifteen minutes; a
+        // failure below the threshold leaves the window it is counted in
+        // where it was, so ten failures must still fall inside one window.
+        first_failure_at: if !window_is_open || failed_attempt_count >= LOCKOUT_THRESHOLD {
+            Some(now)
+        } else {
+            first_failure_at
+        },
+    }
+}
+
+/// Writes [`next_attempt_counters`]'s decision in the transaction holding
+/// this Operator's row lock. It carries no rule of its own: both values are
+/// bound, so the fifteen minutes exists only in [`lockout_window`] and
+/// cannot drift into a second statement of itself here.
+async fn write_attempt_counters(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operator_id: &str,
+    counters: AttemptCounters,
 ) -> Result<(), PayrollAppError> {
     sqlx::query(
-        "UPDATE operator SET
-             failed_attempt_count = CASE
-                 WHEN $3 THEN 0
-                 WHEN $4 AND (first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes')
-                     THEN 1
-                 WHEN $4 THEN failed_attempt_count + 1
-                 ELSE failed_attempt_count
-             END,
-             first_failure_at = CASE
-                 WHEN $3 THEN NULL
-                 WHEN $4 AND (first_failure_at IS NULL OR $2 >= first_failure_at + INTERVAL '15 minutes')
-                     THEN $2
-                 ELSE first_failure_at
-             END
+        "UPDATE operator SET failed_attempt_count = $2, first_failure_at = $3
          WHERE id = $1::uuid",
     )
     .bind(operator_id)
-    .bind(now)
-    .bind(successful)
-    .bind(record_failure)
+    .bind(counters.failed_attempt_count)
+    .bind(counters.first_failure_at)
     .execute(&mut **tx)
     .await?;
 
     Ok(())
+}
+
+/// True when `err` is PostgreSQL refusing to keep waiting for a row lock
+/// (SQLSTATE 55P03), which is `LOCK_WAIT_TIMEOUT` elapsing and not a fact
+/// about the Operator being verified.
+fn is_lock_not_available(err: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db_err) = err else {
+        return false;
+    };
+    db_err.code().as_deref() == Some(LOCK_NOT_AVAILABLE)
 }
 
 /// Hashes `password` to an Argon2id PHC string (§0.13), with a fresh random
@@ -458,5 +576,89 @@ mod tests {
     #[test]
     fn a_malformed_stored_verifier_is_a_non_match_not_a_panic() {
         assert!(!password_matches("anything", "not a phc string"));
+    }
+
+    /// The whole lockout rule, proven without a database: the failure that
+    /// reaches the threshold restarts the window at itself, so the lock that
+    /// follows lasts a full [`lockout_window`] however far apart the ten
+    /// failures were spread.
+    #[test]
+    fn the_failure_that_locks_restarts_the_window_at_itself() {
+        let opened_at = DateTime::UNIX_EPOCH;
+        let locked_at = opened_at + Duration::minutes(14);
+
+        let next = next_attempt_counters(9, Some(opened_at), locked_at, false, true);
+
+        assert_eq!(
+            next,
+            AttemptCounters {
+                failed_attempt_count: LOCKOUT_THRESHOLD,
+                first_failure_at: Some(locked_at),
+            }
+        );
+    }
+
+    /// A failure below the threshold is counted inside the window it arrived
+    /// in and leaves that window's start where it was — otherwise every
+    /// failure would push the window forward and ten of them could never
+    /// fall inside one.
+    #[test]
+    fn a_failure_below_the_threshold_leaves_its_window_where_it_opened() {
+        let opened_at = DateTime::UNIX_EPOCH;
+
+        let inside = next_attempt_counters(
+            4,
+            Some(opened_at),
+            opened_at + Duration::minutes(14),
+            false,
+            true,
+        );
+        assert_eq!(
+            inside,
+            AttemptCounters {
+                failed_attempt_count: 5,
+                first_failure_at: Some(opened_at),
+            }
+        );
+
+        let after = next_attempt_counters(
+            4,
+            Some(opened_at),
+            opened_at + Duration::minutes(15),
+            false,
+            true,
+        );
+        assert_eq!(
+            after,
+            AttemptCounters {
+                failed_attempt_count: 1,
+                first_failure_at: Some(opened_at + Duration::minutes(15)),
+            }
+        );
+    }
+
+    /// A success clears both columns; anything that is neither a success nor
+    /// a counted failure — a locked account, a disabled Operator's correct
+    /// password — leaves both exactly as they were.
+    #[test]
+    fn a_success_clears_the_window_and_an_uncounted_outcome_leaves_it_alone() {
+        let opened_at = DateTime::UNIX_EPOCH;
+        let now = opened_at + Duration::minutes(1);
+
+        assert_eq!(
+            next_attempt_counters(9, Some(opened_at), now, true, false),
+            AttemptCounters {
+                failed_attempt_count: 0,
+                first_failure_at: None,
+            }
+        );
+
+        assert_eq!(
+            next_attempt_counters(LOCKOUT_THRESHOLD, Some(opened_at), now, false, false),
+            AttemptCounters {
+                failed_attempt_count: LOCKOUT_THRESHOLD,
+                first_failure_at: Some(opened_at),
+            }
+        );
     }
 }
