@@ -132,6 +132,23 @@ async fn it_lists_only_the_operators_active_employers_named_and_roled() {
     .await
     .unwrap();
 
+    let second_own_employer = payroll_app::create_employer(
+        &db,
+        "Beta Corp",
+        payroll::PaySchedule::new(payroll::PeriodEndDay::LastDayOfMonth),
+        "test-setup",
+    )
+    .await
+    .unwrap();
+    payroll_app::create_employer_membership(
+        &db,
+        &operator_id,
+        &second_own_employer,
+        MembershipRole::PayrollOperator,
+    )
+    .await
+    .unwrap();
+
     let revoked_employer = payroll_app::create_employer(
         &db,
         "Revoked Co",
@@ -181,10 +198,21 @@ async fn it_lists_only_the_operators_active_employers_named_and_roled() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     let employers = json["employers"].as_array().unwrap();
-    assert_eq!(employers.len(), 1);
-    assert_eq!(employers[0]["employerId"], own_employer.to_string());
-    assert_eq!(employers[0]["name"], "Acme Corp");
-    assert_eq!(employers[0]["role"], "owner");
+    assert_eq!(employers.len(), 2);
+
+    let first = employers
+        .iter()
+        .find(|employer| employer["employerId"] == own_employer.to_string())
+        .expect("the Owner membership is returned");
+    assert_eq!(first["name"], "Acme Corp");
+    assert_eq!(first["role"], "owner");
+
+    let second = employers
+        .iter()
+        .find(|employer| employer["employerId"] == second_own_employer.to_string())
+        .expect("the PayrollOperator membership is returned");
+    assert_eq!(second["name"], "Beta Corp");
+    assert_eq!(second["role"], "payrollOperator");
 }
 
 #[tokio::test]

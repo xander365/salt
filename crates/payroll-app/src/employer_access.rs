@@ -84,7 +84,7 @@ pub enum EmployerAccess {
 ///
 /// A valid session's `last_seen_at` is extended exactly as
 /// [`crate::load_session`]'s own doc describes — only once it is more than
-/// [`idle_extension_threshold`] stale, on its own statement outside any
+/// `idle_extension_threshold()` stale, on its own statement outside any
 /// transaction the caller holds — because this function is, for every
 /// Employer-scoped route, what `load_session` is for `GET /api/session`:
 /// the read that proves the session is still live. Skipping the extension
@@ -128,6 +128,13 @@ pub async fn resolve_employer_access(
         return Ok(EmployerAccess::Unauthenticated);
     };
 
+    if operator_status_from_column(&operator_status) != OperatorStatus::Active {
+        return Ok(EmployerAccess::Unauthenticated);
+    }
+
+    // Only an authenticated, active Operator's request counts as activity.
+    // In particular, repeated requests with a disabled Operator's cookie
+    // must not keep advancing a session that can no longer authenticate.
     if now > last_seen_at + idle_extension_threshold() {
         sqlx::query(
             "UPDATE session SET last_seen_at = $2
@@ -137,10 +144,6 @@ pub async fn resolve_employer_access(
         .bind(now)
         .execute(db.pool())
         .await?;
-    }
-
-    if operator_status_from_column(&operator_status) != OperatorStatus::Active {
-        return Ok(EmployerAccess::Unauthenticated);
     }
 
     Ok(match role {
@@ -155,6 +158,7 @@ pub async fn resolve_employer_access(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Timelike;
     use payroll::{DayOfMonth, PaySchedule, PeriodEndDay};
     use sqlx::PgPool;
 
@@ -163,6 +167,12 @@ mod tests {
     use crate::membership::{create_employer_membership, revoke_employer_membership};
     use crate::operator::{create_operator, disable_operator};
     use crate::session::create_session;
+
+    fn test_now() -> DateTime<Utc> {
+        Utc::now()
+            .with_nanosecond(0)
+            .expect("zero nanoseconds is always valid")
+    }
 
     async fn an_employer(db: &SaltDatabase) -> EmployerId {
         create_employer(
@@ -192,7 +202,7 @@ mod tests {
         let employer_id = an_employer(&db).await;
 
         let access =
-            resolve_employer_access(&db, "not-a-real-token", employer_id.as_str(), Utc::now())
+            resolve_employer_access(&db, "not-a-real-token", employer_id.as_str(), test_now())
                 .await
                 .unwrap();
 
@@ -204,9 +214,9 @@ mod tests {
         let db = SaltDatabase::from_pool(pool);
         let employer_id = an_employer(&db).await;
         let operator_id = an_operator(&db).await;
-        let session = create_session(&db, &operator_id, Utc::now()).await.unwrap();
+        let session = create_session(&db, &operator_id, test_now()).await.unwrap();
 
-        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), Utc::now())
+        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), test_now())
             .await
             .unwrap();
 
@@ -221,9 +231,9 @@ mod tests {
         create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
             .await
             .unwrap();
-        let session = create_session(&db, &operator_id, Utc::now()).await.unwrap();
+        let session = create_session(&db, &operator_id, test_now()).await.unwrap();
 
-        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), Utc::now())
+        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), test_now())
             .await
             .unwrap();
 
@@ -248,9 +258,9 @@ mod tests {
         revoke_employer_membership(&db, &operator_id, &employer_id)
             .await
             .unwrap();
-        let session = create_session(&db, &operator_id, Utc::now()).await.unwrap();
+        let session = create_session(&db, &operator_id, test_now()).await.unwrap();
 
-        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), Utc::now())
+        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), test_now())
             .await
             .unwrap();
 
@@ -258,21 +268,34 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn a_disabled_operator_is_unauthenticated_even_with_a_membership(pool: PgPool) {
-        let db = SaltDatabase::from_pool(pool);
+    async fn a_disabled_operator_is_unauthenticated_and_does_not_extend_the_session(pool: PgPool) {
+        let db = SaltDatabase::from_pool(pool.clone());
         let employer_id = an_employer(&db).await;
         let operator_id = an_operator(&db).await;
         create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
             .await
             .unwrap();
-        let session = create_session(&db, &operator_id, Utc::now()).await.unwrap();
+        let created_at = test_now();
+        let session = create_session(&db, &operator_id, created_at).await.unwrap();
         disable_operator(&db, &operator_id).await.unwrap();
 
-        let access = resolve_employer_access(&db, &session.token, employer_id.as_str(), Utc::now())
-            .await
-            .unwrap();
+        let access = resolve_employer_access(
+            &db,
+            &session.token,
+            employer_id.as_str(),
+            created_at + chrono::Duration::minutes(6),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(access, EmployerAccess::Unauthenticated);
+        let last_seen_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT last_seen_at FROM session WHERE id = $1::uuid")
+                .bind(session.id.as_str())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(last_seen_at.timestamp(), created_at.timestamp());
     }
 
     #[sqlx::test]
@@ -283,7 +306,7 @@ mod tests {
         create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
             .await
             .unwrap();
-        let created_at = Utc::now();
+        let created_at = test_now();
         let session = create_session(&db, &operator_id, created_at).await.unwrap();
         let past_the_absolute_timer =
             created_at + chrono::Duration::hours(12) + chrono::Duration::seconds(1);
@@ -308,6 +331,60 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn a_session_is_unauthenticated_exactly_on_its_idle_deadline(pool: PgPool) {
+        let db = SaltDatabase::from_pool(pool);
+        let employer_id = an_employer(&db).await;
+        let operator_id = an_operator(&db).await;
+        create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
+            .await
+            .unwrap();
+        let created_at = test_now();
+        let session = create_session(&db, &operator_id, created_at).await.unwrap();
+
+        let access = resolve_employer_access(
+            &db,
+            &session.token,
+            employer_id.as_str(),
+            created_at + chrono::Duration::hours(8),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(access, EmployerAccess::Unauthenticated);
+    }
+
+    #[sqlx::test]
+    async fn a_session_is_unauthenticated_exactly_on_its_absolute_deadline(pool: PgPool) {
+        let db = SaltDatabase::from_pool(pool);
+        let employer_id = an_employer(&db).await;
+        let operator_id = an_operator(&db).await;
+        create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
+            .await
+            .unwrap();
+        let created_at = test_now();
+        let session = create_session(&db, &operator_id, created_at).await.unwrap();
+
+        let six_hours_later = created_at + chrono::Duration::hours(6);
+        assert!(matches!(
+            resolve_employer_access(&db, &session.token, employer_id.as_str(), six_hours_later,)
+                .await
+                .unwrap(),
+            EmployerAccess::Member { .. }
+        ));
+
+        let access = resolve_employer_access(
+            &db,
+            &session.token,
+            employer_id.as_str(),
+            created_at + chrono::Duration::hours(12),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(access, EmployerAccess::Unauthenticated);
+    }
+
+    #[sqlx::test]
     async fn a_membership_for_a_different_employer_is_not_a_member(pool: PgPool) {
         let db = SaltDatabase::from_pool(pool);
         let own_employer = an_employer(&db).await;
@@ -316,10 +393,10 @@ mod tests {
         create_employer_membership(&db, &operator_id, &own_employer, MembershipRole::Owner)
             .await
             .unwrap();
-        let session = create_session(&db, &operator_id, Utc::now()).await.unwrap();
+        let session = create_session(&db, &operator_id, test_now()).await.unwrap();
 
         let access =
-            resolve_employer_access(&db, &session.token, other_employer.as_str(), Utc::now())
+            resolve_employer_access(&db, &session.token, other_employer.as_str(), test_now())
                 .await
                 .unwrap();
 
@@ -334,16 +411,29 @@ mod tests {
         create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
             .await
             .unwrap();
-        let created_at = Utc::now();
+        let created_at = test_now();
         let session = create_session(&db, &operator_id, created_at).await.unwrap();
+
+        let at_threshold = created_at + chrono::Duration::minutes(5);
+        resolve_employer_access(&db, &session.token, employer_id.as_str(), at_threshold)
+            .await
+            .unwrap();
+
+        let last_seen_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT last_seen_at FROM session WHERE id = $1::uuid")
+                .bind(session.id.as_str())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(last_seen_at.timestamp(), created_at.timestamp());
 
         let now_stale = created_at + chrono::Duration::minutes(6);
         resolve_employer_access(&db, &session.token, employer_id.as_str(), now_stale)
             .await
             .unwrap();
 
-        let (last_seen_at,): (DateTime<Utc>,) =
-            sqlx::query_as("SELECT last_seen_at FROM session WHERE id = $1::uuid")
+        let last_seen_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT last_seen_at FROM session WHERE id = $1::uuid")
                 .bind(session.id.as_str())
                 .fetch_one(&pool)
                 .await

@@ -62,7 +62,7 @@ pub(crate) fn idle_extension_threshold() -> Duration {
 
 /// What [`create_session`] hands back: the new session's id, and — the
 /// only place this ever appears — its plaintext bearer token. The database
-/// holds only [`hash_token`]'s digest of it; nothing here or later stores,
+/// holds only `hash_token`'s digest of it; nothing here or later stores,
 /// logs, or `Debug`-prints the token itself.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CreatedSession {
@@ -96,7 +96,7 @@ pub struct SessionSnapshot {
 /// clock).
 ///
 /// The token is minted here, from the operating system's cryptographic
-/// random source ([`OsRng`]), and only [`hash_token`]'s SHA-256 digest of it
+/// random source ([`OsRng`]), and only `hash_token`'s SHA-256 digest of it
 /// is written to `session.token_hash`. The plaintext lives in the returned
 /// [`CreatedSession`] and nowhere else Salt keeps.
 ///
@@ -125,7 +125,7 @@ pub async fn create_session(
 /// disabling an Operator after credential verification cannot leave a later
 /// login request holding a freshly minted session. The pruning runs before
 /// the insert, so the row this call is about to mint — its `expires_at`
-/// freshly `now + `[`absolute_timeout`]`()` — is never itself a candidate,
+/// freshly `now + absolute_timeout()` — is never itself a candidate,
 /// and a refusal rolls the pruning back with it.
 ///
 /// `None` means the Operator was not active when this statement ran. The
@@ -199,15 +199,15 @@ async fn insert_session(
 ///
 /// Both timers are checked inside the one `SELECT` that decides validity —
 /// `expires_at` (the absolute deadline [`create_session`] fixed) and
-/// `last_seen_at` + [`idle_timeout`] (checked live, never stored) — so an
+/// `last_seen_at + idle_timeout()` (checked live, never stored) — so an
 /// expired row is never honoured even before anything deletes it. When that
-/// `SELECT` finds nothing, [`delete_expired`] re-checks the same two
+/// `SELECT` finds nothing, `delete_expired` re-checks the same two
 /// conditions and removes the row if it is the reason: lazy deletion by the
 /// lookup that found it expired, with no sweeper and no cron (this module's
 /// own instruction).
 ///
 /// A valid row's `last_seen_at` is advanced to `now` only once it is more
-/// than [`idle_extension_threshold`] stale, and that write reaches the
+/// than `idle_extension_threshold()` stale, and that write reaches the
 /// database on its own statement, outside whatever transaction the caller
 /// may itself hold open — a rollback by the caller cannot undo it, and
 /// eight hours of idle budget can absorb five minutes of drift without that

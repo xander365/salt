@@ -40,6 +40,10 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 /// headers, and logged inside the request-id span — rather than a panic
 /// bypassing them the way it would if either sat inside the catch instead.
 pub fn build_router(state: AppState) -> Router {
+    finish_router(production_routes(), state)
+}
+
+fn production_routes() -> Router<AppState> {
     #[allow(unused_mut, reason = "reassigned only when test-support is enabled")]
     let mut router = Router::new()
         .route("/api/health", get(health))
@@ -56,17 +60,13 @@ pub fn build_router(state: AppState) -> Router {
     {
         router = router
             .route("/__test/echo", axum::routing::post(test_support::echo))
-            .route("/__test/panic", get(test_support::panic))
-            .route(
-                "/__test/authorized-employer/{employer_id}",
-                get(test_support::authorized_employer_probe),
-            )
-            .route(
-                "/__test/authorized-employer/{employer_id}/owner-only",
-                get(test_support::owner_only_probe),
-            );
+            .route("/__test/panic", get(test_support::panic));
     }
 
+    router
+}
+
+fn finish_router(router: Router<AppState>, state: AppState) -> Router {
     router
         .fallback(not_found)
         .layer(middleware::from_fn(require_salt_request_header))
@@ -76,6 +76,30 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(request_id::middleware))
         .with_state(state)
+}
+
+/// The issue #47 probes are mounted only in this crate's unit-test binary.
+/// Unlike a Cargo feature, `cfg(test)` cannot be selected for the deployed
+/// library or server binary, which mechanically enforces the ticket's rule
+/// that no authorization probe ships merely to be tested.
+#[cfg(test)]
+pub(crate) fn build_authorization_probe_router(state: AppState) -> Router {
+    finish_router(
+        production_routes()
+            .route(
+                "/__test/authorized-employer/{employer_id}",
+                get(authorization_test_support::authorized_employer_probe),
+            )
+            .route(
+                "/__test/authorized-employer/{employer_id}/owner-only",
+                get(authorization_test_support::owner_only_probe),
+            )
+            .route(
+                "/__test/authorized-employer/{employer_id}/resources/{resource_id}",
+                get(authorization_test_support::authorized_employer_probe),
+            ),
+        state,
+    )
 }
 
 /// Liveness: answers without touching the database (issue #45's own
@@ -181,23 +205,17 @@ fn panic_message(payload: &(dyn std::any::Any + Send + 'static)) -> String {
     }
 }
 
-/// Routes that exist only so this crate's own tests (`tests/router.rs`,
-/// `tests/authorized_employer.rs`) can drive [`require_salt_request_header`],
-/// the body limit, [`CatchPanicLayer`] and — from issue #47 —
-/// [`crate::authorized_employer::AuthorizedEmployerContext`] against
-/// something real: this spec ships no mutating, panic-prone or
-/// Employer-scoped production route for them to exercise otherwise. Never
-/// compiled into the binary: `test-support` is enabled only by this crate's
-/// own `dev-dependencies` (see `Cargo.toml`).
+/// Routes that exist only so this crate's own `tests/router.rs` can drive
+/// [`require_salt_request_header`], the body limit and [`CatchPanicLayer`]
+/// against something real. Authorization probes are stricter: they live in
+/// [`authorization_test_support`] under `cfg(test)`, not this selectable
+/// feature, because issue #47 explicitly requires them to be mounted only in
+/// a test binary.
 #[cfg(feature = "test-support")]
 mod test_support {
     use axum::Json;
     use axum::body::Bytes;
-    use payroll_app::MembershipRole;
     use serde_json::{Value, json};
-
-    use crate::authorized_employer::AuthorizedEmployerContext;
-    use crate::error::ApiError;
 
     pub async fn echo(body: Bytes) -> Json<Value> {
         Json(json!({ "bytes": body.len() }))
@@ -206,6 +224,16 @@ mod test_support {
     pub async fn panic() -> Json<Value> {
         panic!("deliberate panic from salt-server's own test-support route")
     }
+}
+
+#[cfg(test)]
+mod authorization_test_support {
+    use axum::Json;
+    use payroll_app::MembershipRole;
+    use serde_json::{Value, json};
+
+    use crate::authorized_employer::AuthorizedEmployerContext;
+    use crate::error::ApiError;
 
     /// Proves [`AuthorizedEmployerContext`] itself: any active member
     /// reaches this route and gets back exactly what the extractor resolved
