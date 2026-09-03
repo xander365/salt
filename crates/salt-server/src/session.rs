@@ -104,9 +104,10 @@ pub(crate) async fn login(
         .await
         .map_err(ApiError::internal)?;
 
-    let created = payroll_app::create_session(state.db(), &operator_id, now)
+    let created = payroll_app::create_session_for_active_operator(state.db(), &operator_id, now)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::invalid_credentials)?;
 
     let mut response = ok_body().into_response();
     response.headers_mut().insert(

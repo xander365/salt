@@ -109,6 +109,37 @@ pub async fn create_session(
     operator_id: &OperatorId,
     now: DateTime<Utc>,
 ) -> Result<CreatedSession, PayrollAppError> {
+    insert_session(db, operator_id, now, false)
+        .await?
+        .ok_or_else(|| PayrollAppError::OperatorNotFound(operator_id.clone()))
+}
+
+/// Opens a new session only if `operator_id` currently names an active
+/// Operator. This is the session-minting half of login: its active-status
+/// check and insert share one SQL statement, so disabling an Operator after
+/// credential verification cannot leave a later login request holding a
+/// freshly minted session.
+///
+/// `None` means the Operator was not active when this statement ran. The
+/// caller deliberately maps that to the same opaque credential refusal as a
+/// disabled Operator discovered during password verification. Unlike
+/// [`create_session`], this is not a general session-table operation: issue
+/// #44 deliberately permits that operation to record a session for a
+/// disabled Operator because it authenticates nothing itself.
+pub async fn create_session_for_active_operator(
+    db: &SaltDatabase,
+    operator_id: &OperatorId,
+    now: DateTime<Utc>,
+) -> Result<Option<CreatedSession>, PayrollAppError> {
+    insert_session(db, operator_id, now, true).await
+}
+
+async fn insert_session(
+    db: &SaltDatabase,
+    operator_id: &OperatorId,
+    now: DateTime<Utc>,
+    require_active_operator: bool,
+) -> Result<Option<CreatedSession>, PayrollAppError> {
     let token = generate_token();
     let token_hash = hash_token(&token);
     let id = SessionId::new(new_id());
@@ -117,21 +148,25 @@ pub async fn create_session(
     let inserted = sqlx::query(
         "INSERT INTO session (id, operator_id, token_hash, created_at, last_seen_at, expires_at)
          SELECT $1::uuid, $2::uuid, $3, $4, $4, $5
-         WHERE EXISTS (SELECT 1 FROM operator WHERE id = $2::uuid)",
+         WHERE EXISTS (
+             SELECT 1 FROM operator
+             WHERE id = $2::uuid AND (NOT $6 OR status = 'active')
+         )",
     )
     .bind(id.as_str())
     .bind(operator_id.as_str())
     .bind(&token_hash)
     .bind(now)
     .bind(expires_at)
+    .bind(require_active_operator)
     .execute(db.pool())
     .await?;
 
     if inserted.rows_affected() == 0 {
-        return Err(PayrollAppError::OperatorNotFound(operator_id.clone()));
+        return Ok(None);
     }
 
-    Ok(CreatedSession { id, token })
+    Ok(Some(CreatedSession { id, token }))
 }
 
 /// Looks `token` up and returns the [`SessionSnapshot`] it names, or `None`

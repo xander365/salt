@@ -57,7 +57,7 @@ pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use reversal::reverse_finalized_payroll;
 pub use session::{
     CreatedSession, SessionId, SessionSnapshot, clear_expired_sessions, create_session,
-    delete_session, load_session,
+    create_session_for_active_operator, delete_session, load_session,
 };
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,

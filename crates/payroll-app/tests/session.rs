@@ -5,7 +5,7 @@
 use chrono::{DateTime, Duration, SubsecRound, Utc};
 use payroll_app::{
     OperatorId, SaltDatabase, clear_expired_sessions, create_operator, create_session,
-    delete_session, load_session,
+    create_session_for_active_operator, delete_session, load_session,
 };
 use sqlx::PgPool;
 
@@ -194,6 +194,21 @@ async fn creating_a_session_for_a_disabled_operator_still_succeeds(pool: PgPool)
     let result = create_session(&db, &operator_id, a_clock_reading()).await;
 
     assert!(result.is_ok());
+}
+
+#[sqlx::test]
+async fn login_session_creation_refuses_a_disabled_operator(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let operator_id = an_operator(&db).await;
+    payroll_app::disable_operator(&db, &operator_id)
+        .await
+        .unwrap();
+
+    let result = create_session_for_active_operator(&db, &operator_id, a_clock_reading())
+        .await
+        .unwrap();
+
+    assert_eq!(result, None);
 }
 
 // --- Timer boundaries -------------------------------------------------
