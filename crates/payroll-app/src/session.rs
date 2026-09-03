@@ -266,7 +266,7 @@ pub async fn load_session(
 /// checks, recomputed rather than reused so this is safe to call whenever
 /// that `SELECT` found nothing, including when `token_hash` names no row at
 /// all (the `DELETE` then matches nothing and is a no-op).
-async fn delete_expired(
+pub(crate) async fn delete_expired(
     db: &SaltDatabase,
     token_hash: &str,
     now: DateTime<Utc>,

@@ -2,10 +2,10 @@
 //! `docs/domain/operator-auth-http-web-grill.md` §0.7-§0.10). An Axum
 //! extractor a handler names in its arguments to get proof of who is
 //! calling, which Employer they are authorized for, and with what role — and
-//! the *only* way a handler ever obtains an `EmployerId` to act on. There is
-//! no other route in this crate that hands one out: a handler that skips
-//! this extractor has no `EmployerId` to pass to `payroll-app`, so it does
-//! not compile.
+//! the *only* way a handler ever obtains an Employer capability to act on.
+//! A handler that skips this extractor cannot construct an
+//! [`AuthorizedEmployerId`] from a path segment, so it cannot pass one to a
+//! future Employer-scoped `payroll-app` use case.
 //!
 //! The one joined query behind it — session, Operator status and
 //! `EmployerMembership`, with no caching — lives in `payroll-app`
@@ -16,7 +16,7 @@
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use chrono::Utc;
-use payroll_app::{EmployerAccess, EmployerId, MembershipRole, OperatorId};
+use payroll_app::{AuthorizedEmployerId, EmployerAccess, MembershipRole, OperatorId};
 
 use crate::error::ApiError;
 use crate::session::session_token;
@@ -24,8 +24,9 @@ use crate::state::AppState;
 
 /// Proof that the caller is signed in, active, and holds an active
 /// `EmployerMembership` for `employer_id` — resolved fresh on every request,
-/// never cached (ADR-0017). A handler takes the `EmployerId` it needs out of
-/// this struct rather than out of the URL path directly, and calls
+/// never cached (ADR-0017). A handler takes the authorized Employer
+/// capability it needs out of this struct rather than out of the URL path
+/// directly, and calls
 /// [`Self::require_role`] when the route is one of the Owner-only ones §0.6
 /// names; a route not on that list checks no role at all.
 ///
@@ -41,7 +42,7 @@ use crate::state::AppState;
 )]
 pub(crate) struct AuthorizedEmployerContext {
     operator_id: OperatorId,
-    employer_id: EmployerId,
+    employer_id: AuthorizedEmployerId,
     role: MembershipRole,
 }
 
@@ -54,7 +55,7 @@ impl AuthorizedEmployerContext {
         &self.operator_id
     }
 
-    pub(crate) fn employer_id(&self) -> &EmployerId {
+    pub(crate) fn employer_id(&self) -> &AuthorizedEmployerId {
         &self.employer_id
     }
 
@@ -109,11 +110,9 @@ impl FromRequestParts<AppState> for AuthorizedEmployerContext {
                     "a route using AuthorizedEmployerContext is missing its EmployerId path segment",
                 )
             })?;
-        let employer_id = EmployerId::new(raw_employer_id);
-
         let token = session_token(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
 
-        match payroll_app::resolve_employer_access(state.db(), token, &employer_id, Utc::now())
+        match payroll_app::resolve_employer_access(state.db(), token, &raw_employer_id, Utc::now())
             .await
             .map_err(ApiError::internal)?
         {
@@ -122,7 +121,11 @@ impl FromRequestParts<AppState> for AuthorizedEmployerContext {
             // unmatched route gets — not merely the same status code.
             EmployerAccess::Unauthenticated => Err(ApiError::unauthenticated()),
             EmployerAccess::NotAMember => Err(ApiError::not_found()),
-            EmployerAccess::Member { operator_id, role } => Ok(Self {
+            EmployerAccess::Member {
+                operator_id,
+                employer_id,
+                role,
+            } => Ok(Self {
                 operator_id,
                 employer_id,
                 role,

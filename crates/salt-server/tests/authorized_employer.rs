@@ -166,7 +166,7 @@ async fn a_member_reaches_their_own_employer_and_the_context_carries_the_right_f
     payroll_app::create_employer_membership(
         &db,
         &operator_id,
-        &payroll_app::EmployerId::new(employer_id.clone()),
+        &payroll::EmployerId::new(employer_id.clone()),
         MembershipRole::PayrollOperator,
     )
     .await
@@ -229,7 +229,7 @@ async fn a_payroll_operator_is_refused_403_on_a_route_that_demands_owner() {
     payroll_app::create_employer_membership(
         &db,
         &operator_id,
-        &payroll_app::EmployerId::new(employer_id.clone()),
+        &payroll::EmployerId::new(employer_id.clone()),
         MembershipRole::PayrollOperator,
     )
     .await
@@ -256,7 +256,7 @@ async fn an_owner_is_let_through_a_route_that_demands_owner() {
     payroll_app::create_employer_membership(
         &db,
         &operator_id,
-        &payroll_app::EmployerId::new(employer_id.clone()),
+        &payroll::EmployerId::new(employer_id.clone()),
         MembershipRole::Owner,
     )
     .await
@@ -278,7 +278,7 @@ async fn a_membership_revoked_mid_session_is_refused_on_the_next_request() {
     let email = unique_email("alice");
     let operator_id = create_operator(&email).await;
     let employer_id = create_employer().await;
-    let employer_id_typed = payroll_app::EmployerId::new(employer_id.clone());
+    let employer_id_typed = payroll::EmployerId::new(employer_id.clone());
     payroll_app::create_employer_membership(
         &db,
         &operator_id,
@@ -321,7 +321,7 @@ async fn an_operator_disabled_mid_session_is_refused_401_on_the_next_request() {
     payroll_app::create_employer_membership(
         &db,
         &operator_id,
-        &payroll_app::EmployerId::new(employer_id.clone()),
+        &payroll::EmployerId::new(employer_id.clone()),
         MembershipRole::Owner,
     )
     .await
