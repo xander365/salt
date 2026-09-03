@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/payroll", "crates/payroll-app"]
+members = ["crates/payroll", "crates/payroll-app", "crates/salt-server"]
 
 # Edition and version live here so a second crate cannot drift onto a
 # different edition than the one the pure crate is written against.

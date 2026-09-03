@@ -1,0 +1,47 @@
+[package]
+name = "salt-server"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "salt_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "salt-server"
+path = "src/main.rs"
+
+# No test-only route or behaviour ships to production merely to be tested
+# (§0's own instruction, issue #45's Deep Instructions): this feature exists
+# only so this crate's own integration tests, and no one else, can exercise
+# the X-Salt-Request header check and the JSON body limit against a route
+# that actually reads a body. Nothing in this spec ships a mutating
+# production route yet.
+[features]
+test-support = []
+
+[dependencies]
+# ADR-0018: this manifest carries no `sqlx`, deliberately. Everything this
+# crate needs from PostgreSQL goes through `payroll-app`'s `SaltDatabase` and
+# its use cases.
+payroll-app = { path = "../payroll-app" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["catch-panic"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Self dev-dependency, enabling `test-support` only for this crate's own
+# tests/examples/benches — never for a normal build or a consumer.
+salt-server = { path = ".", features = ["test-support"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

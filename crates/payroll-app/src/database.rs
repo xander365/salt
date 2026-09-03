@@ -91,6 +91,14 @@ impl SaltDatabase {
     }
 }
 
+/// A trivial round trip against the database — `salt-server`'s `GET
+/// /api/ready` calls this rather than writing its own query, because
+/// `salt-server` has no `sqlx` dependency at all (ADR-0018, issue #45).
+pub async fn ping(db: &SaltDatabase) -> Result<(), PayrollAppError> {
+    sqlx::query("SELECT 1").execute(&db.pool).await?;
+    Ok(())
+}
+
 /// The `after_connect` hook itself (§6.2, §11, migration 0015), named so
 /// both `connect` and this module's own tests exercise the identical
 /// statement rather than two copies that could drift apart.
@@ -343,6 +351,15 @@ mod tests {
             ),
             "expected SchemaOutOfDate with no applied version, got {err:?}"
         );
+    }
+
+    #[sqlx::test]
+    async fn ping_succeeds_against_a_reachable_migrated_database(pool: PgPool) {
+        let db = SaltDatabase::connect(&config_for(&pool))
+            .await
+            .expect("connect against the migrated test database");
+
+        ping(&db).await.expect("ping a reachable database");
     }
 
     #[tokio::test]
