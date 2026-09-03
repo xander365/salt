@@ -472,6 +472,18 @@ pub enum PayrollAppError {
         operator_id: OperatorId,
         employer_id: EmployerId,
     },
+    /// `Bootstrap` was called while an Operator already exists (issue #48,
+    /// §0.2). Bootstrap is a first-run command, not an administrative back
+    /// door: it is refused as a whole, before any of its three inserts,
+    /// rather than gaining a `--force` flag or an "add another Operator"
+    /// mode.
+    BootstrapOperatorAlreadyExists,
+    /// `Bootstrap` was given a `--period-end-day` outside 1..=28 and not the
+    /// literal "last-day-of-month". The CLI layer only checks that the value
+    /// parses at all; this range is a domain rule of
+    /// [`payroll::DayOfMonth`], so it is enforced here rather than
+    /// duplicated in `salt-server`'s argument parser.
+    BootstrapPeriodEndDayInvalid { day: u8 },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -893,6 +905,15 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "the membership for Operator {operator_id} and Employer {employer_id} is already revoked"
             ),
+            Self::BootstrapOperatorAlreadyExists => write!(
+                f,
+                "bootstrap refused: an Operator already exists; bootstrap only ever creates the first one"
+            ),
+            Self::BootstrapPeriodEndDayInvalid { day } => write!(
+                f,
+                "--period-end-day {day} is not a day of month in 1..=28; use a day in that range \
+                 or \"last-day-of-month\""
+            ),
         }
     }
 }
@@ -976,7 +997,9 @@ impl std::error::Error for PayrollAppError {
             | Self::OperatorCredentialInvalid
             | Self::EmployerMembershipAlreadyExists { .. }
             | Self::EmployerMembershipNotFound { .. }
-            | Self::EmployerMembershipAlreadyRevoked { .. } => None,
+            | Self::EmployerMembershipAlreadyRevoked { .. }
+            | Self::BootstrapOperatorAlreadyExists
+            | Self::BootstrapPeriodEndDayInvalid { .. } => None,
         }
     }
 }

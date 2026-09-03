@@ -36,6 +36,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
 uuid = { version = "1", features = ["v4"] }
+# `bootstrap`'s own password prompt (issue #48's own instruction: the
+# password is read from stdin and is never a flag). Reading it without
+# echoing typed characters to the terminal needs real termios handling,
+# which is worth a small, single-purpose dependency rather than hand-rolling.
+rpassword = "7"
 
 [dev-dependencies]
 # Self dev-dependency, enabling `test-support` only for this crate's own

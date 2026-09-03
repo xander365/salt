@@ -12,11 +12,14 @@
 //! transport rules every later route inherits — the error envelope, the
 //! `X-Salt-Request` mutation guard, the JSON body limit, and the security
 //! headers — the three session routes (issue #46): `POST`, `DELETE` and
-//! `GET /api/session`; and, from issue #47, the `AuthorizedEmployerContext`
-//! extractor (`authorized_employer`) and `GET /api/employers` (`employers`).
-//! Bootstrap is issue #48 — not started here.
+//! `GET /api/session`; from issue #47, the `AuthorizedEmployerContext`
+//! extractor (`authorized_employer`) and `GET /api/employers` (`employers`);
+//! and, from issue #48, `bootstrap_cli`'s argument parsing for
+//! `salt-server bootstrap` — a CLI command, not an HTTP route, so it ships
+//! no route of its own and its actual work is `payroll_app::bootstrap`.
 
 mod authorized_employer;
+mod bootstrap_cli;
 mod config;
 mod employers;
 mod error;
@@ -25,6 +28,7 @@ mod router;
 mod session;
 mod state;
 
+pub use bootstrap_cli::{BootstrapArgs, BootstrapArgsError, parse as parse_bootstrap_args};
 pub use config::{ConfigError, Environment, ServerConfig};
 pub use error::ApiError;
 pub use router::build_router;

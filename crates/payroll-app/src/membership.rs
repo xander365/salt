@@ -64,6 +64,26 @@ pub async fn create_employer_membership(
     employer_id: &EmployerId,
     role: MembershipRole,
 ) -> Result<(), PayrollAppError> {
+    let mut tx = db.pool().begin().await?;
+    insert_employer_membership(&mut tx, operator_id, employer_id, role).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`create_employer_membership`]'s own insert, on a caller-supplied
+/// transaction rather than a fresh one — the same split
+/// [`crate::operator::insert_operator`] makes of
+/// [`crate::operator::create_operator`], and for the same reason:
+/// [`crate::bootstrap::bootstrap`] needs this membership's insert in the
+/// same transaction as the Operator and Employer it also writes, both of
+/// which this call's own `WHERE EXISTS` then finds already present —
+/// visible to it because a transaction always sees its own prior writes.
+pub(crate) async fn insert_employer_membership(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operator_id: &OperatorId,
+    employer_id: &EmployerId,
+    role: MembershipRole,
+) -> Result<(), PayrollAppError> {
     let inserted = sqlx::query(
         "INSERT INTO employer_membership (operator_id, employer_id, role)
          SELECT $1::uuid, $2, $3
@@ -73,7 +93,7 @@ pub async fn create_employer_membership(
     .bind(operator_id.as_str())
     .bind(employer_id.as_str())
     .bind(role_as_db_str(role))
-    .execute(db.pool())
+    .execute(&mut **tx)
     .await;
 
     let inserted = match inserted {
@@ -88,27 +108,27 @@ pub async fn create_employer_membership(
     };
 
     if inserted.rows_affected() == 0 {
-        return Err(diagnose_missing_parent(db, operator_id, employer_id).await?);
+        return Err(diagnose_missing_parent(tx, operator_id, employer_id).await?);
     }
 
     Ok(())
 }
 
 /// Tells an unknown Operator apart from an unknown Employer once
-/// [`create_employer_membership`]'s combined `WHERE EXISTS` has already
+/// [`insert_employer_membership`]'s combined `WHERE EXISTS` has already
 /// found one of them missing. A second pair of lookups rather than folding
 /// this into the insert itself: the insert must stay a single statement for
 /// the no-window property above, and this path is only ever reached once
 /// that statement has already refused.
 async fn diagnose_missing_parent(
-    db: &SaltDatabase,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operator_id: &OperatorId,
     employer_id: &EmployerId,
 ) -> Result<PayrollAppError, PayrollAppError> {
     let operator_exists: Option<bool> =
         sqlx::query_scalar("SELECT TRUE FROM operator WHERE id = $1::uuid")
             .bind(operator_id.as_str())
-            .fetch_optional(db.pool())
+            .fetch_optional(&mut **tx)
             .await?;
 
     Ok(if operator_exists.is_none() {

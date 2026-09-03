@@ -133,6 +133,25 @@ pub async fn create_operator(
     display_name: &str,
     password: &str,
 ) -> Result<OperatorId, PayrollAppError> {
+    let mut tx = db.pool().begin().await?;
+    let id = insert_operator(&mut tx, email, display_name, password).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// [`create_operator`]'s own insert, on a caller-supplied transaction rather
+/// than a fresh one. [`crate::bootstrap::bootstrap`] is the one other
+/// caller: it needs this Operator's insert in the *same* transaction as the
+/// Employer and Owner membership it also writes, so "the three inserts
+/// share one transaction" (issue #48) is true rather than merely close to
+/// true. `create_operator` above is this function wrapped in its own
+/// begin/commit, so the two can never validate or insert differently.
+pub(crate) async fn insert_operator(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    email: &str,
+    display_name: &str,
+    password: &str,
+) -> Result<OperatorId, PayrollAppError> {
     // Trimmed, not merely checked for blankness: an email is unique only
     // case-insensitively, and folding case does not make ' alice@x' collide
     // with 'alice@x'. Storing the surrounding whitespace would let two
@@ -170,7 +189,7 @@ pub async fn create_operator(
     .bind(email)
     .bind(display_name)
     .bind(&password_verifier)
-    .execute(db.pool())
+    .execute(&mut **tx)
     .await;
 
     if let Err(err) = inserted {

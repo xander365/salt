@@ -26,11 +26,27 @@ pub async fn create_employer(
     pay_schedule: PaySchedule,
     created_by: &str,
 ) -> Result<EmployerId, PayrollAppError> {
+    let mut tx = db.pool().begin().await?;
+    let id = insert_employer(&mut tx, name, pay_schedule, created_by).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// [`create_employer`]'s own insert, on a caller-supplied transaction rather
+/// than a fresh one — the same split [`crate::operator::insert_operator`]
+/// makes of [`crate::operator::create_operator`], and for the same reason:
+/// [`crate::bootstrap::bootstrap`] needs this Employer's insert in the same
+/// transaction as the Operator and Owner membership it also writes.
+pub(crate) async fn insert_employer(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+    pay_schedule: PaySchedule,
+    created_by: &str,
+) -> Result<EmployerId, PayrollAppError> {
     if name.trim().is_empty() {
         return Err(PayrollAppError::EmployerNameCannotBeEmpty);
     }
 
-    let pool = db.pool();
     let id = EmployerId::new(new_id());
     let (kind, value) = period_end_day_columns(pay_schedule.period_end_day());
 
@@ -43,7 +59,7 @@ pub async fn create_employer(
     .bind(kind)
     .bind(value)
     .bind(created_by)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(id)

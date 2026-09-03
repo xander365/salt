@@ -8,6 +8,7 @@
 //! forgetting an attribute.
 
 mod action_log;
+mod bootstrap;
 mod calculate;
 mod compensation_terms;
 mod correction;
@@ -31,6 +32,7 @@ mod unsupported_deduction_status;
 mod year_to_date;
 
 pub use action_log::ActionType;
+pub use bootstrap::{BootstrapOutcome, BootstrapPeriodEndDay, bootstrap};
 pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
 pub use compensation_terms::{correct_compensation_terms, record_compensation_terms};
 pub use correction::{EarningPrePopulation, add_employment_to_correction_run};
