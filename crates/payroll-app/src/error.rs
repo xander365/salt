@@ -478,6 +478,14 @@ pub enum PayrollAppError {
     /// rather than gaining a `--force` flag or an "add another Operator"
     /// mode.
     BootstrapOperatorAlreadyExists,
+    /// `Bootstrap` could not take its `LOCK TABLE operator IN EXCLUSIVE
+    /// MODE` within the wait it allows itself, because something else is
+    /// holding a conflicting lock on `operator` (issue #48). A database with
+    /// no Operator in it has no such writer, so this is a running system, not
+    /// the fresh one bootstrap is for. Refused rather than waited out: an
+    /// `EXCLUSIVE` request that keeps queueing blocks every later reader of
+    /// the table behind it, which is every sign-in on that server.
+    BootstrapOperatorTableBusy,
     /// `Bootstrap` was given a `--period-end-day` outside 1..=28 and not the
     /// literal "last-day-of-month". The CLI layer only checks that the value
     /// parses at all; this range is a domain rule of
@@ -909,6 +917,11 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "bootstrap refused: an Operator already exists; bootstrap only ever creates the first one"
             ),
+            Self::BootstrapOperatorTableBusy => write!(
+                f,
+                "bootstrap refused: the operator table is in use by something else; bootstrap is a \
+                 first-run command and expects a database no server is running against"
+            ),
             Self::BootstrapPeriodEndDayInvalid { day } => write!(
                 f,
                 "--period-end-day {day} is not a day of month in 1..=28; use a day in that range \
@@ -999,6 +1012,7 @@ impl std::error::Error for PayrollAppError {
             | Self::EmployerMembershipNotFound { .. }
             | Self::EmployerMembershipAlreadyRevoked { .. }
             | Self::BootstrapOperatorAlreadyExists
+            | Self::BootstrapOperatorTableBusy
             | Self::BootstrapPeriodEndDayInvalid { .. } => None,
         }
     }

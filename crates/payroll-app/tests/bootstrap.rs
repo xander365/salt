@@ -209,3 +209,47 @@ async fn two_concurrent_bootstrap_calls_cannot_both_succeed(pool: PgPool) {
         None
     );
 }
+
+/// A conflicting lock on `operator` means something is already running
+/// against this database, which is not what bootstrap is for. Proves the
+/// wait is bounded: without the `SET LOCAL lock_timeout` in `bootstrap`,
+/// this call would block for as long as the holder held its lock, and every
+/// reader of `operator` — every sign-in on a live server — would queue
+/// behind its pending `EXCLUSIVE` request.
+#[sqlx::test]
+async fn bootstrap_refuses_rather_than_queueing_behind_a_conflicting_lock(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+
+    // A holder standing in for a running server writing the table. `SHARE
+    // ROW EXCLUSIVE` is what an ordinary writer's row locks escalate to for
+    // conflict purposes here; any mode above `ACCESS SHARE` conflicts with
+    // bootstrap's `EXCLUSIVE`.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE operator IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let result = bootstrap(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+        "Acme Corp",
+        BootstrapPeriodEndDay::Day(25),
+    )
+    .await;
+
+    assert_eq!(result, Err(PayrollAppError::BootstrapOperatorTableBusy));
+
+    holder.rollback().await.unwrap();
+
+    // The refusal left nothing behind, so the same command works once the
+    // conflicting holder is gone.
+    assert_eq!(
+        find_operator_by_email(&db, "alice@example.com")
+            .await
+            .unwrap(),
+        None
+    );
+}

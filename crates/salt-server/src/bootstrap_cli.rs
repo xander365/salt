@@ -32,6 +32,11 @@ pub enum BootstrapArgsError {
     MissingValue(&'static str),
     /// `arg` is not one of the four recognised flags.
     Unrecognized(String),
+    /// `flag` was given more than once. Refused rather than resolved by a
+    /// last-one-wins rule: bootstrap creates rows that cannot be created
+    /// again, and a command line that names two Employers is a command line
+    /// whose author does not agree with itself about which one to create.
+    Repeated(&'static str),
     /// `--period-end-day`'s value is neither "last-day-of-month" nor
     /// something that parses as a plain integer. A value that parses but
     /// falls outside 1..=28 is not caught here — that is a domain rule of
@@ -58,6 +63,7 @@ impl std::fmt::Display for BootstrapArgsError {
             Self::Missing(flag) => write!(f, "{flag} is required"),
             Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
             Self::Unrecognized(arg) => write!(f, "unrecognized argument: {arg}"),
+            Self::Repeated(flag) => write!(f, "{flag} was given more than once"),
             Self::InvalidPeriodEndDay(value) => {
                 write!(
                     f,
@@ -85,12 +91,24 @@ pub fn parse(args: &[String]) -> Result<BootstrapArgs, BootstrapArgsError> {
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         match flag.as_str() {
-            "--email" => email = Some(next_value(&mut iter, "--email")?),
-            "--display-name" => display_name = Some(next_value(&mut iter, "--display-name")?),
-            "--employer-name" => employer_name = Some(next_value(&mut iter, "--employer-name")?),
+            "--email" => set_once(&mut email, next_value(&mut iter, "--email")?, "--email")?,
+            "--display-name" => set_once(
+                &mut display_name,
+                next_value(&mut iter, "--display-name")?,
+                "--display-name",
+            )?,
+            "--employer-name" => set_once(
+                &mut employer_name,
+                next_value(&mut iter, "--employer-name")?,
+                "--employer-name",
+            )?,
             "--period-end-day" => {
                 let value = next_value(&mut iter, "--period-end-day")?;
-                period_end_day = Some(parse_period_end_day(&value)?);
+                set_once(
+                    &mut period_end_day,
+                    parse_period_end_day(&value)?,
+                    "--period-end-day",
+                )?;
             }
             other => return Err(BootstrapArgsError::Unrecognized(other.to_string())),
         }
@@ -102,6 +120,21 @@ pub fn parse(args: &[String]) -> Result<BootstrapArgs, BootstrapArgsError> {
         employer_name: employer_name.ok_or(BootstrapArgsError::Missing("--employer-name"))?,
         period_end_day: period_end_day.ok_or(BootstrapArgsError::Missing("--period-end-day"))?,
     })
+}
+
+/// Stores `value` in `slot`, or refuses when `slot` already holds one — the
+/// whole of the "a flag is given at most once" rule, in one place so no flag
+/// can be the one that forgot it.
+fn set_once<T>(
+    slot: &mut Option<T>,
+    value: T,
+    flag: &'static str,
+) -> Result<(), BootstrapArgsError> {
+    if slot.is_some() {
+        return Err(BootstrapArgsError::Repeated(flag));
+    }
+    *slot = Some(value);
+    Ok(())
 }
 
 fn next_value(
@@ -228,6 +261,44 @@ mod tests {
         let err = parse(&args(&["--email"])).expect_err("--email needs a value");
 
         assert_eq!(err, BootstrapArgsError::MissingValue("--email"));
+    }
+
+    #[test]
+    fn a_repeated_flag_is_refused_rather_than_resolved_by_last_one_wins() {
+        let err = parse(&args(&[
+            "--email",
+            "alice@example.com",
+            "--display-name",
+            "Alice",
+            "--employer-name",
+            "Acme Corp",
+            "--employer-name",
+            "Widgets Inc",
+            "--period-end-day",
+            "25",
+        ]))
+        .expect_err("--employer-name was given twice");
+
+        assert_eq!(err, BootstrapArgsError::Repeated("--employer-name"));
+    }
+
+    #[test]
+    fn a_repeated_period_end_day_is_refused() {
+        let err = parse(&args(&[
+            "--email",
+            "alice@example.com",
+            "--display-name",
+            "Alice",
+            "--employer-name",
+            "Acme Corp",
+            "--period-end-day",
+            "25",
+            "--period-end-day",
+            "last-day-of-month",
+        ]))
+        .expect_err("--period-end-day was given twice");
+
+        assert_eq!(err, BootstrapArgsError::Repeated("--period-end-day"));
     }
 
     #[test]

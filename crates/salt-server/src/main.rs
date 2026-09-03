@@ -88,6 +88,10 @@ async fn run_server() -> ExitCode {
 /// normal shape for a scripted or containerized bootstrap — a plain line is
 /// read instead, since there is no terminal for `rpassword` to hide
 /// anything on and it refuses outright rather than fall back on its own.
+///
+/// The prompt itself goes to stderr, not stdout: stdout carries the one line
+/// this command is read for — the ids it created — and a script capturing it
+/// should not have to strip a prompt out of the front of it.
 fn read_password() -> std::io::Result<String> {
     use std::io::{IsTerminal, Write};
 
@@ -95,8 +99,8 @@ fn read_password() -> std::io::Result<String> {
         return rpassword::prompt_password("Operator password: ");
     }
 
-    print!("Operator password: ");
-    std::io::stdout().flush()?;
+    eprint!("Operator password: ");
+    std::io::stderr().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(line.trim_end_matches(['\n', '\r']).to_string())

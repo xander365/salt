@@ -508,10 +508,11 @@ async fn write_attempt_counters(
     Ok(())
 }
 
-/// True when `err` is PostgreSQL refusing to keep waiting for a row lock
-/// (SQLSTATE 55P03), which is `LOCK_WAIT_TIMEOUT` elapsing and not a fact
-/// about the Operator being verified.
-fn is_lock_not_available(err: &sqlx::Error) -> bool {
+/// True when `err` is PostgreSQL refusing to keep waiting for a lock
+/// (SQLSTATE 55P03), which is a `lock_timeout` elapsing and not a fact about
+/// the Operator being verified. Shared with [`crate::bootstrap::bootstrap`],
+/// which bounds its own table-lock wait the same way.
+pub(crate) fn is_lock_not_available(err: &sqlx::Error) -> bool {
     let sqlx::Error::Database(db_err) = err else {
         return false;
     };

@@ -10,13 +10,25 @@
 //! administrative back door: it gains no `--force` flag and no "add another
 //! Operator" mode.
 
+use chrono::Duration;
 use payroll::{DayOfMonth, EmployerId, PaySchedule, PeriodEndDay};
 
 use crate::database::SaltDatabase;
 use crate::employer::insert_employer;
 use crate::error::PayrollAppError;
 use crate::membership::{MembershipRole, insert_employer_membership};
-use crate::operator::{OperatorId, insert_operator};
+use crate::operator::{OperatorId, insert_operator, is_lock_not_available};
+
+/// How long [`bootstrap`] waits for its `LOCK TABLE operator IN EXCLUSIVE
+/// MODE` before refusing. `EXCLUSIVE` conflicts with every lock mode except
+/// `ACCESS SHARE`, and a lock request that is waiting queues *ahead* of the
+/// requests made after it — so an unbounded wait here would not merely stall
+/// this command, it would stall every sign-in and every session lookup of a
+/// running Salt server behind it, for as long as the conflicting writer took.
+/// Bounding the wait turns that into one refused command. Generous next to
+/// the tens of milliseconds a competing bootstrap's own transaction costs, so
+/// the legitimate race two concurrent first-runs create never reaches it.
+const LOCK_WAIT_TIMEOUT: Duration = Duration::seconds(5);
 
 /// The day of month a bootstrapped Employer's `PaySchedule` ends its periods
 /// on, in the shape a caller assembles from raw, unvalidated input — a bare
@@ -67,7 +79,11 @@ pub struct BootstrapOutcome {
 /// the first's lock until that transaction commits or rolls back, and then
 /// re-reads a database that already holds the first's Operator row —
 /// PostgreSQL's read-committed default is enough once the two are
-/// serialized this way; no higher isolation level is needed.
+/// serialized this way; no higher isolation level is needed. The wait for
+/// that lock is bounded by `LOCK_WAIT_TIMEOUT` and answers
+/// [`PayrollAppError::BootstrapOperatorTableBusy`] when it elapses, so this
+/// command can never queue ahead of a running server's own reads of
+/// `operator`.
 pub async fn bootstrap(
     db: &SaltDatabase,
     email: &str,
@@ -84,13 +100,35 @@ pub async fn bootstrap(
 
     let mut tx = db.pool().begin().await?;
 
+    // `SET LOCAL`, so the bound is scoped to this transaction and released
+    // with it rather than left on a pooled connection for the next use case
+    // to inherit. The value is a compile-time constant of this module, never
+    // a caller's, which is why it is formatted into the statement — `SET`
+    // takes no bind parameters. Same discipline as
+    // `verify_operator_credential`'s own row-lock wait.
+    sqlx::query(&format!(
+        "SET LOCAL lock_timeout = {}",
+        LOCK_WAIT_TIMEOUT.num_milliseconds()
+    ))
+    .execute(&mut *tx)
+    .await?;
+
     // `operator` is a fixed, hard-coded table name, never caller input, so
-    // this is the same discipline `verify_operator_credential`'s `SET
-    // LOCAL lock_timeout` statement already applies to a locking clause
-    // PostgreSQL does not accept a bind parameter for.
-    sqlx::query("LOCK TABLE operator IN EXCLUSIVE MODE")
+    // this is the same discipline the statement above applies to a locking
+    // clause PostgreSQL does not accept a bind parameter for.
+    let locked = sqlx::query("LOCK TABLE operator IN EXCLUSIVE MODE")
         .execute(&mut *tx)
-        .await?;
+        .await;
+    match locked {
+        Ok(_) => {}
+        // Something else is writing `operator`, which a database with no
+        // Operator in it has nothing to do. Refusing names that rather than
+        // holding the queue open, and leaves nothing behind either way.
+        Err(err) if is_lock_not_available(&err) => {
+            return Err(PayrollAppError::BootstrapOperatorTableBusy);
+        }
+        Err(err) => return Err(err.into()),
+    }
 
     let any_operator: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM operator LIMIT 1")
         .fetch_optional(&mut *tx)
