@@ -16,9 +16,15 @@ use salt_server::{AppState, ServerConfig, build_router};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // Falls back to `info` rather than to `EnvFilter`'s own default, which
+    // is to log nothing at all: with `RUST_LOG` unset — the normal case for
+    // a container — every request line, and every internal-error line
+    // carrying a request id, would be silently discarded. "A per-request id
+    // appears in every log line" (issue #45) is worth nothing if there are
+    // no log lines.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = match ServerConfig::from_env() {
         Ok(config) => config,
@@ -47,10 +53,43 @@ async fn main() -> ExitCode {
     tracing::info!(bind_addr = %config.bind_addr, environment = ?config.environment, "salt-server listening");
 
     let router = build_router(AppState::new(db));
-    if let Err(error) = axum::serve(listener, router).await {
+    let served = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    if let Err(error) = served {
         eprintln!("salt-server: server error: {error}");
         return ExitCode::FAILURE;
     }
 
+    tracing::info!("salt-server stopped");
     ExitCode::SUCCESS
+}
+
+/// Resolves on the first `SIGINT` or `SIGTERM`, so a deploy or a `docker
+/// stop` lets in-flight requests finish instead of severing them mid-write.
+/// `SIGTERM` is the one an orchestrator actually sends; `SIGINT` is the one
+/// a person pressing Ctrl-C sends, and both mean the same thing here.
+async fn shutdown_signal() {
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install the SIGINT handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install the SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+
+    tracing::info!("shutdown signal received; draining in-flight requests");
 }

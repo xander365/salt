@@ -134,6 +134,18 @@ impl ServerConfig {
         )?;
         let idle_timeout_secs: Option<u64> =
             parsed_optional(&get, "SALT_DATABASE_IDLE_TIMEOUT_SECS")?;
+
+        // Each of these parses cleanly and then makes the process unable to
+        // serve a single request: a pool of zero connections never hands one
+        // out, and a zero acquire or idle timeout expires the instant it is
+        // armed. "Refuses on a malformed value" (issue #45) has to mean
+        // refusing a value that is well-formed and unusable too, or the typo
+        // is found at 3am against a server that started happily.
+        nonzero(max_connections, "SALT_DATABASE_MAX_CONNECTIONS")?;
+        nonzero(acquire_timeout_secs, "SALT_DATABASE_ACQUIRE_TIMEOUT_SECS")?;
+        if let Some(idle_timeout_secs) = idle_timeout_secs {
+            nonzero(idle_timeout_secs, "SALT_DATABASE_IDLE_TIMEOUT_SECS")?;
+        }
         let insecure_cookies = parsed_bool_or_default(&get, "SALT_INSECURE_COOKIES", false)?;
 
         if insecure_cookies && environment == Environment::Production {
@@ -152,6 +164,21 @@ impl ServerConfig {
             insecure_cookies,
         })
     }
+}
+
+/// Refuses a numeric setting of zero. Kept as its own step rather than
+/// folded into parsing, because zero is a perfectly well-formed number —
+/// what is wrong with it is what it means to the pool, not its syntax.
+fn nonzero(value: impl Into<u64>, var: &'static str) -> Result<(), ConfigError> {
+    let value = value.into();
+    if value == 0 {
+        return Err(ConfigError::Invalid {
+            var,
+            value: value.to_string(),
+            reason: "must be greater than zero".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn required(
@@ -343,6 +370,58 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_zero_max_connections_is_refused_although_it_parses() {
+        let mut pairs = minimal_valid_pairs();
+        pairs.push(("SALT_DATABASE_MAX_CONNECTIONS", "0"));
+        let err = ServerConfig::from_source(source(&pairs))
+            .expect_err("a pool of zero connections can never serve a request");
+
+        assert!(matches!(
+            err,
+            ConfigError::Invalid {
+                var: "SALT_DATABASE_MAX_CONNECTIONS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_zero_acquire_timeout_is_refused() {
+        let mut pairs = minimal_valid_pairs();
+        pairs.push(("SALT_DATABASE_ACQUIRE_TIMEOUT_SECS", "0"));
+        let err = ServerConfig::from_source(source(&pairs))
+            .expect_err("a zero acquire timeout expires before it can succeed");
+
+        assert!(matches!(
+            err,
+            ConfigError::Invalid {
+                var: "SALT_DATABASE_ACQUIRE_TIMEOUT_SECS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_zero_idle_timeout_is_refused_while_an_absent_one_is_fine() {
+        let mut pairs = minimal_valid_pairs();
+        pairs.push(("SALT_DATABASE_IDLE_TIMEOUT_SECS", "0"));
+        let err = ServerConfig::from_source(source(&pairs))
+            .expect_err("a zero idle timeout closes every connection immediately");
+
+        assert!(matches!(
+            err,
+            ConfigError::Invalid {
+                var: "SALT_DATABASE_IDLE_TIMEOUT_SECS",
+                ..
+            }
+        ));
+
+        let config = ServerConfig::from_source(source(&minimal_valid_pairs()))
+            .expect("an absent idle timeout is not the same as a zero one");
+        assert_eq!(config.database.idle_timeout, None);
     }
 
     #[test]

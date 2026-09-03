@@ -76,7 +76,7 @@ async fn health() -> impl IntoResponse {
 async fn ready(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     payroll_app::ping(state.db())
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::not_ready)?;
     Ok(Json(json!({ "status": "ok" })))
 }
 

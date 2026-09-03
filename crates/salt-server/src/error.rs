@@ -61,6 +61,27 @@ impl ApiError {
         }
     }
 
+    /// `GET /api/ready` could not reach the database. Deliberately 503 and
+    /// not 500: the whole point of a readiness probe separate from liveness
+    /// (§0's story 32) is to let a load balancer tell "process up" from
+    /// "database reachable", and a 500 says the opposite of what a
+    /// still-serving process with an unreachable database means. `cause` is
+    /// logged and never repeated in the body, for the same reason
+    /// [`Self::internal`] does not repeat one.
+    pub fn not_ready(cause: impl std::fmt::Display) -> Self {
+        tracing::error!(
+            error = %cause,
+            request_id = %current_request_id(),
+            "readiness check failed"
+        );
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "not_ready",
+            message: "the database is not reachable".to_string(),
+            details: None,
+        }
+    }
+
     /// An unexpected failure: a database round trip that could not complete,
     /// a handler panic, anything this build did not anticipate. `cause` is
     /// logged in full — SQL text and all — and never reaches the response
@@ -143,6 +164,23 @@ mod tests {
             "only a 500 carries details.requestId, got {body}"
         );
         assert!(body.contains("\"details\":null"), "got {body}");
+    }
+
+    #[tokio::test]
+    async fn a_readiness_failure_is_503_and_repeats_neither_cause_nor_request_id() {
+        let cause = "connection refused: postgres://salt:hunter2@db:5432/salt";
+
+        let response = CURRENT_REQUEST_ID
+            .scope("test-request-id".to_string(), async {
+                ApiError::not_ready(cause).into_response()
+            })
+            .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response_body_text(response).await;
+        assert!(!body.contains("hunter2"), "got {body}");
+        assert!(!body.contains("test-request-id"), "got {body}");
+        assert!(body.contains("\"code\":\"not_ready\""), "got {body}");
     }
 
     #[test]

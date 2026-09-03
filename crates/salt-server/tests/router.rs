@@ -239,3 +239,70 @@ async fn a_body_at_the_256kb_limit_is_accepted() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+/// The header guard is an exact match on `1`, not a presence check: a header
+/// that is there but says something else must be refused exactly as an
+/// absent one is, so a client cannot opt out of the CSRF defence by sending
+/// the header set to anything at all.
+#[tokio::test]
+async fn a_salt_request_header_with_the_wrong_value_is_refused() {
+    for value in ["0", "true", "", "1 "] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/__test/echo")
+            .header("x-salt-request", value)
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let response = test_router().await.oneshot(request).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "X-Salt-Request: {value:?} must be refused"
+        );
+    }
+}
+
+/// Two requests must not share a request id, or the id in `details.requestId`
+/// cannot pick one request's log lines out of a running server's output —
+/// which is the only reason issue #45 asks for it.
+#[tokio::test]
+async fn each_request_gets_its_own_request_id() {
+    async fn request_id_of_a_500() -> String {
+        let response = test_router()
+            .await
+            .oneshot(get("/__test/panic"))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        json["error"]["details"]["requestId"]
+            .as_str()
+            .expect("a 500 carries details.requestId")
+            .to_string()
+    }
+
+    let first = request_id_of_a_500().await;
+    let second = request_id_of_a_500().await;
+
+    assert_ne!(first, second);
+}
+
+/// A `HEAD` is not a mutation, and Axum answers it from the same `GET`
+/// handler — so it must pass the header guard untouched rather than being
+/// refused for lacking a header only mutations need.
+#[tokio::test]
+async fn a_head_request_reaches_the_health_route() {
+    let request = Request::builder()
+        .method(Method::HEAD)
+        .uri("/api/health")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = test_router().await.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}

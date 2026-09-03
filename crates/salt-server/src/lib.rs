@@ -24,3 +24,56 @@ pub use config::{ConfigError, Environment, ServerConfig};
 pub use error::ApiError;
 pub use router::build_router;
 pub use state::AppState;
+
+/// ADR-0018's invariant, and the shortest thing a reviewer of issue #45
+/// checks: `salt-server`'s manifest carries no `sqlx`. Asserted here rather
+/// than left to review, because a review catches it once and a test catches
+/// it every time. The manifest is read at compile time, so this needs no
+/// file access and cannot go looking at the wrong path.
+#[cfg(test)]
+mod manifest {
+    const MANIFEST: &str = include_str!("../Cargo.toml");
+
+    /// Only dependency *names* are examined: the word "sqlx" appears in this
+    /// manifest's comments on purpose, explaining why it is not a
+    /// dependency, and a plain substring search would fail on the very
+    /// comment that documents the rule.
+    fn declared_dependency_names() -> Vec<String> {
+        let mut names = Vec::new();
+        let mut in_dependencies = false;
+        for line in MANIFEST.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_dependencies = line.contains("dependencies");
+                continue;
+            }
+            if !in_dependencies || line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((name, _)) = line.split_once('=') {
+                names.push(name.trim().trim_matches('"').to_string());
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn no_dependency_named_sqlx_is_declared() {
+        let names = declared_dependency_names();
+        assert!(
+            !names.iter().any(|name| name == "sqlx"),
+            "ADR-0018: salt-server must reach PostgreSQL only through \
+             payroll-app's SaltDatabase, but its manifest declares sqlx. \
+             Declared dependencies: {names:?}"
+        );
+    }
+
+    /// Guards the guard: a parser that found nothing would pass the test
+    /// above for the wrong reason.
+    #[test]
+    fn the_manifest_parser_finds_the_dependencies_that_are_there() {
+        let names = declared_dependency_names();
+        assert!(names.iter().any(|name| name == "payroll-app"), "{names:?}");
+        assert!(names.iter().any(|name| name == "axum"), "{names:?}");
+    }
+}
