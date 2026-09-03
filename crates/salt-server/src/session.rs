@@ -18,7 +18,7 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use payroll_app::{MembershipRole, MembershipStatus, PayrollAppError};
+use payroll_app::{MembershipRole, MembershipStatus, OperatorStatus, PayrollAppError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -96,14 +96,10 @@ pub(crate) async fn login(
             other => ApiError::internal(other),
         })?;
 
-    // Pruning belongs to login, not to `payroll_app::create_session` itself
-    // (§0.12: "login deletes that Operator's other expired rows") — done
-    // before minting the new row so the new session's own fresh `expires_at`
-    // is never a candidate.
-    payroll_app::clear_expired_sessions(state.db(), &operator_id, now)
-        .await
-        .map_err(ApiError::internal)?;
-
+    // Minting the new row and clearing that Operator's already-expired ones
+    // are one use case (§0.12: "the token rotates on login, and that
+    // Operator's other expired session rows are cleared at login"), so this
+    // handler cannot perform the first without the second.
     let created = payroll_app::create_session_for_active_operator(state.db(), &operator_id, now)
         .await
         .map_err(ApiError::internal)?
@@ -167,6 +163,17 @@ pub(crate) async fn who_am_i(
         .ok_or_else(|| {
             ApiError::internal("a live session names an Operator that no longer exists")
         })?;
+
+    // A live session is not on its own proof of being signed in: §0's own
+    // pipeline reads "session valid, Operator active", and story 18 asks a
+    // disabled Operator to stop working immediately rather than when their
+    // session happens to expire. Read fresh here, on every request, which is
+    // the whole reason disabling needs no cache invalidation — and refused
+    // with the identical `unauthenticated` a missing cookie answers, so this
+    // route says no more about why than [`login`] does.
+    if operator.status != OperatorStatus::Active {
+        return Err(ApiError::unauthenticated());
+    }
 
     // Only active memberships: a revoked one grants nothing (ADR-0017), and
     // this response exists so a client can offer the Employers this

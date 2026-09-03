@@ -109,16 +109,24 @@ pub async fn create_session(
     operator_id: &OperatorId,
     now: DateTime<Utc>,
 ) -> Result<CreatedSession, PayrollAppError> {
-    insert_session(db, operator_id, now, false)
+    insert_session(db.pool(), operator_id, now, false)
         .await?
         .ok_or_else(|| PayrollAppError::OperatorNotFound(operator_id.clone()))
 }
 
 /// Opens a new session only if `operator_id` currently names an active
-/// Operator. This is the session-minting half of login: its active-status
-/// check and insert share one SQL statement, so disabling an Operator after
-/// credential verification cannot leave a later login request holding a
-/// freshly minted session.
+/// Operator, and — in the same transaction — deletes that Operator's rows
+/// that have already outlived either timer. This is the session-minting half
+/// of login, and both halves of §0.12's own sentence ("the token rotates on
+/// login, and that Operator's other expired session rows are cleared at
+/// login") are therefore one operation a caller cannot perform by halves.
+///
+/// The active-status check and the insert share one SQL statement, so
+/// disabling an Operator after credential verification cannot leave a later
+/// login request holding a freshly minted session. The pruning runs before
+/// the insert, so the row this call is about to mint — its `expires_at`
+/// freshly `now + `[`absolute_timeout`]`()` — is never itself a candidate,
+/// and a refusal rolls the pruning back with it.
 ///
 /// `None` means the Operator was not active when this statement ran. The
 /// caller deliberately maps that to the same opaque credential refusal as a
@@ -131,11 +139,27 @@ pub async fn create_session_for_active_operator(
     operator_id: &OperatorId,
     now: DateTime<Utc>,
 ) -> Result<Option<CreatedSession>, PayrollAppError> {
-    insert_session(db, operator_id, now, true).await
+    let mut tx = db.pool().begin().await?;
+    clear_expired_sessions(&mut *tx, operator_id, now).await?;
+    let created = insert_session(&mut *tx, operator_id, now, true).await?;
+
+    // A refused login is not a login, so it does not get login's pruning
+    // either: rolling back leaves the Operator's rows exactly as they were,
+    // rather than half-applying an operation that answered `None`.
+    match created {
+        Some(created) => {
+            tx.commit().await?;
+            Ok(Some(created))
+        }
+        None => {
+            tx.rollback().await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn insert_session(
-    db: &SaltDatabase,
+    executor: impl sqlx::PgExecutor<'_>,
     operator_id: &OperatorId,
     now: DateTime<Utc>,
     require_active_operator: bool,
@@ -159,7 +183,7 @@ async fn insert_session(
     .bind(now)
     .bind(expires_at)
     .bind(require_active_operator)
-    .execute(db.pool())
+    .execute(executor)
     .await?;
 
     if inserted.rows_affected() == 0 {
@@ -264,15 +288,20 @@ async fn delete_expired(
 /// Deletes every session row belonging to `operator_id` that has, as of
 /// `now`, already outlived either timer — the pruning a login performs on
 /// its own Operator (§0.12: "login deletes that Operator's other expired
-/// rows"), so a Operator who signs in from many devices over months does not
+/// rows"), so an Operator who signs in from many devices over months does not
 /// accumulate rows that no lookup happens to revisit.
+///
+/// Deliberately private, and called from exactly one place:
+/// [`create_session_for_active_operator`], inside that call's own
+/// transaction. Login is the only moment §0.12 attaches this pruning to, and
+/// a separate public function would be one a login could forget to call.
 ///
 /// Recomputes the same two conditions [`load_session`]'s own `SELECT` and
 /// [`delete_expired`] check, scoped to one Operator rather than one token: a
-/// session just minted by the very call that is about to invoke this
-/// (`expires_at` freshly `now + `[`absolute_timeout`]`()`) is never a match.
-pub async fn clear_expired_sessions(
-    db: &SaltDatabase,
+/// session minted later in the same transaction (`expires_at` freshly `now +
+/// `[`absolute_timeout`]`()`) is never a match.
+async fn clear_expired_sessions(
+    executor: impl sqlx::PgExecutor<'_>,
     operator_id: &OperatorId,
     now: DateTime<Utc>,
 ) -> Result<(), PayrollAppError> {
@@ -284,7 +313,7 @@ pub async fn clear_expired_sessions(
     .bind(operator_id.as_str())
     .bind(now)
     .bind(idle_timeout().num_seconds())
-    .execute(db.pool())
+    .execute(executor)
     .await?;
 
     Ok(())

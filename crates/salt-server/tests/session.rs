@@ -158,10 +158,83 @@ async fn a_wrong_password_an_unknown_email_and_a_disabled_operator_all_answer_th
     ] {
         let response = router().await.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            response.headers().get(header::SET_COOKIE).is_none(),
+            "a failed login is never handed a session cookie"
+        );
         let json = body_json(response).await;
         assert_eq!(json["error"]["code"], "invalid_credentials");
         assert!(json["error"]["details"].is_null());
     }
+}
+
+#[tokio::test]
+async fn a_locked_account_answers_the_same_401_as_every_other_failure() {
+    // Ten failures inside the window lock the account (issue #42), after
+    // which even the right password is refused — and refused identically,
+    // which is the criterion this test exists for. Driven through the real
+    // route rather than the use case, so the mapping is what is proven.
+    let email = unique_email("alice");
+    create_operator(&email, "correct horse battery staple").await;
+    let router = router().await;
+
+    for _ in 0..10 {
+        let response = router
+            .clone()
+            .oneshot(login_request(&email, "wrong password"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let response = router
+        .oneshot(login_request(&email, "correct horse battery staple"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response.headers().get(header::SET_COOKIE).is_none(),
+        "a locked account is never handed a session cookie"
+    );
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "invalid_credentials");
+    assert!(json["error"]["details"].is_null());
+}
+
+#[tokio::test]
+async fn an_operator_disabled_mid_session_is_refused_on_the_next_request() {
+    let email = unique_email("alice");
+    let operator_id = create_operator(&email, "correct horse battery staple").await;
+    let login_response = router()
+        .await
+        .oneshot(login_request(&email, "correct horse battery staple"))
+        .await
+        .unwrap();
+    let cookie = session_cookie_pair(&login_response);
+    assert_eq!(
+        router()
+            .await
+            .oneshot(get_session_request(Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    payroll_app::disable_operator(&test_db().await, &operator_id)
+        .await
+        .unwrap();
+
+    let response = router()
+        .await
+        .oneshot(get_session_request(Some(&cookie)))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "unauthenticated");
 }
 
 #[tokio::test]

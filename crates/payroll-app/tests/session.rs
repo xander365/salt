@@ -4,8 +4,8 @@
 
 use chrono::{DateTime, Duration, SubsecRound, Utc};
 use payroll_app::{
-    OperatorId, SaltDatabase, clear_expired_sessions, create_operator, create_session,
-    create_session_for_active_operator, delete_session, load_session,
+    OperatorId, SaltDatabase, create_operator, create_session, create_session_for_active_operator,
+    delete_session, load_session,
 };
 use sqlx::PgPool;
 
@@ -467,10 +467,14 @@ async fn the_plaintext_token_is_nowhere_in_the_row_it_created(pool: PgPool) {
     assert_eq!(token_hash.len(), 64, "a SHA-256 hex digest, not the token");
 }
 
-// --- Clearing an Operator's expired sessions ---------------------------
+// --- Login clears this Operator's expired sessions ---------------------
+//
+// §0.12 attaches the pruning to login itself, which is why it is not a use
+// case of its own: `create_session_for_active_operator` is the only thing
+// that mints a login session, and it is the only thing that prunes.
 
 #[sqlx::test]
-async fn clearing_expired_sessions_removes_only_this_operators_expired_rows(pool: PgPool) {
+async fn logging_in_clears_only_this_operators_expired_rows(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let alice = an_operator(&db).await;
     let bob = named_operator(&db, "bob@example.com", "Bob").await;
@@ -482,40 +486,74 @@ async fn clearing_expired_sessions_removes_only_this_operators_expired_rows(pool
     let now = long_ago + Duration::hours(12) + Duration::seconds(1);
     let alices_live = create_session(&db, &alice, now).await.unwrap();
 
-    clear_expired_sessions(&db, &alice, now).await.unwrap();
+    let minted = create_session_for_active_operator(&db, &alice, now)
+        .await
+        .unwrap()
+        .expect("an active Operator is given a session");
 
     assert_eq!(
         session_count(&pool).await,
-        2,
-        "Alice's expired row is gone, leaving her live one and Bob's untouched expired one"
+        3,
+        "Alice's expired row is gone, leaving her live one, her new one, \
+         and Bob's untouched expired one"
     );
     assert!(
         load_session(&db, &alices_live.token, now)
             .await
             .unwrap()
             .is_some(),
-        "a live session for the same Operator must survive"
+        "a live session for the same Operator must survive its own login"
+    );
+    assert!(
+        load_session(&db, &minted.token, now)
+            .await
+            .unwrap()
+            .is_some(),
+        "the session this login just minted is never itself pruned"
     );
 }
 
 #[sqlx::test]
-async fn clearing_expired_sessions_for_an_operator_with_none_is_a_no_op(pool: PgPool) {
-    let db = SaltDatabase::from_pool(pool);
+async fn logging_in_with_nothing_expired_leaves_every_row_alone(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
     let operator_id = an_operator(&db).await;
-    let created = create_session(&db, &operator_id, a_clock_reading())
-        .await
-        .unwrap();
+    let now = a_clock_reading();
+    let existing = create_session(&db, &operator_id, now).await.unwrap();
 
-    clear_expired_sessions(&db, &operator_id, a_clock_reading())
+    create_session_for_active_operator(&db, &operator_id, now)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("an active Operator is given a session");
 
+    assert_eq!(session_count(&pool).await, 2);
     assert!(
-        load_session(&db, &created.token, a_clock_reading())
+        load_session(&db, &existing.token, now)
             .await
             .unwrap()
             .is_some()
     );
+}
+
+#[sqlx::test]
+async fn a_refused_login_prunes_nothing(pool: PgPool) {
+    // The prune and the insert share one transaction, so a disabled
+    // Operator's refusal must leave their rows exactly as they were rather
+    // than half-applying the login.
+    let db = SaltDatabase::from_pool(pool.clone());
+    let operator_id = an_operator(&db).await;
+    let long_ago = a_clock_reading();
+    create_session(&db, &operator_id, long_ago).await.unwrap();
+    payroll_app::disable_operator(&db, &operator_id)
+        .await
+        .unwrap();
+
+    let now = long_ago + Duration::hours(12) + Duration::seconds(1);
+    let result = create_session_for_active_operator(&db, &operator_id, now)
+        .await
+        .unwrap();
+
+    assert_eq!(result, None);
+    assert_eq!(session_count(&pool).await, 1);
 }
 
 async fn session_count(pool: &PgPool) -> i64 {
