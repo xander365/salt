@@ -4,7 +4,7 @@
 //! future route can be added without inheriting all of them.
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -54,6 +54,7 @@ pub fn build_router(state: AppState) -> Router {
         .fallback(not_found)
         .layer(middleware::from_fn(require_salt_request_header))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn(envelope_body_limit_error))
         .layer(CatchPanicLayer::custom(handle_panic))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(request_id::middleware))
@@ -110,6 +111,18 @@ async fn require_salt_request_header(request: Request, next: Next) -> Response {
     }
 
     next.run(request).await
+}
+
+/// Axum converts an over-limit body into a 413 extractor rejection before a
+/// handler can return [`ApiError`]. Turn that framework response back into
+/// Salt's documented envelope at the router boundary.
+async fn envelope_body_limit_error(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::payload_too_large().into_response()
+    } else {
+        response
+    }
 }
 
 /// CSP, `X-Content-Type-Options` and frame-deny (issue #45's own acceptance

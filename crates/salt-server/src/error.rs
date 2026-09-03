@@ -49,6 +49,18 @@ impl ApiError {
         }
     }
 
+    /// A request body exceeded the router's 256 KB limit. Axum's extractor
+    /// rejection would otherwise answer this with its own plain-text body,
+    /// bypassing the API's documented error envelope.
+    pub fn payload_too_large() -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "payload_too_large",
+            message: "request body exceeds the 256 KB limit".to_string(),
+            details: None,
+        }
+    }
+
     /// An unexpected failure: a database round trip that could not complete,
     /// a handler panic, anything this build did not anticipate. `cause` is
     /// logged in full — SQL text and all — and never reaches the response

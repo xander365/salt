@@ -183,6 +183,12 @@ async fn a_body_over_the_256kb_limit_is_refused() {
     let response = test_router().await.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "payload_too_large");
+    assert!(json["error"]["details"].is_null());
 }
 
 /// A handler panic must not crash the server or bypass the transport
