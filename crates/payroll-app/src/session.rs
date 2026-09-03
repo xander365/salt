@@ -226,6 +226,35 @@ async fn delete_expired(
     Ok(())
 }
 
+/// Deletes every session row belonging to `operator_id` that has, as of
+/// `now`, already outlived either timer — the pruning a login performs on
+/// its own Operator (§0.12: "login deletes that Operator's other expired
+/// rows"), so a Operator who signs in from many devices over months does not
+/// accumulate rows that no lookup happens to revisit.
+///
+/// Recomputes the same two conditions [`load_session`]'s own `SELECT` and
+/// [`delete_expired`] check, scoped to one Operator rather than one token: a
+/// session just minted by the very call that is about to invoke this
+/// (`expires_at` freshly `now + `[`absolute_timeout`]`()`) is never a match.
+pub async fn clear_expired_sessions(
+    db: &SaltDatabase,
+    operator_id: &OperatorId,
+    now: DateTime<Utc>,
+) -> Result<(), PayrollAppError> {
+    sqlx::query(
+        "DELETE FROM session
+         WHERE operator_id = $1::uuid
+           AND NOT ($2 < expires_at AND $2 < last_seen_at + ($3 * INTERVAL '1 second'))",
+    )
+    .bind(operator_id.as_str())
+    .bind(now)
+    .bind(idle_timeout().num_seconds())
+    .execute(db.pool())
+    .await?;
+
+    Ok(())
+}
+
 /// Deletes the session named by `session_id` — an Operator signing out.
 /// Idempotent rather than refusing an unknown or already-gone id: signing
 /// out of a session that is already gone reaches the same end state either

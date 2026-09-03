@@ -52,7 +52,7 @@ async fn main() -> ExitCode {
 
     tracing::info!(bind_addr = %config.bind_addr, environment = ?config.environment, "salt-server listening");
 
-    let router = build_router(AppState::new(db));
+    let router = build_router(AppState::new(db, !config.insecure_cookies));
     let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await;

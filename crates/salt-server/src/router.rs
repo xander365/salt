@@ -14,6 +14,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::error::ApiError;
 use crate::request_id;
+use crate::session;
 use crate::state::AppState;
 
 /// §0.19's own number: bodies are capped at 256 KB.
@@ -41,7 +42,13 @@ pub fn build_router(state: AppState) -> Router {
     #[allow(unused_mut, reason = "reassigned only when test-support is enabled")]
     let mut router = Router::new()
         .route("/api/health", get(health))
-        .route("/api/ready", get(ready));
+        .route("/api/ready", get(ready))
+        .route(
+            "/api/session",
+            get(session::who_am_i)
+                .post(session::login)
+                .delete(session::logout),
+        );
 
     #[cfg(feature = "test-support")]
     {

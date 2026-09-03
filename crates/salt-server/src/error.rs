@@ -61,6 +61,49 @@ impl ApiError {
         }
     }
 
+    /// A JSON body Axum's own extractor could not parse into the shape a
+    /// route expects — absent, not JSON, or missing a required field.
+    /// Turned into the documented envelope for the same reason
+    /// [`Self::payload_too_large`] is: Axum's own rejection is plain text,
+    /// not Salt's `{ "error": ... }` shape.
+    pub fn malformed_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "malformed_request",
+            message: "the request body is malformed".to_string(),
+            details: None,
+        }
+    }
+
+    /// `POST /api/session` was given an email and password that do not
+    /// authenticate — a wrong password, an unknown email, a disabled
+    /// Operator or a locked account, all indistinguishable from outside
+    /// (issue #46's own acceptance criterion; see
+    /// [`payroll_app::PayrollAppError::OperatorCredentialInvalid`]). Carries
+    /// nothing that would let a caller tell those apart, for the same reason
+    /// the use case it wraps does not.
+    pub fn invalid_credentials() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_credentials",
+            message: "invalid credentials".to_string(),
+            details: None,
+        }
+    }
+
+    /// `GET /api/session` or `DELETE /api/session` was called with no
+    /// session cookie, or one that no longer names a live session. §0.33:
+    /// `GET /api/session` is the only source of truth about being signed
+    /// in, so this is the one refusal that answers "you are not".
+    pub fn unauthenticated() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthenticated",
+            message: "no valid session".to_string(),
+            details: None,
+        }
+    }
+
     /// `GET /api/ready` could not reach the database. Deliberately 503 and
     /// not 500: the whole point of a readiness probe separate from liveness
     /// (§0's story 32) is to let a load balancer tell "process up" from

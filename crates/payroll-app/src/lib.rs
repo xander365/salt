@@ -47,7 +47,7 @@ pub use membership::{
 pub use opening_balance::record_opening_balance;
 pub use operator::{
     OperatorId, OperatorSnapshot, OperatorStatus, create_operator, disable_operator,
-    find_operator_by_email, verify_operator_credential,
+    find_operator_by_email, find_operator_by_id, verify_operator_credential,
 };
 pub use payroll_run::{
     PayrollRunId, create_correction_run, create_ordinary_payroll_run, remove_employment_from_run,
@@ -56,7 +56,8 @@ pub use payroll_run::{
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use reversal::reverse_finalized_payroll;
 pub use session::{
-    CreatedSession, SessionId, SessionSnapshot, create_session, delete_session, load_session,
+    CreatedSession, SessionId, SessionSnapshot, clear_expired_sessions, create_session,
+    delete_session, load_session,
 };
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,

@@ -8,16 +8,18 @@
 //! goes through `payroll-app`'s `SaltDatabase` and its use cases — nothing
 //! here writes SQL.
 //!
-//! This spec ships two unauthenticated routes, `GET /api/health` and `GET
-//! /api/ready`, and the transport rules every later route inherits: the
-//! error envelope, the `X-Salt-Request` mutation guard, the JSON body
-//! limit, and the security headers. Sign-in, the authorization extractor and
-//! bootstrap are issues #46, #47 and #48 — not started here.
+//! This crate ships `GET /api/health` and `GET /api/ready` (issue #45), the
+//! transport rules every later route inherits — the error envelope, the
+//! `X-Salt-Request` mutation guard, the JSON body limit, and the security
+//! headers — and the three session routes (issue #46): `POST`, `DELETE` and
+//! `GET /api/session`. The authorization extractor and bootstrap are issues
+//! #47 and #48 — not started here.
 
 mod config;
 mod error;
 mod request_id;
 mod router;
+mod session;
 mod state;
 
 pub use config::{ConfigError, Environment, ServerConfig};

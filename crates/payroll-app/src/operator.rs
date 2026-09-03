@@ -212,6 +212,35 @@ pub async fn find_operator_by_email(
     )
 }
 
+/// Reads the Operator named by `operator_id`, or `None` when no such row
+/// exists. The counterpart [`find_operator_by_email`] uses to look an
+/// Operator up by login identifier; this is what a caller who already holds
+/// an [`OperatorId`] — a [`crate::SessionSnapshot`], most often — uses
+/// instead. Not a security boundary any more than `find_operator_by_email`
+/// is: it names no credential, so there is no timing property to protect.
+pub async fn find_operator_by_id(
+    db: &SaltDatabase,
+    operator_id: &OperatorId,
+) -> Result<Option<OperatorSnapshot>, PayrollAppError> {
+    type Row = (String, String, String, String);
+
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT id::text, email, display_name, status FROM operator WHERE id = $1::uuid",
+    )
+    .bind(operator_id.as_str())
+    .fetch_optional(db.pool())
+    .await?;
+
+    Ok(
+        row.map(|(id, email, display_name, status)| OperatorSnapshot {
+            id: OperatorId::new(id),
+            email,
+            display_name,
+            status: operator_status_from_column(&status),
+        }),
+    )
+}
+
 /// Marks an Operator `disabled` (§6: "How is an Operator disabled without
 /// deleting history?" — by status, never a delete). Disabling an
 /// already-disabled Operator is refused rather than repeated, the same
@@ -516,8 +545,24 @@ fn operator_status_from_column(status: &str) -> OperatorStatus {
 #[cfg(test)]
 mod tests {
     use argon2::{Params, Version};
+    use sqlx::PgPool;
 
     use super::*;
+    use crate::database::SaltDatabase;
+
+    /// `OperatorId::new` is `pub(crate)`, so only a test inside this crate
+    /// can hand `find_operator_by_id` an id shaped like a real Operator's
+    /// that names no row — the same note `session.rs`'s and
+    /// `membership.rs`'s own tests make of their own parent checks.
+    #[sqlx::test]
+    async fn finding_an_unknown_id_returns_none(pool: PgPool) {
+        let db = SaltDatabase::from_pool(pool);
+        let unknown = OperatorId::new(crate::ids::new_id());
+
+        let found = find_operator_by_id(&db, &unknown).await.unwrap();
+
+        assert_eq!(found, None);
+    }
 
     /// Proves `DUMMY_VERIFIER` is itself a well-formed Argon2id PHC string
     /// that real Argon2 work can run against — the property

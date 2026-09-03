@@ -4,7 +4,8 @@
 
 use chrono::{DateTime, Duration, SubsecRound, Utc};
 use payroll_app::{
-    OperatorId, SaltDatabase, create_operator, create_session, delete_session, load_session,
+    OperatorId, SaltDatabase, clear_expired_sessions, create_operator, create_session,
+    delete_session, load_session,
 };
 use sqlx::PgPool;
 
@@ -449,6 +450,57 @@ async fn the_plaintext_token_is_nowhere_in_the_row_it_created(pool: PgPool) {
     assert_ne!(token_hash, created.token);
     assert!(!token_hash.contains(&created.token));
     assert_eq!(token_hash.len(), 64, "a SHA-256 hex digest, not the token");
+}
+
+// --- Clearing an Operator's expired sessions ---------------------------
+
+#[sqlx::test]
+async fn clearing_expired_sessions_removes_only_this_operators_expired_rows(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let alice = an_operator(&db).await;
+    let bob = named_operator(&db, "bob@example.com", "Bob").await;
+
+    let long_ago = a_clock_reading();
+    create_session(&db, &alice, long_ago).await.unwrap();
+    create_session(&db, &bob, long_ago).await.unwrap();
+
+    let now = long_ago + Duration::hours(12) + Duration::seconds(1);
+    let alices_live = create_session(&db, &alice, now).await.unwrap();
+
+    clear_expired_sessions(&db, &alice, now).await.unwrap();
+
+    assert_eq!(
+        session_count(&pool).await,
+        2,
+        "Alice's expired row is gone, leaving her live one and Bob's untouched expired one"
+    );
+    assert!(
+        load_session(&db, &alices_live.token, now)
+            .await
+            .unwrap()
+            .is_some(),
+        "a live session for the same Operator must survive"
+    );
+}
+
+#[sqlx::test]
+async fn clearing_expired_sessions_for_an_operator_with_none_is_a_no_op(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let operator_id = an_operator(&db).await;
+    let created = create_session(&db, &operator_id, a_clock_reading())
+        .await
+        .unwrap();
+
+    clear_expired_sessions(&db, &operator_id, a_clock_reading())
+        .await
+        .unwrap();
+
+    assert!(
+        load_session(&db, &created.token, a_clock_reading())
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 async fn session_count(pool: &PgPool) -> i64 {

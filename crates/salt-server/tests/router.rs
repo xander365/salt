@@ -45,7 +45,7 @@ async fn test_router() -> axum::Router {
     let db = SaltDatabase::connect(&test_database_config())
         .await
         .expect("connect to the local, migrated test database (see AGENTS.md)");
-    build_router(AppState::new(db))
+    build_router(AppState::new(db, true))
 }
 
 fn get(path: &str) -> Request<Body> {

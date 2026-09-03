@@ -1534,7 +1534,9 @@ name = "salt-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "http-body-util",
+ "payroll",
  "payroll-app",
  "salt-server",
  "serde",

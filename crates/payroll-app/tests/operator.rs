@@ -6,7 +6,7 @@
 use chrono::{SubsecRound, Utc};
 use payroll_app::{
     OperatorStatus, PayrollAppError, SaltDatabase, create_operator, disable_operator,
-    find_operator_by_email, verify_operator_credential,
+    find_operator_by_email, find_operator_by_id, verify_operator_credential,
 };
 use sqlx::{Acquire, PgPool};
 
@@ -30,6 +30,28 @@ async fn an_operator_is_created_and_found_by_its_own_email(pool: PgPool) {
     assert_eq!(found.email, "alice@example.com");
     assert_eq!(found.display_name, "Alice");
     assert_eq!(found.status, OperatorStatus::Active);
+}
+
+#[sqlx::test]
+async fn an_operator_is_found_by_its_own_id(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let created = create_operator(
+        &db,
+        "alice@example.com",
+        "Alice",
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+
+    let found = find_operator_by_id(&db, &created)
+        .await
+        .unwrap()
+        .expect("the Operator just created must be found by its own id");
+
+    assert_eq!(found.id, created);
+    assert_eq!(found.email, "alice@example.com");
+    assert_eq!(found.display_name, "Alice");
 }
 
 #[sqlx::test]
