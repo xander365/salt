@@ -104,6 +104,21 @@ impl ApiError {
         }
     }
 
+    /// A caller who *is* a member of the Employer they named, but whose
+    /// role does not meet what the route demands (§0.6, §0.10) —
+    /// `AuthorizedEmployerContext::require_role`'s own refusal. Never used
+    /// for a non-member: that is [`Self::not_found`], because by the time a
+    /// handler can call `require_role` the caller's membership already
+    /// exists, and answering 403 here leaks nothing ADR-0017 protects.
+    pub fn forbidden() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "forbidden",
+            message: "your role does not permit this action".to_string(),
+            details: None,
+        }
+    }
+
     /// `GET /api/ready` could not reach the database. Deliberately 503 and
     /// not 500: the whole point of a readiness probe separate from liveness
     /// (§0's story 32) is to let a load balancer tell "process up" from

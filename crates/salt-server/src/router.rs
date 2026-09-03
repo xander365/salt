@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use serde_json::json;
 use tower_http::catch_panic::CatchPanicLayer;
 
+use crate::employers;
 use crate::error::ApiError;
 use crate::request_id;
 use crate::session;
@@ -48,13 +49,22 @@ pub fn build_router(state: AppState) -> Router {
             get(session::who_am_i)
                 .post(session::login)
                 .delete(session::logout),
-        );
+        )
+        .route("/api/employers", get(employers::list_employers));
 
     #[cfg(feature = "test-support")]
     {
         router = router
             .route("/__test/echo", axum::routing::post(test_support::echo))
-            .route("/__test/panic", get(test_support::panic));
+            .route("/__test/panic", get(test_support::panic))
+            .route(
+                "/__test/authorized-employer/{employer_id}",
+                get(test_support::authorized_employer_probe),
+            )
+            .route(
+                "/__test/authorized-employer/{employer_id}/owner-only",
+                get(test_support::owner_only_probe),
+            );
     }
 
     router
@@ -171,17 +181,23 @@ fn panic_message(payload: &(dyn std::any::Any + Send + 'static)) -> String {
     }
 }
 
-/// Routes that exist only so this crate's own tests (`tests/router.rs`) can
-/// drive [`require_salt_request_header`], the body limit and
-/// [`CatchPanicLayer`] against something real — this spec ships no mutating
-/// or panic-prone production route for them to exercise otherwise. Never
+/// Routes that exist only so this crate's own tests (`tests/router.rs`,
+/// `tests/authorized_employer.rs`) can drive [`require_salt_request_header`],
+/// the body limit, [`CatchPanicLayer`] and — from issue #47 —
+/// [`crate::authorized_employer::AuthorizedEmployerContext`] against
+/// something real: this spec ships no mutating, panic-prone or
+/// Employer-scoped production route for them to exercise otherwise. Never
 /// compiled into the binary: `test-support` is enabled only by this crate's
 /// own `dev-dependencies` (see `Cargo.toml`).
 #[cfg(feature = "test-support")]
 mod test_support {
     use axum::Json;
     use axum::body::Bytes;
+    use payroll_app::MembershipRole;
     use serde_json::{Value, json};
+
+    use crate::authorized_employer::AuthorizedEmployerContext;
+    use crate::error::ApiError;
 
     pub async fn echo(body: Bytes) -> Json<Value> {
         Json(json!({ "bytes": body.len() }))
@@ -189,6 +205,37 @@ mod test_support {
 
     pub async fn panic() -> Json<Value> {
         panic!("deliberate panic from salt-server's own test-support route")
+    }
+
+    /// Proves [`AuthorizedEmployerContext`] itself: any active member
+    /// reaches this route and gets back exactly what the extractor resolved
+    /// — nothing here re-derives or re-checks any of it.
+    pub async fn authorized_employer_probe(context: AuthorizedEmployerContext) -> Json<Value> {
+        Json(json!({
+            "operatorId": context.operator_id().to_string(),
+            "employerId": context.employer_id().to_string(),
+            "role": role_str(context.role()),
+            "actor": context.actor(),
+        }))
+    }
+
+    /// Proves [`AuthorizedEmployerContext::require_role`]: reachable by any
+    /// member, but only an `Owner` gets past the role check — the shape
+    /// every future §0.6 Owner-only route is meant to follow.
+    pub async fn owner_only_probe(
+        context: AuthorizedEmployerContext,
+    ) -> Result<Json<Value>, ApiError> {
+        context.require_role(MembershipRole::Owner)?;
+        Ok(Json(
+            json!({ "operatorId": context.operator_id().to_string() }),
+        ))
+    }
+
+    fn role_str(role: MembershipRole) -> &'static str {
+        match role {
+            MembershipRole::Owner => "owner",
+            MembershipRole::PayrollOperator => "payrollOperator",
+        }
     }
 }
 

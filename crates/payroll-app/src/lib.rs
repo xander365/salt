@@ -13,6 +13,7 @@ mod compensation_terms;
 mod correction;
 mod database;
 mod employer;
+mod employer_access;
 mod employment;
 mod error;
 mod finalize;
@@ -34,7 +35,10 @@ pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
 pub use compensation_terms::{correct_compensation_terms, record_compensation_terms};
 pub use correction::{EarningPrePopulation, add_employment_to_correction_run};
 pub use database::{DatabaseConfig, SaltDatabase, ping};
-pub use employer::{change_pay_schedule, create_employer};
+pub use employer::{
+    EmployerSummary, change_pay_schedule, create_employer, list_employers_for_operator,
+};
+pub use employer_access::{EmployerAccess, resolve_employer_access};
 pub use employment::{create_employment, get_employment_snapshot, void_employment};
 pub use error::{PayrollAppError, ScheduleBoundedFact};
 pub use finalize::{
@@ -63,6 +67,15 @@ pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,
 };
 pub use year_to_date::build_year_to_date_context;
+
+/// The one type this crate re-exports straight from `payroll` rather than
+/// wrapping in a snapshot of its own: `salt-server`'s
+/// `AuthorizedEmployerContext` extractor (issue #47) must *construct* an
+/// `EmployerId` from a URL path segment before it can ask
+/// [`resolve_employer_access`] about it, not merely receive one back from a
+/// use case the way every other caller across this seam does — and
+/// `salt-server` depends on no crate but this one (ADR-0018's own boundary).
+pub use payroll::EmployerId;
 
 /// The Salt release that produced this build: semver plus a short git SHA in
 /// one string, e.g. `0.1.0+g1a2b3c4` (CONTEXT.md, `SaltVersion`). Lets a

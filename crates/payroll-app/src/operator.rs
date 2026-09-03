@@ -534,7 +534,7 @@ fn hasher() -> Argon2<'static> {
 /// [`crate::employer::pay_schedule_from_columns`] applies to its own CHECK:
 /// disagreement here means the schema no longer matches this code, not a
 /// fact about the Operator being read.
-fn operator_status_from_column(status: &str) -> OperatorStatus {
+pub(crate) fn operator_status_from_column(status: &str) -> OperatorStatus {
     match status {
         "active" => OperatorStatus::Active,
         "disabled" => OperatorStatus::Disabled,

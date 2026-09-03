@@ -11,11 +11,14 @@
 //! This crate ships `GET /api/health` and `GET /api/ready` (issue #45), the
 //! transport rules every later route inherits — the error envelope, the
 //! `X-Salt-Request` mutation guard, the JSON body limit, and the security
-//! headers — and the three session routes (issue #46): `POST`, `DELETE` and
-//! `GET /api/session`. The authorization extractor and bootstrap are issues
-//! #47 and #48 — not started here.
+//! headers — the three session routes (issue #46): `POST`, `DELETE` and
+//! `GET /api/session`; and, from issue #47, the `AuthorizedEmployerContext`
+//! extractor (`authorized_employer`) and `GET /api/employers` (`employers`).
+//! Bootstrap is issue #48 — not started here.
 
+mod authorized_employer;
 mod config;
+mod employers;
 mod error;
 mod request_id;
 mod router;

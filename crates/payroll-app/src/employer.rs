@@ -8,6 +8,8 @@ use crate::database::SaltDatabase;
 use crate::error::{PayrollAppError, ScheduleBoundedFact};
 use crate::freeze::employer_has_a_finalization_in_or_after;
 use crate::ids::new_id;
+use crate::membership::{MembershipRole, membership_role_from_column};
+use crate::operator::OperatorId;
 use chrono::NaiveDate;
 use payroll::{
     DayOfMonth, EmployerId, EmploymentId, PaySchedule, PayrollError, PeriodEndDay, TaxYear,
@@ -45,6 +47,56 @@ pub async fn create_employer(
     .await?;
 
     Ok(id)
+}
+
+/// One Employer read back by [`list_employers_for_operator`]: the Employer's
+/// own id and human-readable `name` (issue #40), beside the `role` the
+/// caller's own membership grants for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmployerSummary {
+    pub id: EmployerId,
+    pub name: String,
+    pub role: MembershipRole,
+}
+
+/// `GET /api/employers` (issue #47, §0.22, §0.30's `ListEmployers`): every
+/// Employer `operator_id` holds an *active* EmployerMembership for, named
+/// beside the role that membership grants. A revoked membership names no
+/// Employer here, the same filter [`crate::session::load_session`]'s own
+/// caller applies to `GET /api/session`'s memberships — this is the list a
+/// client builds its own Employer switcher from, so a revoked grant must
+/// vanish from it exactly as fast as it stops being honoured.
+///
+/// Ordered the same way [`crate::list_employer_memberships`] orders its own
+/// rows, for the same reason: `employer_membership.created_at` is a
+/// transaction timestamp, so `employer_id` breaks a tie between two
+/// memberships granted together and makes the order total and stable.
+pub async fn list_employers_for_operator(
+    db: &SaltDatabase,
+    operator_id: &OperatorId,
+) -> Result<Vec<EmployerSummary>, PayrollAppError> {
+    type Row = (String, String, String);
+
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT employer.id, employer.name, employer_membership.role
+         FROM employer_membership
+         JOIN employer ON employer.id = employer_membership.employer_id
+         WHERE employer_membership.operator_id = $1::uuid
+           AND employer_membership.status = 'active'
+         ORDER BY employer_membership.created_at, employer.id",
+    )
+    .bind(operator_id.as_str())
+    .fetch_all(db.pool())
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, role)| EmployerSummary {
+            id: EmployerId::new(id),
+            name,
+            role: membership_role_from_column(&role),
+        })
+        .collect())
 }
 
 /// Changes an Employer's `PaySchedule` (§4.2), refused once any Employment
@@ -464,5 +516,133 @@ mod tests {
             pay_schedule_from_columns(kind, value).period_end_day(),
             schedule.period_end_day()
         );
+    }
+
+    mod list_employers_for_operator_tests {
+        use sqlx::PgPool;
+
+        use super::super::*;
+        use crate::membership::create_employer_membership;
+        use crate::operator::create_operator;
+
+        async fn an_operator(db: &SaltDatabase) -> OperatorId {
+            create_operator(
+                db,
+                "alice@example.com",
+                "Alice",
+                "correct horse battery staple",
+            )
+            .await
+            .unwrap()
+        }
+
+        #[sqlx::test]
+        async fn an_operator_with_no_membership_sees_no_employers(pool: PgPool) {
+            let db = SaltDatabase::from_pool(pool);
+            let operator_id = an_operator(&db).await;
+
+            let employers = list_employers_for_operator(&db, &operator_id)
+                .await
+                .unwrap();
+
+            assert_eq!(employers, Vec::new());
+        }
+
+        #[sqlx::test]
+        async fn an_active_membership_names_the_employer_and_the_role(pool: PgPool) {
+            let db = SaltDatabase::from_pool(pool);
+            let operator_id = an_operator(&db).await;
+            let employer_id = create_employer(
+                &db,
+                "Acme Corp",
+                PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap())),
+                "test-setup",
+            )
+            .await
+            .unwrap();
+            create_employer_membership(
+                &db,
+                &operator_id,
+                &employer_id,
+                MembershipRole::PayrollOperator,
+            )
+            .await
+            .unwrap();
+
+            let employers = list_employers_for_operator(&db, &operator_id)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                employers,
+                vec![EmployerSummary {
+                    id: employer_id,
+                    name: "Acme Corp".to_string(),
+                    role: MembershipRole::PayrollOperator,
+                }]
+            );
+        }
+
+        #[sqlx::test]
+        async fn a_revoked_membership_does_not_appear(pool: PgPool) {
+            let db = SaltDatabase::from_pool(pool);
+            let operator_id = an_operator(&db).await;
+            let employer_id = create_employer(
+                &db,
+                "Acme Corp",
+                PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap())),
+                "test-setup",
+            )
+            .await
+            .unwrap();
+            create_employer_membership(&db, &operator_id, &employer_id, MembershipRole::Owner)
+                .await
+                .unwrap();
+            crate::membership::revoke_employer_membership(&db, &operator_id, &employer_id)
+                .await
+                .unwrap();
+
+            let employers = list_employers_for_operator(&db, &operator_id)
+                .await
+                .unwrap();
+
+            assert_eq!(employers, Vec::new());
+        }
+
+        #[sqlx::test]
+        async fn another_operators_membership_is_not_returned(pool: PgPool) {
+            let db = SaltDatabase::from_pool(pool);
+            let operator_id = an_operator(&db).await;
+            let other_operator_id = create_operator(
+                &db,
+                "bob@example.com",
+                "Bob",
+                "correct horse battery staple",
+            )
+            .await
+            .unwrap();
+            let employer_id = create_employer(
+                &db,
+                "Acme Corp",
+                PaySchedule::new(PeriodEndDay::Day(DayOfMonth::new(25).unwrap())),
+                "test-setup",
+            )
+            .await
+            .unwrap();
+            create_employer_membership(
+                &db,
+                &other_operator_id,
+                &employer_id,
+                MembershipRole::Owner,
+            )
+            .await
+            .unwrap();
+
+            let employers = list_employers_for_operator(&db, &operator_id)
+                .await
+                .unwrap();
+
+            assert_eq!(employers, Vec::new());
+        }
     }
 }

@@ -48,7 +48,7 @@ fn absolute_timeout() -> Duration {
 /// was last seen. Eight hours, checked live by [`load_session`] rather than
 /// stored, which is what lets `last_seen_at` advance without ever touching
 /// the absolute deadline in `expires_at`.
-fn idle_timeout() -> Duration {
+pub(crate) fn idle_timeout() -> Duration {
     Duration::hours(8)
 }
 
@@ -56,7 +56,7 @@ fn idle_timeout() -> Duration {
 /// extend it. Five minutes of drift against an eight-hour idle window is not
 /// a security property — it exists purely so a busy Operator's every request
 /// does not each write this row.
-fn idle_extension_threshold() -> Duration {
+pub(crate) fn idle_extension_threshold() -> Duration {
     Duration::minutes(5)
 }
 
@@ -350,7 +350,7 @@ fn generate_token() -> String {
 /// Plain SHA-256, not a password KDF: the token is already high-entropy
 /// (§ this module's own doc), so a slow hash would cost a hash per request
 /// and buy nothing (ADR-0016).
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hex::encode(hasher.finalize())

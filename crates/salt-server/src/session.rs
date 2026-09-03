@@ -17,8 +17,10 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
-use payroll_app::{MembershipRole, MembershipStatus, OperatorStatus, PayrollAppError};
+use chrono::{DateTime, Utc};
+use payroll_app::{
+    MembershipRole, MembershipStatus, OperatorSnapshot, OperatorStatus, PayrollAppError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -59,9 +61,13 @@ struct MembershipDto {
     role: RoleDto,
 }
 
+/// `pub(crate)` rather than private: `crate::employers`'s `GET
+/// /api/employers` answers with the identical shape `who_am_i`'s own
+/// `memberships` does, so both share this one conversion rather than each
+/// declaring its own copy of `MembershipRole`'s wire spelling.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-enum RoleDto {
+pub(crate) enum RoleDto {
     Owner,
     PayrollOperator,
 }
@@ -150,36 +156,13 @@ pub(crate) async fn who_am_i(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let token = session_token(&headers).ok_or_else(ApiError::unauthenticated)?;
-
-    let snapshot = payroll_app::load_session(state.db(), token, Utc::now())
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::unauthenticated)?;
-
-    let operator = payroll_app::find_operator_by_id(state.db(), &snapshot.operator_id)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| {
-            ApiError::internal("a live session names an Operator that no longer exists")
-        })?;
-
-    // A live session is not on its own proof of being signed in: §0's own
-    // pipeline reads "session valid, Operator active", and story 18 asks a
-    // disabled Operator to stop working immediately rather than when their
-    // session happens to expire. Read fresh here, on every request, which is
-    // the whole reason disabling needs no cache invalidation — and refused
-    // with the identical `unauthenticated` a missing cookie answers, so this
-    // route says no more about why than [`login`] does.
-    if operator.status != OperatorStatus::Active {
-        return Err(ApiError::unauthenticated());
-    }
+    let operator = authenticated_operator(&state, &headers, Utc::now()).await?;
 
     // Only active memberships: a revoked one grants nothing (ADR-0017), and
     // this response exists so a client can offer the Employers this
     // Operator can actually enter, not an audit trail of ones they once
     // could.
-    let memberships = payroll_app::list_employer_memberships(state.db(), &snapshot.operator_id)
+    let memberships = payroll_app::list_employer_memberships(state.db(), &operator.id)
         .await
         .map_err(ApiError::internal)?
         .into_iter()
@@ -198,6 +181,46 @@ pub(crate) async fn who_am_i(
         },
         memberships,
     }))
+}
+
+/// The check every session-scoped route starts with — a live session naming
+/// an active Operator — factored out because [`who_am_i`] and
+/// `crate::employers::list_employers` (issue #47's `GET /api/employers`)
+/// both need exactly it and nothing more: neither names an Employer in its
+/// URL, so neither reaches for `AuthorizedEmployerContext`, which exists for
+/// routes that do (see `crate::authorized_employer`).
+///
+/// A live session is not on its own proof of being signed in: §0's own
+/// pipeline reads "session valid, Operator active", and story 18 asks a
+/// disabled Operator to stop working immediately rather than when their
+/// session happens to expire. Both refusals — no valid session, and a
+/// session naming a now-inactive Operator — collapse to the identical 401
+/// `unauthenticated`, the same discipline [`login`] applies to every kind of
+/// credential failure.
+pub(crate) async fn authenticated_operator(
+    state: &AppState,
+    headers: &HeaderMap,
+    now: DateTime<Utc>,
+) -> Result<OperatorSnapshot, ApiError> {
+    let token = session_token(headers).ok_or_else(ApiError::unauthenticated)?;
+
+    let snapshot = payroll_app::load_session(state.db(), token, now)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::unauthenticated)?;
+
+    let operator = payroll_app::find_operator_by_id(state.db(), &snapshot.operator_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::internal("a live session names an Operator that no longer exists")
+        })?;
+
+    if operator.status != OperatorStatus::Active {
+        return Err(ApiError::unauthenticated());
+    }
+
+    Ok(operator)
 }
 
 /// The minimal, stateless body [`login`] and [`logout`] answer with —
@@ -241,7 +264,11 @@ fn cookie_header(value: &str, secure: bool, max_age: Option<u32>) -> HeaderValue
 /// [`SESSION_COOKIE_NAME`] pair. A browser folds every cookie for the origin
 /// into one `; `-separated header (RFC 6265 §5.4) — there is no per-cookie
 /// header to read instead.
-fn session_token(headers: &HeaderMap) -> Option<&str> {
+///
+/// `pub(crate)`: `crate::authorized_employer`'s `AuthorizedEmployerContext`
+/// reads the identical cookie, so it shares this parser rather than
+/// carrying a second copy of [`SESSION_COOKIE_NAME`].
+pub(crate) fn session_token(headers: &HeaderMap) -> Option<&str> {
     let header = headers.get(header::COOKIE)?.to_str().ok()?;
     header.split(';').find_map(|pair| {
         let (name, value) = pair.trim().split_once('=')?;

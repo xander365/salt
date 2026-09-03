@@ -244,7 +244,7 @@ fn role_as_db_str(role: MembershipRole) -> &'static str {
 /// `Result`: the table's own CHECK constraint already guarantees `role` is
 /// one of these two strings, so disagreement here means the schema no
 /// longer matches this code, not a fact about the membership being read.
-fn membership_role_from_column(role: &str) -> MembershipRole {
+pub(crate) fn membership_role_from_column(role: &str) -> MembershipRole {
     match role {
         "owner" => MembershipRole::Owner,
         "payroll_operator" => MembershipRole::PayrollOperator,
