@@ -282,6 +282,24 @@ async fn creating_an_ordinary_run_proposes_every_overlapping_employment() {
     assert_eq!(members[0]["employmentId"], employment_id);
     assert_eq!(members[0]["fullName"], "Ada Lovelace");
     assert_eq!(members[0]["earnings"].as_array().unwrap().len(), 0);
+
+    // No standing-data screen in this ticket's scope has declared anything
+    // for this Employment yet (issue #54, §0.31): every fact a read alone
+    // can judge is still missing, so the wire response names all three.
+    let blockers = members[0]["blockers"].as_array().unwrap();
+    let codes: Vec<&str> = blockers
+        .iter()
+        .map(|blocker| blocker["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![
+            "prior_employment_unknown",
+            "unsupported_deduction_status_unknown",
+            "no_compensation_terms_in_force",
+        ]
+    );
+    assert!(blockers.iter().all(|blocker| blocker["details"].is_null()));
 }
 
 #[tokio::test]

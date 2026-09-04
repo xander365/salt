@@ -9,11 +9,17 @@
 //! *not* have changed, which no public function reports.
 
 use chrono::NaiveDate;
-use payroll::{DayOfMonth, Earning, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay};
+use payroll::{
+    DayOfMonth, Earning, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment,
+    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds,
+    UnsupportedDeductionStatus,
+};
 use payroll_app::{
-    EmploymentPerson, PayrollAppError, PayrollRunId, RunStatus, SaltDatabase, create_employer,
-    create_employment, create_ordinary_payroll_run, get_payroll_run_detail, list_payroll_runs,
-    remove_employment_from_run, set_run_earnings, verify_payroll_run_belongs_to_employer,
+    EmploymentPerson, PayrollAppError, PayrollRunBlocker, PayrollRunId, RunStatus, SaltDatabase,
+    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
+    declare_unsupported_deduction_status, get_payroll_run_detail, list_payroll_runs,
+    record_compensation_terms, remove_employment_from_run, set_run_earnings,
+    verify_payroll_run_belongs_to_employer,
 };
 use sqlx::PgPool;
 
@@ -35,6 +41,13 @@ fn february_period() -> PayPeriod {
 /// [`february_period`].
 fn march_period() -> PayPeriod {
     PayPeriod::new(date(2026, 2, 26), date(2026, 3, 25)).unwrap()
+}
+
+/// A date `twenty_sixth_schedule()` itself starts a period on, and well
+/// before [`february_period`] — used for every effective-dated declaration
+/// below, so INV-014 is satisfied without the exact date mattering.
+fn well_before_the_period() -> NaiveDate {
+    date(2025, 1, 26)
 }
 
 async fn an_employer(db: &SaltDatabase, name: &str) -> EmployerId {
@@ -289,6 +302,336 @@ async fn a_run_id_that_is_not_a_uuid_is_not_found(pool: PgPool) {
         .unwrap_err();
 
     assert!(matches!(refusal, PayrollAppError::PayrollRunNotFound(_)));
+}
+
+// ---- Blockers (issue #54, §0.31) ----
+
+/// Every fact `calculate_payroll_run` needs already on record: ready, with
+/// an empty `blockers` list.
+#[sqlx::test]
+async fn a_member_with_every_fact_confirmed_has_no_blockers(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    record_compensation_terms(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_prior_employment(
+        &db,
+        &employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(detail.members.len(), 1);
+    assert_eq!(detail.members[0].blockers, Vec::new());
+}
+
+#[sqlx::test]
+async fn no_prior_employment_declaration_blocks_with_prior_employment_unknown(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    record_compensation_terms(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    // No `PriorEmployment` declared at all.
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail.members[0].blockers,
+        vec![PayrollRunBlocker::PriorEmploymentUnknown]
+    );
+}
+
+#[sqlx::test]
+async fn a_declared_prior_employment_blocks_with_treatment_unconfirmed_and_carries_the_figures(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    record_compensation_terms(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    let figures = PriorEmploymentFigures::new(
+        Money::from_cents(500000).unwrap(),
+        Money::from_cents(75000).unwrap(),
+    );
+    declare_prior_employment(
+        &db,
+        &employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::Some(figures),
+        "actor",
+    )
+    .await
+    .unwrap();
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail.members[0].blockers,
+        vec![PayrollRunBlocker::PriorEmploymentTreatmentUnconfirmed { figures }]
+    );
+}
+
+#[sqlx::test]
+async fn no_unsupported_deduction_declaration_blocks_with_status_unknown(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    record_compensation_terms(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_prior_employment(
+        &db,
+        &employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    // No `UnsupportedDeductionStatus` declared at all.
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail.members[0].blockers,
+        vec![PayrollRunBlocker::UnsupportedDeductionStatusUnknown]
+    );
+}
+
+#[sqlx::test]
+async fn declared_unsupported_deductions_present_blocks_and_names_the_kinds(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    record_compensation_terms(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_prior_employment(
+        &db,
+        &employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    let kinds = UnsupportedDeductionKinds::new(vec![
+        UnsupportedDeductionKind::ProvidentFund,
+        UnsupportedDeductionKind::EducationPolicy,
+    ])
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::Present(kinds.clone()),
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail.members[0].blockers,
+        vec![PayrollRunBlocker::UnsupportedDeductionsPresent { kinds }]
+    );
+}
+
+#[sqlx::test]
+async fn no_compensation_terms_blocks_with_no_compensation_terms_in_force(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    declare_prior_employment(
+        &db,
+        &employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    // No `CompensationTerms` declared at all.
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail.members[0].blockers,
+        vec![PayrollRunBlocker::NoCompensationTermsInForce]
+    );
+}
+
+/// The whole point of §0.31: nothing is persisted. Recording the missing
+/// fact and reading again clears the blocker from the page — the same
+/// connection never sees a stale opinion.
+#[sqlx::test]
+async fn recording_the_missing_fact_clears_the_blocker_on_the_next_read(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    record_compensation_terms(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    // No `PriorEmployment` declared yet.
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let before = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        before.members[0].blockers,
+        vec![PayrollRunBlocker::PriorEmploymentUnknown]
+    );
+
+    declare_prior_employment(
+        &db,
+        &employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let after = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(after.members[0].blockers, Vec::new());
 }
 
 // ---- VerifyPayrollRunBelongsToEmployer ----

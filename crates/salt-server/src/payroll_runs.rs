@@ -26,12 +26,14 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, State};
 use chrono::NaiveDate;
 use payroll::{Earning, EmployerId, EmploymentId, Money};
-use payroll_app::RunStatus;
+use payroll_app::{PayrollRunBlocker, RunStatus};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::employment_facts::{PayPeriodDto, RecordedResponse};
 use crate::error::ApiError;
+use crate::payroll_error::blocker_code_and_details;
 use crate::state::AppState;
 
 /// `payroll_run.status`'s wire spelling — the same three states
@@ -165,16 +167,31 @@ pub(crate) struct PayrollRunDetailResponse {
     members: Vec<PayrollRunMemberDto>,
 }
 
-/// One member of a run's detail response. No `blockers` field yet (that is
-/// issue #54) — a struct of its own is what lets that field be added here
-/// later rather than reshaping this response (issue #53's own Deep
-/// Instructions).
+/// One member of a run's detail response: who is being proposed to pay, by
+/// name, their current Earning lines, and why they cannot be paid right now,
+/// if at all. An empty `blockers` means ready (issue #54, §0.31).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PayrollRunMemberDto {
     employment_id: String,
     full_name: String,
     earnings: Vec<EarningLineDto>,
+    blockers: Vec<BlockerDto>,
+}
+
+/// One entry of a member's `blockers` list, under the same stable `code`s
+/// [`crate::payroll_error`] already maps every refusal to (issue #54's own
+/// Deep Instructions: "the same strings the mapping in #50 already owns").
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockerDto {
+    code: &'static str,
+    details: Option<Value>,
+}
+
+fn blocker_to_dto(blocker: PayrollRunBlocker) -> BlockerDto {
+    let (code, details) = blocker_code_and_details(&blocker);
+    BlockerDto { code, details }
 }
 
 /// `GET /api/employers/{e}/payroll-runs/{r}`: the run's period, pay date,
@@ -203,6 +220,7 @@ pub(crate) async fn get_payroll_run(
                 employment_id: member.employment_id.to_string(),
                 full_name: member.full_name,
                 earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
+                blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
             })
             .collect(),
     }))

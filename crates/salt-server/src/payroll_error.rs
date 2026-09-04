@@ -30,7 +30,7 @@
 
 use axum::http::StatusCode;
 use payroll::{PayrollError, UnsupportedDeductionKind};
-use payroll_app::{PayrollAppError, ScheduleBoundedFact};
+use payroll_app::{PayrollAppError, PayrollRunBlocker, ScheduleBoundedFact};
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
@@ -760,6 +760,45 @@ fn classify_payroll_error(err: &PayrollError) -> (StatusCode, &'static str, Opti
                 "payeCents": figures.paye().cents(),
             })),
         ),
+    }
+}
+
+/// Every [`PayrollRunBlocker`] variant, mapped to the run detail's own
+/// `blockers[].code` and `blockers[].details` (issue #54, §0.31). The five
+/// codes below are exactly the strings [`classify_payroll_error`] already
+/// uses for `unsupported_deduction_status_unknown`,
+/// `unsupported_deductions_present`, `prior_employment_unknown` and
+/// `prior_employment_treatment_unconfirmed`, and the one
+/// [`classify_payroll_app_error`] uses for `no_compensation_terms_in_force`
+/// — this function does not mint parallel ones, and its two "present"
+/// bodies (`taxableRemunerationCents`/`payeCents`, `kinds`) are shaped
+/// identically to those refusals' own `details` for the same reason.
+pub(crate) fn blocker_code_and_details(
+    blocker: &PayrollRunBlocker,
+) -> (&'static str, Option<Value>) {
+    match blocker {
+        PayrollRunBlocker::PriorEmploymentUnknown => ("prior_employment_unknown", None),
+        PayrollRunBlocker::PriorEmploymentTreatmentUnconfirmed { figures } => (
+            "prior_employment_treatment_unconfirmed",
+            Some(json!({
+                "taxableRemunerationCents": figures.taxable_remuneration().cents(),
+                "payeCents": figures.paye().cents(),
+            })),
+        ),
+        PayrollRunBlocker::UnsupportedDeductionStatusUnknown => {
+            ("unsupported_deduction_status_unknown", None)
+        }
+        PayrollRunBlocker::UnsupportedDeductionsPresent { kinds } => (
+            "unsupported_deductions_present",
+            Some(json!({
+                "kinds": kinds
+                    .as_slice()
+                    .iter()
+                    .map(unsupported_deduction_kind_code)
+                    .collect::<Vec<_>>(),
+            })),
+        ),
+        PayrollRunBlocker::NoCompensationTermsInForce => ("no_compensation_terms_in_force", None),
     }
 }
 

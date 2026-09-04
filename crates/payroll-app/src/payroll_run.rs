@@ -8,12 +8,18 @@
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
 use crate::employer::{generates_the_period_end, pay_schedule_from_columns};
+use crate::employment::get_employment_snapshot_on;
 use crate::error::PayrollAppError;
 use crate::finalize::FinalizedPayrollId;
 use crate::freeze::finalized_period_ends_in;
 use crate::ids::app_id;
+use crate::prior_employment::get_prior_employment_on;
+use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use chrono::NaiveDate;
-use payroll::{Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, TaxYear};
+use payroll::{
+    Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, PriorEmployment,
+    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+};
 
 app_id! {
     /// `payroll-app`'s own id (§4.1): a native UUID, unlike the pure crate's
@@ -787,17 +793,49 @@ pub async fn list_payroll_runs(
         .collect())
 }
 
+/// Why `calculate_payroll_run` would refuse to pay this member right now,
+/// read from standing facts rather than remembered from a failed Calculate
+/// (issue #54, §0.31). Exactly the five states a fact lookup alone can
+/// answer — the same five codes the error contract already owns (issue
+/// #50) — and no others: a refusal that only appears once arithmetic runs
+/// (inside [`crate::calculate_payroll_run`]) is out of this list's reach by
+/// construction.
+///
+/// The two "present" variants matter as much as the two "unknown" ones:
+/// known `PriorEmployment` figures are refused while their treatment is
+/// unconfirmed, and a present `UnsupportedDeductionStatus` is refused as
+/// firmly as an unknown one. A list showing only the unknowns would tell an
+/// Operator they were ready when they were not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayrollRunBlocker {
+    /// No `PriorEmployment` declaration is in force for the run's TaxYear.
+    PriorEmploymentUnknown,
+    /// A `PriorEmployment` declaration names figures, and Salt has no policy
+    /// for how a new Employer must treat them (SC-OPEN-4).
+    PriorEmploymentTreatmentUnconfirmed { figures: PriorEmploymentFigures },
+    /// No `UnsupportedDeductionStatus` declaration is in force at the
+    /// period end.
+    UnsupportedDeductionStatusUnknown,
+    /// An `UnsupportedDeductionStatus` declaration in force at the period
+    /// end is `Present`. `kinds` names every kind declared, so "you have
+    /// unsupported deductions" is never reported unactionably.
+    UnsupportedDeductionsPresent { kinds: UnsupportedDeductionKinds },
+    /// No `CompensationTerms` row is in force at the period end.
+    NoCompensationTermsInForce,
+}
+
 /// One member of a PayrollRun in `GET
 /// /api/employers/{e}/payroll-runs/{r}` (issue #53): who is being proposed
-/// to pay, by name, and their current Earning lines. A struct of its own —
-/// not a tuple, not a bare `Vec<Earning>` beside a name — so a later
-/// per-member `blockers` list (issue #54) is an added field here, not a
-/// reshaped response.
+/// to pay, by name, their current Earning lines, and why they cannot be paid
+/// right now, if at all (issue #54). A struct of its own — not a tuple, not
+/// a bare `Vec<Earning>` beside a name — so `blockers` is an added field
+/// here, not a reshaped response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayrollRunMember {
     pub employment_id: EmploymentId,
     pub full_name: String,
     pub earnings: Vec<Earning>,
+    pub blockers: Vec<PayrollRunBlocker>,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -847,6 +885,8 @@ pub async fn get_payroll_run_detail(
 
     let (period_start, period_end, pay_date, status) =
         run.ok_or_else(|| PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()))?;
+    let period = PayPeriod::new(period_start, period_end)
+        .expect("payroll_run CHECK: period_end is never before period_start");
 
     type MemberRow = (String, String, Option<serde_json::Value>);
 
@@ -872,31 +912,82 @@ pub async fn get_payroll_run_detail(
     .fetch_all(db.pool())
     .await?;
 
-    let members = member_rows
-        .into_iter()
-        .map(|(employment_id, full_name, earning_jsons)| {
-            let earnings = earning_jsons
-                .map(|value| {
-                    serde_json::from_value::<Vec<Earning>>(value)
-                        .expect("payroll_run_earning.earning_json always serializes an Earning")
-                })
-                .unwrap_or_default();
-            PayrollRunMember {
-                employment_id: EmploymentId::new(employment_id),
-                full_name,
-                earnings,
-            }
-        })
-        .collect();
+    let mut members = Vec::with_capacity(member_rows.len());
+    for (employment_id, full_name, earning_jsons) in member_rows {
+        let earnings = earning_jsons
+            .map(|value| {
+                serde_json::from_value::<Vec<Earning>>(value)
+                    .expect("payroll_run_earning.earning_json always serializes an Earning")
+            })
+            .unwrap_or_default();
+        let employment_id = EmploymentId::new(employment_id);
+        let blockers = member_blockers(db, &employment_id, period).await?;
+        members.push(PayrollRunMember {
+            employment_id,
+            full_name,
+            earnings,
+            blockers,
+        });
+    }
 
     Ok(PayrollRunDetail {
         id: payroll_run_id.clone(),
-        period: PayPeriod::new(period_start, period_end)
-            .expect("payroll_run CHECK: period_end is never before period_start"),
+        period,
         pay_date,
         status: RunStatus::from_column(&status),
         members,
     })
+}
+
+/// The `blockers` list for one active member, computed by reading exactly
+/// the standing facts [`crate::calculate_payroll_run`] itself reads when it
+/// assembles that member's `PayrollInput` — never by running the calculator
+/// (issue #54, §0.31). An empty list means ready.
+///
+/// Order matches the read model's own listing: PriorEmployment, then
+/// UnsupportedDeductionStatus, then CompensationTerms. Each fact yields at
+/// most one blocker, so the list holds zero to three entries.
+///
+/// Every other [`PayrollAppError`] a read below could raise — an Employment
+/// that has gone missing or void since the caller's own membership row was
+/// read — is not one of the five standing-fact states this list reports, so
+/// it is propagated rather than swallowed into a blocker that would
+/// misname it.
+async fn member_blockers(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+    period: PayPeriod,
+) -> Result<Vec<PayrollRunBlocker>, PayrollAppError> {
+    let mut blockers = Vec::new();
+
+    let tax_year = TaxYear::for_period_end(period.end());
+    match get_prior_employment_on(db.pool(), employment_id, tax_year).await? {
+        PriorEmployment::None => {}
+        PriorEmployment::Unknown => blockers.push(PayrollRunBlocker::PriorEmploymentUnknown),
+        PriorEmployment::Some(figures) => {
+            blockers.push(PayrollRunBlocker::PriorEmploymentTreatmentUnconfirmed { figures })
+        }
+    }
+
+    match get_unsupported_deduction_status_on(db.pool(), employment_id, period.end()).await? {
+        UnsupportedDeductionStatus::ConfirmedNone => {}
+        UnsupportedDeductionStatus::Unknown => {
+            blockers.push(PayrollRunBlocker::UnsupportedDeductionStatusUnknown)
+        }
+        UnsupportedDeductionStatus::Present(kinds) => {
+            blockers.push(PayrollRunBlocker::UnsupportedDeductionsPresent { kinds })
+        }
+    }
+
+    match get_employment_snapshot_on(db.pool(), employment_id, period.end()).await {
+        Ok(_) => {}
+        Err(PayrollAppError::NoCompensationTermsInForce(_)) => {
+            blockers.push(PayrollRunBlocker::NoCompensationTermsInForce)
+        }
+        Err(other) => return Err(other),
+    }
+
+    Ok(blockers)
 }
 
 #[cfg(test)]
