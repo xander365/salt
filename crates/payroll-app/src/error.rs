@@ -149,13 +149,13 @@ pub enum PayrollAppError {
     /// `Calculated` run is not refused: editing it reopens it as `Draft`.
     PayrollRunAlreadyFinalized {
         payroll_run_id: PayrollRunId,
-        /// The single live `FinalizedPayroll` this run answers with, when
-        /// there is exactly one active member to answer for (issue #50,
-        /// §0.28) — always true of a Correction run (§4.8), and true of an
-        /// Ordinary run that happens to have one. An Ordinary run with more
-        /// than one active member finalizes each into its own separate row,
-        /// so there is no single answer to give, and this is `None` rather
-        /// than a guess.
+        /// The single `FinalizedPayroll` this run produced, when there is
+        /// exactly one active member to answer for (issue #50, §0.28) —
+        /// always true of a Correction run (§4.8), and true of an Ordinary
+        /// run that happens to have one. An Ordinary run with more than one
+        /// active member finalizes each into its own separate row, so there
+        /// is no single answer to give, and this is `None` rather than a
+        /// guess.
         finalized_payroll_id: Option<FinalizedPayrollId>,
     },
     /// `FinalizePayrollRun` was asked for a run that is not yet `Calculated`

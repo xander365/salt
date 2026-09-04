@@ -18,7 +18,7 @@ use payroll_app::{
     PayrollAppError, PayrollRunId, SALT_VERSION, SNAPSHOT_SCHEMA_VERSION, SaltDatabase,
     calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    record_compensation_terms,
+    record_compensation_terms, reverse_finalized_payroll,
 };
 use sqlx::{Acquire, PgPool, Row};
 use tokio::sync::oneshot;
@@ -400,6 +400,46 @@ async fn finalizing_an_already_finalized_run_is_refused(pool: PgPool) {
         Err(PayrollAppError::PayrollRunAlreadyFinalized {
             payroll_run_id: run_id,
             finalized_payroll_id: None,
+        })
+    );
+}
+
+/// The immutable history row remains the identity of the run even after a
+/// reversal removes it from the liveness index. A retry must not return null
+/// or a later Correction's replacement row.
+#[sqlx::test]
+async fn an_already_finalized_run_names_its_history_after_reversal(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let run_id = a_calculated_run(&db, &employer_id).await;
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
+        .await
+        .unwrap();
+    let finalized_payroll_id = outcome.finalized[0].1.clone();
+
+    reverse_finalized_payroll(
+        &db,
+        &finalized_payroll_id,
+        "the payroll was wrong",
+        "reverser",
+    )
+    .await
+    .unwrap();
+
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id,
+            finalized_payroll_id: Some(finalized_payroll_id),
         })
     );
 }

@@ -6,7 +6,7 @@
 //! refusals to the documented envelope.
 //!
 //! Every kind of login failure looks the same from outside (issue #46's own
-//! acceptance criterion): [`login`] maps every
+//! acceptance criterion): the central [`crate::payroll_error`] mapping maps
 //! [`payroll_app::PayrollAppError::OperatorCredentialInvalid`] to the
 //! identical 401 `invalid_credentials`, carrying nothing a caller could use
 //! to tell a wrong password apart from an unknown email, a disabled
@@ -18,9 +18,7 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use payroll_app::{
-    MembershipRole, MembershipStatus, OperatorSnapshot, OperatorStatus, PayrollAppError,
-};
+use payroll_app::{MembershipRole, MembershipStatus, OperatorSnapshot, OperatorStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -97,10 +95,7 @@ pub(crate) async fn login(
 
     let operator_id = payroll_app::verify_operator_credential(state.db(), &email, &password, now)
         .await
-        .map_err(|err| match err {
-            PayrollAppError::OperatorCredentialInvalid => ApiError::invalid_credentials(),
-            other => ApiError::internal(other),
-        })?;
+        .map_err(ApiError::from)?;
 
     // Minting the new row and clearing that Operator's already-expired ones
     // are one use case (§0.12: "the token rotates on login, and that
