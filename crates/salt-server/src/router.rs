@@ -13,6 +13,7 @@ use serde_json::json;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::employers;
+use crate::employment_facts;
 use crate::employments;
 use crate::error::ApiError;
 use crate::request_id;
@@ -63,6 +64,22 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/employments/{employment_id}",
             get(employments::get_employment),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/compensation-terms",
+            axum::routing::post(employment_facts::record_compensation_terms),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/prior-employment",
+            axum::routing::post(employment_facts::declare_prior_employment),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions",
+            axum::routing::post(employment_facts::declare_unsupported_deduction_status),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
+            axum::routing::post(employment_facts::record_opening_balance),
         );
 
     #[cfg(feature = "test-support")]

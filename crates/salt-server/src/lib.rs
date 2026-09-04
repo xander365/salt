@@ -26,6 +26,7 @@ mod authorized_employer;
 mod bootstrap_cli;
 mod config;
 mod employers;
+mod employment_facts;
 mod employments;
 mod error;
 mod payroll_error;

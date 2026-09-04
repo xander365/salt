@@ -189,6 +189,31 @@ pub struct EmploymentDetail {
     pub current_basic_pay: Option<Money>,
 }
 
+/// Confirms `employment_id` belongs to `employer_id`, refusing exactly like a
+/// missing Employment (ADR-0017) when it does not — the same 404
+/// [`get_employment_detail`] already gives a cross-Employer id, made
+/// available on its own for the compensation-terms, prior-employment,
+/// unsupported-deductions and opening-balance use cases (issue #52), none of
+/// which take an `EmployerId` themselves and so cannot make this check on
+/// their own.
+pub async fn verify_employment_belongs_to_employer(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    employment_id: &EmploymentId,
+) -> Result<(), PayrollAppError> {
+    let found: Option<bool> =
+        sqlx::query_scalar("SELECT TRUE FROM employment WHERE id = $1 AND employer_id = $2")
+            .bind(employment_id.as_str())
+            .bind(employer_id.as_str())
+            .fetch_optional(db.pool())
+            .await?;
+    if found.is_some() {
+        Ok(())
+    } else {
+        Err(PayrollAppError::EmploymentNotFound(employment_id.clone()))
+    }
+}
+
 /// Reads one Employment back for display, scoped to `employer_id` in SQL
 /// (ADR-0017): an id belonging to another Employer is refused exactly like
 /// one that does not exist at all, both as [`PayrollAppError::EmploymentNotFound`].
