@@ -100,8 +100,8 @@ pub(crate) async fn create_payroll_run(
 ) -> Result<Json<CreatePayrollRunResponse>, ApiError> {
     let Json(request) = body.map_err(|_rejection| ApiError::malformed_request())?;
     let employer_id = EmployerId::new(context.employer_id().as_str());
-    let period = payroll::PayPeriod::try_from(request.period)
-        .map_err(|_| ApiError::malformed_request())?;
+    let period =
+        payroll::PayPeriod::try_from(request.period).map_err(|_| ApiError::malformed_request())?;
 
     let payroll_run_id = payroll_app::create_ordinary_payroll_run(
         state.db(),

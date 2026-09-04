@@ -195,7 +195,9 @@ fn list_runs_request(employer_id: &str, cookie: &str) -> Request<Body> {
 fn detail_request(employer_id: &str, run_id: &str, cookie: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
-        .uri(format!("/api/employers/{employer_id}/payroll-runs/{run_id}"))
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}"
+        ))
         .header(header::COOKIE, cookie)
         .body(Body::empty())
         .unwrap()
@@ -426,7 +428,10 @@ async fn a_basic_pay_line_is_refused() {
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let json = body_json(response).await;
-    assert_eq!(json["error"]["code"], "basic_pay_cannot_be_set_as_an_earning");
+    assert_eq!(
+        json["error"]["code"],
+        "basic_pay_cannot_be_set_as_an_earning"
+    );
 }
 
 #[tokio::test]
@@ -512,20 +517,62 @@ async fn an_unknown_run_id_is_not_found_on_the_detail_route() {
     assert_eq!(json["error"]["code"], "payroll_run_not_found");
 }
 
+/// A signed-in Operator with no membership for this Employer gets 404 on
+/// every one of the four routes, not 403: 403 would confirm the Employer
+/// exists, which is a free existence oracle over payroll (ADR-0017). The
+/// `POST` is in the loop because a non-member creating a run would be a
+/// write, not merely a read.
 #[tokio::test]
 async fn without_membership_the_routes_answer_404() {
-    let (_, employer_id) = an_authorized_operator().await;
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
     let outsider_email = unique_email("mallory");
     create_operator(&outsider_email).await;
     let outsider_cookie = login(&outsider_email).await;
 
-    let response = router()
-        .await
-        .oneshot(list_runs_request(&employer_id, &outsider_cookie))
-        .await
-        .unwrap();
+    for request in [
+        create_run_request(
+            &employer_id,
+            &outsider_cookie,
+            true,
+            serde_json::json!({
+                "period": { "start": "2026-02-01", "end": "2026-02-28" },
+                "payDate": "2026-03-05",
+            }),
+        ),
+        list_runs_request(&employer_id, &outsider_cookie),
+        detail_request(&employer_id, &run_id, &outsider_cookie),
+        set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &outsider_cookie,
+            true,
+            serde_json::json!({ "earnings": [] }),
+        ),
+    ] {
+        let uri = request.uri().clone();
+        let method = request.method().clone();
+        let response = router().await.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must 404 a non-member"
+        );
+    }
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // The non-member's POST wrote nothing: the owner still has exactly the
+    // one run they created.
+    let listed = body_json(
+        router()
+            .await
+            .oneshot(list_runs_request(&employer_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed["payrollRuns"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -560,6 +607,304 @@ async fn every_route_answers_401_without_a_session() {
             response.status(),
             StatusCode::UNAUTHORIZED,
             "{method} {uri} must refuse an unauthenticated caller"
+        );
+    }
+}
+
+/// Acceptance: a run belonging to another Employer is absent from the list
+/// route, not merely 404 on the detail one. `.find()` in the happy-path test
+/// above cannot prove an absence, so this one asserts it directly.
+#[tokio::test]
+async fn another_employers_run_is_not_in_the_list() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let their_run = create_run(&owning_employer, &owning_cookie).await;
+    let our_run = create_run(&other_employer, &other_cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(list_runs_request(&other_employer, &other_cookie))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let listed: Vec<&str> = json["payrollRuns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["payrollRunId"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, vec![our_run.as_str()]);
+    assert!(!listed.contains(&their_run.as_str()));
+}
+
+/// §0.24: "you typed something wrong" is 400 and structurally different from
+/// the 422 a payroll refusal answers with — never the same shape. The two
+/// bodies below are malformed in the two ways a client actually gets wrong:
+/// a missing field and a period whose dates are not dates.
+#[tokio::test]
+async fn a_malformed_create_body_is_a_bad_request_not_a_refusal() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+
+    for body in [
+        serde_json::json!({ "period": january_period() }),
+        serde_json::json!({ "period": january_period(), "payDate": "not-a-date" }),
+        serde_json::json!({
+            "period": { "start": "2026-01-31", "end": "2026-01-01" },
+            "payDate": "2026-02-05",
+        }),
+    ] {
+        let response = router()
+            .await
+            .oneshot(create_run_request(
+                &employer_id,
+                &cookie,
+                true,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{body} must be a malformed request, not a payroll refusal"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "malformed_request");
+    }
+}
+
+/// An Earning line Salt cannot represent is a transport-shape failure, not a
+/// payroll refusal: a `kind` no `Earning` variant spells, and an amount
+/// `Money` refuses because money is never negative (INV-001 reaches the
+/// boundary too).
+#[tokio::test]
+async fn an_earning_line_salt_cannot_represent_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    for body in [
+        serde_json::json!({ "earnings": [{ "kind": "bonus", "amountCents": 1000 }] }),
+        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": -1 }] }),
+        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance" }] }),
+    ] {
+        let response = router()
+            .await
+            .oneshot(set_earnings_request(
+                &employer_id,
+                &run_id,
+                &employment_id,
+                &cookie,
+                true,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{body} must be a malformed request, not a payroll refusal"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "malformed_request");
+    }
+}
+
+/// A malformed Earning line is refused whole: nothing in the same request is
+/// written first. Without this the `PUT`'s "replaces the whole list" promise
+/// would hold only for requests that happen to parse.
+#[tokio::test]
+async fn a_malformed_earning_line_leaves_the_existing_lines_alone() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+    let accepted = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000 }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let refused = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [
+                    { "kind": "taxableAllowance", "amountCents": 1000 },
+                    { "kind": "bonus", "amountCents": 1000 },
+                ],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let earnings = detail["members"][0]["earnings"].as_array().unwrap();
+    assert_eq!(earnings.len(), 1);
+    assert_eq!(earnings[0]["amountCents"], 5000);
+}
+
+/// An empty `earnings` list is a complete statement — no additional
+/// Earnings this period — and clears whatever was there, rather than being
+/// ignored as "nothing to do". It is the `PUT`'s replacement promise at its
+/// shortest.
+#[tokio::test]
+async fn setting_no_earnings_at_all_clears_the_list() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+    router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000 }],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let cleared = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({ "earnings": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::OK);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        detail["members"][0]["earnings"].as_array().unwrap().len(),
+        0
+    );
+}
+
+/// A body naming another Employer's id changes nothing: scope comes from the
+/// URL and the session alone (§0.22, user story 39). The run created below
+/// belongs to the caller's own Employer.
+#[tokio::test]
+async fn an_employer_id_in_the_body_is_ignored() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let (_other_cookie, other_employer) = an_authorized_operator().await;
+
+    let response = router()
+        .await
+        .oneshot(create_run_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "period": january_period(),
+                "payDate": "2026-02-05",
+                "employerId": other_employer,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let run_id = body_json(response).await["payrollRunId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let ours = router()
+        .await
+        .oneshot(detail_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(ours.status(), StatusCode::OK);
+}
+
+/// A `PayrollOperator`, not only an `Owner`, is let through all four routes
+/// (§0.6, parent #49: none of this spec's routes is Owner-only).
+#[tokio::test]
+async fn a_payroll_operator_reaches_all_four_routes() {
+    let db = test_db().await;
+    let email = unique_email("bob");
+    let operator_id = create_operator(&email).await;
+    let employer_id = payroll_app::create_employer(
+        &db,
+        "Acme Corp",
+        payroll::PaySchedule::new(payroll::PeriodEndDay::LastDayOfMonth),
+        "test-setup",
+    )
+    .await
+    .unwrap();
+    payroll_app::create_employer_membership(
+        &db,
+        &operator_id,
+        &employer_id,
+        MembershipRole::PayrollOperator,
+    )
+    .await
+    .unwrap();
+    let cookie = login(&email).await;
+    let employer_id = employer_id.to_string();
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    for request in [
+        list_runs_request(&employer_id, &cookie),
+        detail_request(&employer_id, &run_id, &cookie),
+        set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({ "earnings": [] }),
+        ),
+    ] {
+        let uri = request.uri().clone();
+        let method = request.method().clone();
+        let response = router().await.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{method} {uri} must be reachable by a PayrollOperator"
         );
     }
 }

@@ -729,13 +729,12 @@ pub async fn verify_payroll_run_belongs_to_employer(
     payroll_run_id: &str,
 ) -> Result<PayrollRunId, PayrollAppError> {
     let payroll_run_id = parse_payroll_run_id(payroll_run_id)?;
-    let found: Option<bool> = sqlx::query_scalar(
-        "SELECT TRUE FROM payroll_run WHERE id = $1::uuid AND employer_id = $2",
-    )
-    .bind(payroll_run_id.as_str())
-    .bind(employer_id.as_str())
-    .fetch_optional(db.pool())
-    .await?;
+    let found: Option<bool> =
+        sqlx::query_scalar("SELECT TRUE FROM payroll_run WHERE id = $1::uuid AND employer_id = $2")
+            .bind(payroll_run_id.as_str())
+            .bind(employer_id.as_str())
+            .fetch_optional(db.pool())
+            .await?;
     if found.is_some() {
         Ok(payroll_run_id)
     } else {
@@ -776,13 +775,15 @@ pub async fn list_payroll_runs(
 
     Ok(rows
         .into_iter()
-        .map(|(id, period_start, period_end, pay_date, status)| PayrollRunSummary {
-            id: PayrollRunId::new(id),
-            period: PayPeriod::new(period_start, period_end)
-                .expect("payroll_run CHECK: period_end is never before period_start"),
-            pay_date,
-            status: RunStatus::from_column(&status),
-        })
+        .map(
+            |(id, period_start, period_end, pay_date, status)| PayrollRunSummary {
+                id: PayrollRunId::new(id),
+                period: PayPeriod::new(period_start, period_end)
+                    .expect("payroll_run CHECK: period_end is never before period_start"),
+                pay_date,
+                status: RunStatus::from_column(&status),
+            },
+        )
         .collect())
 }
 
