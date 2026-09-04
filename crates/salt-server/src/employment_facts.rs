@@ -25,13 +25,14 @@ use axum::extract::{Json, Path, State};
 use chrono::NaiveDate;
 use payroll::{
     EmployerId, EmploymentId, Money, PayPeriod, PriorEmployment, PriorEmploymentFigures, TaxYear,
-    UnsupportedDeductionKind, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::error::ApiError;
+use crate::payroll_error::parse_unsupported_deduction_kind;
 use crate::state::AppState;
 
 /// Resolves the caller's authorized `EmployerId` and the path's
@@ -49,10 +50,45 @@ async fn authorized_employment(
     Ok((employer_id, employment_id))
 }
 
+/// Salt's HTTP representation of a pay period. This intentionally belongs to
+/// the server rather than serializing `payroll::PayPeriod` directly: the
+/// domain type remains free to change without changing the public API.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PayPeriodDto {
+    start: NaiveDate,
+    end: NaiveDate,
+}
+
+impl TryFrom<PayPeriodDto> for PayPeriod {
+    type Error = payroll::PayPeriodError;
+
+    fn try_from(period: PayPeriodDto) -> Result<Self, Self::Error> {
+        PayPeriod::new(period.start, period.end)
+    }
+}
+
+impl From<PayPeriod> for PayPeriodDto {
+    fn from(period: PayPeriod) -> Self {
+        Self {
+            start: period.start(),
+            end: period.end(),
+        }
+    }
+}
+
+fn parse_pay_periods(periods: Vec<PayPeriodDto>) -> Result<Vec<PayPeriod>, ApiError> {
+    periods
+        .into_iter()
+        .map(PayPeriod::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|_| ApiError::malformed_request())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DivergingPeriodsResponse {
-    diverging_periods: Vec<PayPeriod>,
+    diverging_periods: Vec<PayPeriodDto>,
 }
 
 #[derive(Deserialize)]
@@ -61,7 +97,7 @@ pub(crate) struct RecordCompensationTermsRequest {
     effective_from: NaiveDate,
     basic_pay_cents: i64,
     #[serde(default)]
-    acknowledged_diverging_periods: Vec<PayPeriod>,
+    acknowledged_diverging_periods: Vec<PayPeriodDto>,
     #[serde(default)]
     reason: String,
 }
@@ -79,6 +115,7 @@ pub(crate) async fn record_compensation_terms(
     let Json(request) = body.map_err(|_rejection| ApiError::malformed_request())?;
     let (_employer_id, employment_id) =
         authorized_employment(&state, &context, employment_id).await?;
+    let acknowledged_diverging_periods = parse_pay_periods(request.acknowledged_diverging_periods)?;
 
     let basic_pay =
         Money::from_cents(request.basic_pay_cents).map_err(|_| ApiError::malformed_request())?;
@@ -88,13 +125,18 @@ pub(crate) async fn record_compensation_terms(
         &employment_id,
         request.effective_from,
         basic_pay,
-        &request.acknowledged_diverging_periods,
+        &acknowledged_diverging_periods,
         &request.reason,
         &context.actor(),
     )
     .await?;
 
-    Ok(Json(DivergingPeriodsResponse { diverging_periods }))
+    Ok(Json(DivergingPeriodsResponse {
+        diverging_periods: diverging_periods
+            .into_iter()
+            .map(PayPeriodDto::from)
+            .collect(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -168,24 +210,9 @@ pub(crate) struct DeclareUnsupportedDeductionStatusRequest {
     #[serde(default)]
     kinds: Vec<String>,
     #[serde(default)]
-    acknowledged_diverging_periods: Vec<PayPeriod>,
+    acknowledged_diverging_periods: Vec<PayPeriodDto>,
     #[serde(default)]
     reason: String,
-}
-
-/// Permanent, hand-picked wire names for [`UnsupportedDeductionKind`] — the
-/// same names `crate::payroll_error::unsupported_deduction_kind_code` answers
-/// a refusal's `details.kinds` with, kept in sync with it by hand since a
-/// route accepting these codes and a refusal reporting them are two
-/// directions across the same one contract.
-fn parse_unsupported_deduction_kind(code: &str) -> Option<UnsupportedDeductionKind> {
-    match code {
-        "approved_pension_fund" => Some(UnsupportedDeductionKind::ApprovedPensionFund),
-        "provident_fund" => Some(UnsupportedDeductionKind::ProvidentFund),
-        "retirement_annuity_fund" => Some(UnsupportedDeductionKind::RetirementAnnuityFund),
-        "education_policy" => Some(UnsupportedDeductionKind::EducationPolicy),
-        _ => None,
-    }
 }
 
 fn parse_unsupported_deduction_status(
@@ -220,19 +247,25 @@ pub(crate) async fn declare_unsupported_deduction_status(
     let (_employer_id, employment_id) =
         authorized_employment(&state, &context, employment_id).await?;
     let status = parse_unsupported_deduction_status(&request)?;
+    let acknowledged_diverging_periods = parse_pay_periods(request.acknowledged_diverging_periods)?;
 
     let diverging_periods = payroll_app::declare_unsupported_deduction_status(
         state.db(),
         &employment_id,
         request.effective_from,
         status,
-        &request.acknowledged_diverging_periods,
+        &acknowledged_diverging_periods,
         &request.reason,
         &context.actor(),
     )
     .await?;
 
-    Ok(Json(DivergingPeriodsResponse { diverging_periods }))
+    Ok(Json(DivergingPeriodsResponse {
+        diverging_periods: diverging_periods
+            .into_iter()
+            .map(PayPeriodDto::from)
+            .collect(),
+    }))
 }
 
 #[derive(Deserialize)]

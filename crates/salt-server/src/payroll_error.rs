@@ -765,14 +765,36 @@ fn classify_payroll_error(err: &PayrollError) -> (StatusCode, &'static str, Opti
 
 /// Permanent, hand-picked `snake_case` names — never the `#[derive]`d
 /// serialization of the domain enum, which is free to change shape for
-/// storage reasons no API contract should feel.
-fn unsupported_deduction_kind_code(kind: &UnsupportedDeductionKind) -> &'static str {
-    match kind {
-        UnsupportedDeductionKind::ApprovedPensionFund => "approved_pension_fund",
-        UnsupportedDeductionKind::ProvidentFund => "provident_fund",
-        UnsupportedDeductionKind::RetirementAnnuityFund => "retirement_annuity_fund",
-        UnsupportedDeductionKind::EducationPolicy => "education_policy",
-    }
+/// storage reasons no API contract should feel. The HTTP request parser uses
+/// this same table, so the codes a client submits and the codes a refusal
+/// reports cannot drift.
+const UNSUPPORTED_DEDUCTION_KIND_CODES: &[(UnsupportedDeductionKind, &str)] = &[
+    (
+        UnsupportedDeductionKind::ApprovedPensionFund,
+        "approved_pension_fund",
+    ),
+    (UnsupportedDeductionKind::ProvidentFund, "provident_fund"),
+    (
+        UnsupportedDeductionKind::RetirementAnnuityFund,
+        "retirement_annuity_fund",
+    ),
+    (
+        UnsupportedDeductionKind::EducationPolicy,
+        "education_policy",
+    ),
+];
+
+pub(crate) fn unsupported_deduction_kind_code(kind: &UnsupportedDeductionKind) -> &'static str {
+    UNSUPPORTED_DEDUCTION_KIND_CODES
+        .iter()
+        .find_map(|(candidate, code)| (candidate == kind).then_some(*code))
+        .expect("every UnsupportedDeductionKind has a stable wire code")
+}
+
+pub(crate) fn parse_unsupported_deduction_kind(code: &str) -> Option<UnsupportedDeductionKind> {
+    UNSUPPORTED_DEDUCTION_KIND_CODES
+        .iter()
+        .find_map(|(kind, candidate)| (*candidate == code).then_some(*kind))
 }
 
 /// Same reason as [`unsupported_deduction_kind_code`]: a stable wire name
@@ -1849,6 +1871,22 @@ mod tests {
             "unsupported_deductions_present",
             Some(json!({ "kinds": ["approved_pension_fund", "provident_fund"] })),
         );
+    }
+
+    #[test]
+    fn unsupported_deduction_kind_codes_parse_back_to_the_same_kind() {
+        for kind in [
+            payroll::UnsupportedDeductionKind::ApprovedPensionFund,
+            payroll::UnsupportedDeductionKind::ProvidentFund,
+            payroll::UnsupportedDeductionKind::RetirementAnnuityFund,
+            payroll::UnsupportedDeductionKind::EducationPolicy,
+        ] {
+            assert_eq!(
+                parse_unsupported_deduction_kind(unsupported_deduction_kind_code(&kind)),
+                Some(kind)
+            );
+        }
+        assert_eq!(parse_unsupported_deduction_kind("not-a-real-kind"), None);
     }
 
     #[test]

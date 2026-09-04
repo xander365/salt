@@ -261,6 +261,34 @@ async fn a_negative_basic_pay_is_a_bad_request() {
     assert_eq!(json["error"]["code"], "malformed_request");
 }
 
+#[tokio::test]
+async fn an_invalid_acknowledgement_period_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    let mut body = compensation_terms_body();
+    body["acknowledgedDivergingPeriods"] = serde_json::json!([
+        { "start": "2026-05-01", "end": "2026-04-30" }
+    ]);
+
+    let response = router()
+        .await
+        .oneshot(post_request(
+            &employer_id,
+            &employment_id,
+            "compensation-terms",
+            &cookie,
+            true,
+            body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "malformed_request");
+}
+
 /// An effective date that is not a period start is the calculator's own
 /// refusal (INV-014), mapped by issue #50's exhaustive `match` — never a
 /// rule this route re-checks itself.
