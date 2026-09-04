@@ -60,8 +60,10 @@ pub use operator::{
     find_operator_by_email, find_operator_by_id, verify_operator_credential,
 };
 pub use payroll_run::{
-    PayrollRunId, create_correction_run, create_ordinary_payroll_run, remove_employment_from_run,
-    set_run_earnings,
+    PayrollRunDetail, PayrollRunId, PayrollRunMember, PayrollRunSummary, RunStatus,
+    create_correction_run, create_ordinary_payroll_run, get_payroll_run_detail,
+    list_payroll_runs, remove_employment_from_run, set_run_earnings,
+    verify_payroll_run_belongs_to_employer,
 };
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use reversal::reverse_finalized_payroll;

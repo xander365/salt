@@ -380,9 +380,12 @@ impl RunKind {
 }
 
 /// The three states §4.7 names. `Draft → Calculated → Finalized`; there is
-/// no `Reviewed` (ADR-0010).
+/// no `Reviewed` (ADR-0010). Public — issue #53's read models hand it
+/// straight to `salt-server`, which turns it into its own wire string rather
+/// than this crate doing so on their behalf (the same split
+/// `MembershipStatus` already draws).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunStatus {
+pub enum RunStatus {
     Draft,
     Calculated,
     Finalized,
@@ -690,6 +693,209 @@ pub async fn set_run_earnings(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Wraps a caller-supplied id as a [`PayrollRunId`], refusing a string that
+/// is not even a well-formed UUID as [`PayrollAppError::PayrollRunNotFound`]
+/// — the same "unknown and cross-Employer are indistinguishable" reasoning
+/// ADR-0017 already applies, extended to "not a UUID at all": the `id`
+/// column's `::uuid` cast would otherwise fail as a database error, turning
+/// a client's malformed path segment into a 500 rather than the 404 it
+/// deserves.
+fn parse_payroll_run_id(payroll_run_id: &str) -> Result<PayrollRunId, PayrollAppError> {
+    if uuid::Uuid::parse_str(payroll_run_id).is_err() {
+        return Err(PayrollAppError::PayrollRunNotFound(PayrollRunId::new(
+            payroll_run_id,
+        )));
+    }
+    Ok(PayrollRunId::new(payroll_run_id))
+}
+
+/// Confirms `payroll_run_id` belongs to `employer_id`, refusing exactly like
+/// a missing run when it does not (ADR-0017), and hands back the wrapped
+/// [`PayrollRunId`]. Mirrors [`crate::verify_employment_belongs_to_employer`],
+/// for the same reason: [`set_run_earnings`] takes no `EmployerId` of its
+/// own, so a handler that only holds one from `AuthorizedEmployerContext`
+/// needs this check first (issue #53).
+///
+/// Takes the id as `&str`, not `&PayrollRunId`: like
+/// [`crate::load_session`]'s token, this is the one boundary where a
+/// caller's own id — read off an HTTP path, never minted here — becomes the
+/// wrapped type (`ids.rs`'s own rule that this crate is the only place a
+/// `PayrollRunId` is constructed).
+pub async fn verify_payroll_run_belongs_to_employer(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    payroll_run_id: &str,
+) -> Result<PayrollRunId, PayrollAppError> {
+    let payroll_run_id = parse_payroll_run_id(payroll_run_id)?;
+    let found: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM payroll_run WHERE id = $1::uuid AND employer_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employer_id.as_str())
+    .fetch_optional(db.pool())
+    .await?;
+    if found.is_some() {
+        Ok(payroll_run_id)
+    } else {
+        Err(PayrollAppError::PayrollRunNotFound(payroll_run_id))
+    }
+}
+
+/// One PayrollRun in `GET /api/employers/{e}/payroll-runs` (issue #53):
+/// enough to open the right one, without its members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayrollRunSummary {
+    pub id: PayrollRunId,
+    pub period: PayPeriod,
+    pub pay_date: NaiveDate,
+    pub status: RunStatus,
+}
+
+/// Every PayrollRun `employer_id` has, in a stable order. Filters on
+/// `employer_id` in SQL (ADR-0017's second layer); no pagination, no
+/// filters, no sorting (issue #53's own Deep Instructions) beyond the
+/// stable order below — the same discipline
+/// [`crate::list_employments_for_employer`] already follows.
+pub async fn list_payroll_runs(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+) -> Result<Vec<PayrollRunSummary>, PayrollAppError> {
+    type Row = (String, NaiveDate, NaiveDate, NaiveDate, String);
+
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id::text, period_start, period_end, pay_date, status
+         FROM payroll_run
+         WHERE employer_id = $1
+         ORDER BY created_at, id",
+    )
+    .bind(employer_id.as_str())
+    .fetch_all(db.pool())
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, period_start, period_end, pay_date, status)| PayrollRunSummary {
+            id: PayrollRunId::new(id),
+            period: PayPeriod::new(period_start, period_end)
+                .expect("payroll_run CHECK: period_end is never before period_start"),
+            pay_date,
+            status: RunStatus::from_column(&status),
+        })
+        .collect())
+}
+
+/// One member of a PayrollRun in `GET
+/// /api/employers/{e}/payroll-runs/{r}` (issue #53): who is being proposed
+/// to pay, by name, and their current Earning lines. A struct of its own —
+/// not a tuple, not a bare `Vec<Earning>` beside a name — so a later
+/// per-member `blockers` list (issue #54) is an added field here, not a
+/// reshaped response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayrollRunMember {
+    pub employment_id: EmploymentId,
+    pub full_name: String,
+    pub earnings: Vec<Earning>,
+}
+
+/// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
+/// (issue #53): its period, pay date and status, and every member it
+/// proposes to pay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayrollRunDetail {
+    pub id: PayrollRunId,
+    pub period: PayPeriod,
+    pub pay_date: NaiveDate,
+    pub status: RunStatus,
+    pub members: Vec<PayrollRunMember>,
+}
+
+/// Reads one PayrollRun back for display, scoped to `employer_id` in SQL
+/// (ADR-0017): an id belonging to another Employer is refused exactly like
+/// one that does not exist at all, both as
+/// [`PayrollAppError::PayrollRunNotFound`].
+///
+/// Members are read separately from the run's own row, not joined: a run
+/// with no active members (every overlapping Employment already removed)
+/// still has a period, pay date and status to show, and an inner join would
+/// make that run indistinguishable from one that does not exist.
+///
+/// A handler never computes, adds to, or filters this membership (issue
+/// #53's own Deep Instructions) — it is exactly `active_member_ids`' set,
+/// read here with the name and Earning lines a display needs instead of the
+/// bare ids that function returns.
+pub async fn get_payroll_run_detail(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    payroll_run_id: &str,
+) -> Result<PayrollRunDetail, PayrollAppError> {
+    let payroll_run_id = parse_payroll_run_id(payroll_run_id)?;
+
+    type RunRow = (NaiveDate, NaiveDate, NaiveDate, String);
+
+    let run: Option<RunRow> = sqlx::query_as(
+        "SELECT period_start, period_end, pay_date, status
+         FROM payroll_run
+         WHERE id = $1::uuid AND employer_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employer_id.as_str())
+    .fetch_optional(db.pool())
+    .await?;
+
+    let (period_start, period_end, pay_date, status) =
+        run.ok_or_else(|| PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()))?;
+
+    type MemberRow = (String, String, Option<serde_json::Value>);
+
+    let member_rows: Vec<MemberRow> = sqlx::query_as(
+        "SELECT employment.id, person.full_name, earnings.earning_jsons
+         FROM payroll_run_employment
+         JOIN employment
+           ON employment.id = payroll_run_employment.employment_id
+         JOIN person
+           ON person.id = employment.person_id
+          AND person.employer_id = employment.employer_id
+         LEFT JOIN LATERAL (
+             SELECT jsonb_agg(earning_json ORDER BY line) AS earning_jsons
+             FROM payroll_run_earning
+             WHERE payroll_run_earning.payroll_run_id = payroll_run_employment.payroll_run_id
+               AND payroll_run_earning.employment_id = payroll_run_employment.employment_id
+         ) AS earnings ON TRUE
+         WHERE payroll_run_employment.payroll_run_id = $1::uuid
+           AND payroll_run_employment.removed_at IS NULL
+         ORDER BY employment.id",
+    )
+    .bind(payroll_run_id.as_str())
+    .fetch_all(db.pool())
+    .await?;
+
+    let members = member_rows
+        .into_iter()
+        .map(|(employment_id, full_name, earning_jsons)| {
+            let earnings = earning_jsons
+                .map(|value| {
+                    serde_json::from_value::<Vec<Earning>>(value)
+                        .expect("payroll_run_earning.earning_json always serializes an Earning")
+                })
+                .unwrap_or_default();
+            PayrollRunMember {
+                employment_id: EmploymentId::new(employment_id),
+                full_name,
+                earnings,
+            }
+        })
+        .collect();
+
+    Ok(PayrollRunDetail {
+        id: payroll_run_id.clone(),
+        period: PayPeriod::new(period_start, period_end)
+            .expect("payroll_run CHECK: period_end is never before period_start"),
+        pay_date,
+        status: RunStatus::from_column(&status),
+        members,
+    })
 }
 
 #[cfg(test)]

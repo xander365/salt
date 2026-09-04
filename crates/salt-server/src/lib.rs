@@ -30,6 +30,7 @@ mod employment_facts;
 mod employments;
 mod error;
 mod payroll_error;
+mod payroll_runs;
 mod request_id;
 mod router;
 mod session;

@@ -16,6 +16,7 @@ use crate::employers;
 use crate::employment_facts;
 use crate::employments;
 use crate::error::ApiError;
+use crate::payroll_runs;
 use crate::request_id;
 use crate::session;
 use crate::state::AppState;
@@ -80,6 +81,18 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
             axum::routing::post(employment_facts::record_opening_balance),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs",
+            get(payroll_runs::list_payroll_runs).post(payroll_runs::create_payroll_run),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}",
+            get(payroll_runs::get_payroll_run),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/earnings",
+            axum::routing::put(payroll_runs::set_run_earnings),
         );
 
     #[cfg(feature = "test-support")]
