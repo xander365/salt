@@ -4,13 +4,13 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    DayOfMonth, EmployerId, EmploymentId, Money, PeriodEndDay, PersonId, PriorEmployment, TaxYear,
+    DayOfMonth, EmployerId, EmploymentId, Money, PeriodEndDay, PriorEmployment, TaxYear,
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, SaltDatabase, create_employer, create_employment, declare_prior_employment,
-    declare_unsupported_deduction_status, record_compensation_terms, record_opening_balance,
-    void_employment,
+    EmploymentPerson, PayrollAppError, SaltDatabase, create_employer, create_employment,
+    declare_prior_employment, declare_unsupported_deduction_status, record_compensation_terms,
+    record_opening_balance, void_employment,
 };
 use sqlx::{PgPool, Row};
 
@@ -34,10 +34,10 @@ async fn an_employer_and_employment(
     let employer_id = create_employer(db, "Employer", schedule, "actor")
         .await
         .unwrap();
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         start_date,
         None,
         "actor",
@@ -638,20 +638,20 @@ async fn the_boundary_is_per_employment_not_per_employer(pool: PgPool) {
     let employer_id = create_employer(&db, "Employer", calendar_month_schedule(), "actor")
         .await
         .unwrap();
-    let continuing = create_employment(
+    let (_, continuing) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2026, 3, 1),
         None,
         "actor",
     )
     .await
     .unwrap();
-    let joiner = create_employment(
+    let (_, joiner) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-2"),
+        EmploymentPerson::New("person-2".to_string()),
         date(2026, 11, 1),
         None,
         "actor",

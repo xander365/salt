@@ -13,6 +13,7 @@ use serde_json::json;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::employers;
+use crate::employments;
 use crate::error::ApiError;
 use crate::request_id;
 use crate::session;
@@ -54,7 +55,15 @@ fn production_routes() -> Router<AppState> {
                 .post(session::login)
                 .delete(session::logout),
         )
-        .route("/api/employers", get(employers::list_employers));
+        .route("/api/employers", get(employers::list_employers))
+        .route(
+            "/api/employers/{employer_id}/employments",
+            get(employments::list_employments).post(employments::create_employment),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}",
+            get(employments::get_employment),
+        );
 
     #[cfg(feature = "test-support")]
     {

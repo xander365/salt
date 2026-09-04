@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use payroll::{
     EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollError, PayrollInput,
-    PayrollRules, TaxYear,
+    PayrollRules, PersonId, TaxYear,
 };
 
 use crate::finalize::FinalizedPayrollId;
@@ -51,6 +51,16 @@ pub enum PayrollAppError {
     EmployerNotFound(EmployerId),
     /// No Employment exists with this id.
     EmploymentNotFound(EmploymentId),
+    /// `CreateEmployment` was given a `personId` naming no Person of this
+    /// Employer — either the id names nothing at all, or it names a Person
+    /// scoped to a different Employer (ADR-0020). The two are not
+    /// distinguished: telling them apart would let a caller use this route
+    /// to discover another Employer's Person ids (ADR-0017).
+    PersonNotFound(PersonId),
+    /// `CreateEmployment` was given a `fullName` that is empty or only
+    /// whitespace. A blank name shows a person nothing, the same demand
+    /// [`Self::EmployerNameCannotBeEmpty`] makes of its own text.
+    PersonFullNameCannotBeEmpty,
     /// The Employment is void (§4.3). A voided Employment is a recorded
     /// mistake: it never appears in run membership, so no standing fact may
     /// be recorded against it and no calculation input may be read from it.
@@ -558,6 +568,10 @@ impl std::fmt::Display for PayrollAppError {
             }
             Self::EmployerNotFound(id) => write!(f, "no Employer exists with id {id}"),
             Self::EmploymentNotFound(id) => write!(f, "no Employment exists with id {id}"),
+            Self::PersonNotFound(id) => write!(f, "no Person exists with id {id}"),
+            Self::PersonFullNameCannotBeEmpty => {
+                write!(f, "a Person full name must not be empty")
+            }
             Self::EmploymentIsVoid(id) => write!(f, "Employment {id} is void"),
             Self::EmploymentEndsBeforeItStarts {
                 start_date,
@@ -965,6 +979,8 @@ impl std::error::Error for PayrollAppError {
             | Self::EmployerNameCannotBeEmpty
             | Self::EmployerNotFound(_)
             | Self::EmploymentNotFound(_)
+            | Self::PersonNotFound(_)
+            | Self::PersonFullNameCannotBeEmpty
             | Self::EmploymentIsVoid(_)
             | Self::EmploymentEndsBeforeItStarts { .. }
             | Self::NoCompensationTermsInForce(_)

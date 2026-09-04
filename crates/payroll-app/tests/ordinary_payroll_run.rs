@@ -4,10 +4,11 @@
 //! through the public API a later ticket calls, not raw SQL.
 
 use chrono::NaiveDate;
-use payroll::{DayOfMonth, Earning, EmploymentId, Money, PayPeriod, PeriodEndDay, PersonId};
+use payroll::{DayOfMonth, Earning, EmploymentId, Money, PayPeriod, PeriodEndDay};
 use payroll_app::{
-    PayrollAppError, PayrollRunId, SaltDatabase, create_employer, create_employment,
-    create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings, void_employment,
+    EmploymentPerson, PayrollAppError, PayrollRunId, SaltDatabase, create_employer,
+    create_employment, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
+    void_employment,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::oneshot;
@@ -42,13 +43,14 @@ async fn an_employment(
     create_employment(
         db,
         employer_id,
-        &PersonId::new(person),
+        EmploymentPerson::New(person.to_string()),
         start_date,
         end_date,
         "actor",
     )
     .await
     .unwrap()
+    .1
 }
 
 // ---- CreateOrdinaryPayrollRun (§4.6-§4.8) ----
@@ -173,6 +175,18 @@ async fn a_voided_employment_is_never_proposed(pool: PgPool) {
 async fn an_employment_committing_during_run_creation_is_proposed(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
+
+    // The raw insert below needs a real `person` row: `employment.person_id`
+    // carries a foreign key to `person` (issue #51).
+    sqlx::query(
+        "INSERT INTO person (id, employer_id, full_name, created_by)
+         VALUES ('person-concurrently', $1, 'Test Person', 'actor')",
+    )
+    .bind(employer_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let mut employment_transaction = pool.begin().await.unwrap();
 
     // This is the KEY SHARE lock create_employment's employer foreign key

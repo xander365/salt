@@ -30,27 +30,25 @@ use crate::state::AppState;
 /// [`Self::require_role`] when the route is one of the Owner-only ones §0.6
 /// names; a route not on that list checks no role at all.
 ///
-/// This spec ships zero Employer-scoped production routes (its own Deep
-/// Instructions), so nothing in the binary build constructs one yet. Issue
-/// #47's probe routes are compiled only into this crate's unit-test binary;
-/// no feature can add them to a production build. The first real route in a
-/// later spec is what removes the need for this `allow`.
+/// `crate::employments`'s three routes (issue #51) are the first
+/// production routes to use this — every later Employer-scoped route
+/// reuses it the same way.
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "unused in production until the first Employer-scoped route lands"
-)]
 pub(crate) struct AuthorizedEmployerContext {
     operator_id: OperatorId,
     employer_id: AuthorizedEmployerId,
+    #[allow(
+        dead_code,
+        reason = "read by require_role, unused until the first Owner-only route lands"
+    )]
     role: MembershipRole,
 }
 
-#[allow(
-    dead_code,
-    reason = "unused in production until the first Employer-scoped route lands"
-)]
 impl AuthorizedEmployerContext {
+    #[allow(
+        dead_code,
+        reason = "no route has needed the raw OperatorId over actor() yet"
+    )]
     pub(crate) fn operator_id(&self) -> &OperatorId {
         &self.operator_id
     }
@@ -59,6 +57,7 @@ impl AuthorizedEmployerContext {
         &self.employer_id
     }
 
+    #[allow(dead_code, reason = "unused until the first Owner-only route lands")]
     pub(crate) fn role(&self) -> MembershipRole {
         self.role
     }
@@ -77,6 +76,7 @@ impl AuthorizedEmployerContext {
     /// the time a handler can call this, [`payroll_app::resolve_employer_access`]
     /// has already proven the caller *is* a member, so refusing here leaks
     /// nothing ADR-0017 protects.
+    #[allow(dead_code, reason = "unused until the first Owner-only route lands")]
     pub(crate) fn require_role(&self, required: MembershipRole) -> Result<(), ApiError> {
         let sufficient = match required {
             MembershipRole::PayrollOperator => true,

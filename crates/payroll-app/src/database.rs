@@ -239,6 +239,13 @@ mod tests {
         .await
         .expect("insert employer");
         sqlx::query(
+            "INSERT INTO person (id, employer_id, full_name, created_by)
+             VALUES ('person-1', 'employer-1', 'Test Person', 'test-actor')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert person");
+        sqlx::query(
             "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
              VALUES ('employment-1', 'employer-1', 'person-1', '2026-03-01', 'test-actor')",
         )

@@ -129,8 +129,11 @@ pub(crate) async fn build_year_to_date_context_on<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{create_employer, create_employment, declare_prior_employment, void_employment};
-    use payroll::{DayOfMonth, PeriodEndDay, PersonId, PriorEmployment};
+    use crate::{
+        EmploymentPerson, create_employer, create_employment, declare_prior_employment,
+        void_employment,
+    };
+    use payroll::{DayOfMonth, PeriodEndDay, PriorEmployment};
     use sqlx::{PgPool, Row};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -148,13 +151,14 @@ mod tests {
         create_employment(
             db,
             &employer_id,
-            &PersonId::new("person-1"),
+            EmploymentPerson::New("Test Person".to_string()),
             date(2020, 1, 1),
             None,
             "actor",
         )
         .await
         .unwrap()
+        .1
     }
 
     #[sqlx::test]

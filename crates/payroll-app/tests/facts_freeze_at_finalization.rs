@@ -11,15 +11,16 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    DayOfMonth, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PersonId,
-    PriorEmployment, PriorEmploymentFigures, TaxYear, UnsupportedDeductionKind,
-    UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    DayOfMonth, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment,
+    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds,
+    UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    FinalizedPayrollId, PayrollAppError, SaltDatabase, ScheduleBoundedFact, calculate_payroll_run,
-    change_pay_schedule, create_employer, create_employment, create_ordinary_payroll_run,
-    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    record_compensation_terms, record_opening_balance, reverse_finalized_payroll, void_employment,
+    EmploymentPerson, FinalizedPayrollId, PayrollAppError, SaltDatabase, ScheduleBoundedFact,
+    calculate_payroll_run, change_pay_schedule, create_employer, create_employment,
+    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
+    finalize_payroll_run, record_compensation_terms, record_opening_balance,
+    reverse_finalized_payroll, void_employment,
 };
 use sqlx::{Acquire, PgPool, Row};
 use tokio::sync::oneshot;
@@ -52,10 +53,10 @@ async fn a_fully_declared_employment(
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         db,
         employer_id,
-        &PersonId::new(person),
+        EmploymentPerson::New(person.to_string()),
         period().start(),
         None,
         "actor",
@@ -247,10 +248,10 @@ async fn the_freeze_is_per_employment_not_per_employer(pool: PgPool) {
     finalize_march(&db, &employer_id, &finalized_employment).await;
 
     let june_start = date(2026, 6, 1);
-    let june_employment = create_employment(
+    let (_, june_employment) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-2"),
+        EmploymentPerson::New("person-2".to_string()),
         june_start,
         None,
         "actor",
@@ -882,10 +883,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_stored_salt_cov
 ) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2026, 6, 1),
         None,
         "actor",
@@ -948,10 +949,10 @@ async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_
 ) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2025, 6, 1),
         None,
         "actor",
@@ -988,10 +989,10 @@ async fn a_stored_salt_coverage_start_in_an_earlier_tax_year_does_not_block_the_
 async fn a_void_employments_salt_coverage_start_does_not_block_the_change(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2026, 6, 1),
         None,
         "actor",
@@ -1031,10 +1032,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_a_compensation_te
 ) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         period().start(),
         None,
         "actor",
@@ -1085,10 +1086,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_de
 ) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         period().start(),
         None,
         "actor",
@@ -1135,10 +1136,10 @@ async fn a_pay_schedule_change_is_refused_when_it_would_strand_an_unsupported_de
 async fn a_pay_schedule_change_that_strands_nothing_is_allowed(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         period().start(),
         None,
         "actor",
@@ -1346,10 +1347,10 @@ async fn a_pay_schedule_change_waits_for_a_reader_of_that_schedule(pool: PgPool)
 async fn storing_a_boundary_waits_for_a_pay_schedule_change(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2026, 6, 1),
         None,
         "actor",
@@ -1415,10 +1416,10 @@ async fn storing_a_boundary_waits_for_a_pay_schedule_change(pool: PgPool) {
 async fn a_pay_schedule_change_and_a_boundary_it_would_strand_never_both_succeed(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2026, 6, 1),
         None,
         "actor",

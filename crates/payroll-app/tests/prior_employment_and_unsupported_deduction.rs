@@ -5,14 +5,14 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    DayOfMonth, EmploymentId, Money, PayrollError, PeriodEndDay, PersonId, PriorEmployment,
+    DayOfMonth, EmploymentId, Money, PayrollError, PeriodEndDay, PriorEmployment,
     PriorEmploymentFigures, TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds,
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, SaltDatabase, create_employer, create_employment, declare_prior_employment,
-    declare_unsupported_deduction_status, get_prior_employment, get_unsupported_deduction_status,
-    void_employment,
+    EmploymentPerson, PayrollAppError, SaltDatabase, create_employer, create_employment,
+    declare_prior_employment, declare_unsupported_deduction_status, get_prior_employment,
+    get_unsupported_deduction_status, void_employment,
 };
 use sqlx::{PgPool, Row};
 
@@ -30,10 +30,10 @@ async fn an_employer_and_employment(db: &SaltDatabase) -> (payroll::EmployerId, 
     let employer_id = create_employer(db, "Employer", twenty_sixth_schedule(), "actor")
         .await
         .unwrap();
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         db,
         &employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         date(2026, 1, 26),
         None,
         "actor",

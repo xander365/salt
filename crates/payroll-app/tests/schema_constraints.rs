@@ -39,6 +39,15 @@ async fn an_employer_and_two_employments(conn: &mut sqlx::PgConnection) {
     .expect("insert employer");
 
     sqlx::query(
+        "INSERT INTO person (id, employer_id, full_name, created_by)
+         VALUES ('person-1', 'employer-1', 'Test Person 1', 'actor'),
+                ('person-2', 'employer-1', 'Test Person 2', 'actor')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("insert persons");
+
+    sqlx::query(
         "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
          VALUES ('emp-1', 'employer-1', 'person-1', '2026-03-01', 'actor'),
                 ('emp-2', 'employer-1', 'person-2', '2026-03-01', 'actor')",

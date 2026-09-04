@@ -27,6 +27,7 @@ async fn migrations_create_the_schema_this_design_names(pool: PgPool) {
 
     for expected in [
         "employer",
+        "person",
         "employment",
         "compensation_terms",
         "opening_balance",
@@ -60,6 +61,14 @@ async fn a_finalized_payroll(conn: &mut sqlx::PgConnection) -> String {
     .execute(&mut *conn)
     .await
     .expect("insert employer");
+
+    sqlx::query(
+        "INSERT INTO person (id, employer_id, full_name, created_by)
+         VALUES ('person-1', 'employer-1', 'Test Person', 'test-actor')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("insert person");
 
     sqlx::query(
         "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
@@ -247,7 +256,12 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
     // Immutable history and the append-only audit trail. INV-004 (§6.2) is a
     // permission on the first; the other two record acts that happened and so
     // can never be revised or erased either.
-    let append_only = ["finalized_payroll", "reversal", "action_log_entry"];
+    let append_only = [
+        "finalized_payroll",
+        "reversal",
+        "action_log_entry",
+        "person",
+    ];
     // Master data, working run state, and liveness. Liveness needs DELETE
     // because a reversal deletes the row (§6.2).
     let mutable = [

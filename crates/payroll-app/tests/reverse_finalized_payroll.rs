@@ -6,14 +6,14 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PersonId, PriorEmployment, TaxYear,
+    EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment, TaxYear,
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    FinalizedPayrollId, PayrollAppError, SaltDatabase, build_year_to_date_context,
-    calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
-    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    record_compensation_terms, reverse_finalized_payroll,
+    EmploymentPerson, FinalizedPayrollId, PayrollAppError, SaltDatabase,
+    build_year_to_date_context, calculate_payroll_run, create_employer, create_employment,
+    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
+    finalize_payroll_run, record_compensation_terms, reverse_finalized_payroll,
 };
 use sqlx::{PgPool, Row};
 
@@ -47,10 +47,10 @@ async fn a_fully_declared_employment(
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         db,
         employer_id,
-        &PersonId::new(person),
+        EmploymentPerson::New(person.to_string()),
         period().start(),
         None,
         "actor",

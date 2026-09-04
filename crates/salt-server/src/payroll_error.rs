@@ -117,6 +117,16 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "employment_not_found",
             Some(json!({ "employmentId": id.to_string() })),
         ),
+        PayrollAppError::PersonNotFound(id) => Classification::Mapped(
+            StatusCode::NOT_FOUND,
+            "person_not_found",
+            Some(json!({ "personId": id.to_string() })),
+        ),
+        PayrollAppError::PersonFullNameCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "person_full_name_cannot_be_empty",
+            None,
+        ),
         PayrollAppError::EmploymentIsVoid(id) => Classification::Mapped(
             StatusCode::CONFLICT,
             "employment_is_void",
@@ -1013,6 +1023,27 @@ mod tests {
     }
 
     #[test]
+    fn person_not_found() {
+        let id = PersonId::new("person-1");
+        check(
+            PayrollAppError::PersonNotFound(id.clone()),
+            StatusCode::NOT_FOUND,
+            "person_not_found",
+            Some(json!({ "personId": id.to_string() })),
+        );
+    }
+
+    #[test]
+    fn person_full_name_cannot_be_empty() {
+        check(
+            PayrollAppError::PersonFullNameCannotBeEmpty,
+            StatusCode::BAD_REQUEST,
+            "person_full_name_cannot_be_empty",
+            None,
+        );
+    }
+
+    #[test]
     fn employment_is_void() {
         let id = EmploymentId::new("employment-1");
         check(
@@ -1900,10 +1931,10 @@ mod tests {
             payroll_app::create_employer(&db, "Employer 2", schedule(), "actor")
                 .await
                 .unwrap();
-        let employment_id = payroll_app::create_employment(
+        let (_, employment_id) = payroll_app::create_employment(
             &db,
             &finalized_employer_id,
-            &PersonId::new("person-1"),
+            payroll_app::EmploymentPerson::New("Test Person".to_string()),
             period().start(),
             None,
             "actor",

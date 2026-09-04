@@ -6,10 +6,10 @@
 use chrono::NaiveDate;
 use payroll::{
     DayOfMonth, Earning, EmployerId, EmploymentId, Money, PayPeriod, PayrollError, PeriodEndDay,
-    PersonId, PriorEmployment, TaxYear, UnsupportedDeductionStatus,
+    PriorEmployment, TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    PayrollAppError, PayrollRunCalculationRefusal, PayrollRunId, SaltDatabase,
+    EmploymentPerson, PayrollAppError, PayrollRunCalculationRefusal, PayrollRunId, SaltDatabase,
     calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, record_compensation_terms,
     remove_employment_from_run, set_run_earnings,
@@ -53,10 +53,10 @@ async fn a_fully_declared_employment(
     person: &str,
     basic_pay: Money,
 ) -> EmploymentId {
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         db,
         employer_id,
-        &PersonId::new(person),
+        EmploymentPerson::New(person.to_string()),
         date(2024, 1, 1),
         None,
         "actor",
@@ -314,10 +314,10 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
     )
     .await;
     // No `UnsupportedDeductionStatus` declared at all for this one.
-    let blocked = create_employment(
+    let (_, blocked) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-blocked"),
+        EmploymentPerson::New("person-blocked".to_string()),
         date(2024, 1, 1),
         None,
         "actor",
@@ -381,10 +381,10 @@ async fn an_unknown_unsupported_deduction_status_blocks_only_that_member(pool: P
 async fn an_unknown_prior_employment_blocks_only_that_member(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let blocked = create_employment(
+    let (_, blocked) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-blocked"),
+        EmploymentPerson::New("person-blocked".to_string()),
         date(2024, 1, 1),
         None,
         "actor",
@@ -446,10 +446,10 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
     .await;
     // A second, unresolved member keeps the run Draft across both
     // calculations, so `set_run_earnings` is still permitted between them.
-    let unresolved = create_employment(
+    let (_, unresolved) = create_employment(
         &db,
         &employer_id,
-        &PersonId::new("person-unresolved"),
+        EmploymentPerson::New("person-unresolved".to_string()),
         date(2024, 1, 1),
         None,
         "actor",

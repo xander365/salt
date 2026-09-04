@@ -8,16 +8,16 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, Money, PayPeriod, PayrollError, PeriodEndDay, PersonId,
-    PriorEmployment, TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds,
-    UnsupportedDeductionStatus,
+    EmployerId, EmploymentId, Money, PayPeriod, PayrollError, PeriodEndDay, PriorEmployment,
+    TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    FinalizedPayrollId, PayrollAppError, SaltDatabase, add_employment_to_correction_run,
-    build_year_to_date_context, calculate_payroll_run, correct_compensation_terms,
-    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
-    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    get_unsupported_deduction_status, record_compensation_terms, reverse_finalized_payroll,
+    EmploymentPerson, FinalizedPayrollId, PayrollAppError, SaltDatabase,
+    add_employment_to_correction_run, build_year_to_date_context, calculate_payroll_run,
+    correct_compensation_terms, create_correction_run, create_employer, create_employment,
+    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
+    finalize_payroll_run, get_unsupported_deduction_status, record_compensation_terms,
+    reverse_finalized_payroll,
 };
 use sqlx::{PgPool, Row};
 
@@ -60,10 +60,10 @@ async fn an_employment_with_basic_pay(
     employer_id: &EmployerId,
     basic_pay: Money,
 ) -> EmploymentId {
-    let employment_id = create_employment(
+    let (_, employment_id) = create_employment(
         db,
         employer_id,
-        &PersonId::new("person-1"),
+        EmploymentPerson::New("person-1".to_string()),
         march().start(),
         None,
         "actor",
