@@ -29,8 +29,12 @@
 //! answers 200 with the run detail, even when every member refused. No
 //! handler here recalculates anything, inspects a figure, or decides
 //! whether Finalize is allowed (issue #55's own Deep Instructions) — a
-//! client reads that straight off `status`, which is `"calculated"` exactly
-//! when Finalize is allowed.
+//! client reads that straight off `status`, which `payroll_app` sets to
+//! `"calculated"` exactly when every active member has a current, successful
+//! calculation, the one state `payroll_app::finalize_payroll_run` accepts.
+//! It is the run's readiness, not a promise that Finalize cannot then refuse
+//! for a reason of its own (a stale acknowledgement, a divergence): those
+//! are finalization's own refusals and belong to a later ticket.
 
 use std::collections::HashMap;
 
@@ -255,8 +259,8 @@ struct RefusalDto {
     details: Option<Value>,
 }
 
-fn refusal_to_dto(refusal: PayrollAppError) -> RefusalDto {
-    let (code, details) = refusal_code_and_details(&refusal);
+fn refusal_to_dto(refusal: &PayrollAppError) -> RefusalDto {
+    let (code, details) = refusal_code_and_details(refusal);
     RefusalDto { code, details }
 }
 
@@ -264,8 +268,17 @@ fn refusal_to_dto(refusal: PayrollAppError) -> RefusalDto {
 /// .../payroll-runs/{r}` and `POST .../payroll-runs/{r}/calculate` answer
 /// with (issue #55's own Deep Instructions: one DTO, not two shapes for the
 /// same run).
-fn payroll_run_detail_to_response(detail: PayrollRunDetail) -> PayrollRunDetailResponse {
-    PayrollRunDetailResponse {
+///
+/// `refusals` is what the calculator actually said on the call that just
+/// ran, named by `EmploymentId` — never a field of the read model, which
+/// persists no refusal and could only ever answer `None` for one. A plain
+/// `GET` therefore passes an empty map and every member's `refusal` is
+/// `null`, exactly as a refresh should read.
+fn payroll_run_detail_to_response(
+    detail: PayrollRunDetail,
+    mut refusals: HashMap<EmploymentId, PayrollAppError>,
+) -> PayrollRunDetailResponse {
+    let response = PayrollRunDetailResponse {
         payroll_run_id: detail.id.to_string(),
         period: PayPeriodDto::from(detail.period),
         pay_date: detail.pay_date,
@@ -273,16 +286,36 @@ fn payroll_run_detail_to_response(detail: PayrollRunDetail) -> PayrollRunDetailR
         members: detail
             .members
             .into_iter()
-            .map(|member| PayrollRunMemberDto {
-                employment_id: member.employment_id.to_string(),
-                full_name: member.full_name,
-                earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
-                blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
-                figures: member.figures.map(figures_to_dto),
-                refusal: member.refusal.map(refusal_to_dto),
+            .map(|member| {
+                let refusal = refusals
+                    .remove(&member.employment_id)
+                    .map(|refusal| refusal_to_dto(&refusal));
+                PayrollRunMemberDto {
+                    employment_id: member.employment_id.to_string(),
+                    full_name: member.full_name,
+                    earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
+                    blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
+                    figures: member.figures.map(figures_to_dto),
+                    refusal,
+                }
             })
             .collect(),
+    };
+
+    // A refusal left over named a member the re-read no longer lists — it
+    // was removed from the run between the calculation's own commit and
+    // that read. Reporting it against a member the response does not carry
+    // is impossible, so it is dropped, but never silently: an Operator who
+    // asks why a reason vanished needs this line in the log.
+    for (employment_id, refusal) in refusals {
+        tracing::warn!(
+            employment_id = %employment_id,
+            error = %refusal,
+            "a calculation refusal named a member the run detail no longer lists"
+        );
     }
+
+    response
 }
 
 /// `GET /api/employers/{e}/payroll-runs/{r}`: the run's period, pay date,
@@ -299,7 +332,7 @@ pub(crate) async fn get_payroll_run(
     let detail =
         payroll_app::get_payroll_run_detail(state.db(), &employer_id, &payroll_run_id).await?;
 
-    Ok(Json(payroll_run_detail_to_response(detail)))
+    Ok(Json(payroll_run_detail_to_response(detail, HashMap::new())))
 }
 
 /// `POST /api/employers/{e}/payroll-runs/{r}/calculate` (issue #55):
@@ -335,20 +368,20 @@ pub(crate) async fn calculate_payroll_run(
     )
     .await?;
 
-    let refusals =
-        payroll_app::calculate_payroll_run(state.db(), &run_id, &context.actor()).await?;
-    let mut refusals_by_member: HashMap<EmploymentId, PayrollAppError> = refusals
-        .into_iter()
-        .map(|refusal| (refusal.employment_id, refusal.refusal))
-        .collect();
+    let refusals_by_member: HashMap<EmploymentId, PayrollAppError> =
+        payroll_app::calculate_payroll_run(state.db(), &run_id, &context.actor())
+            .await?
+            .into_iter()
+            .map(|refusal| (refusal.employment_id, refusal.refusal))
+            .collect();
 
-    let mut detail =
+    let detail =
         payroll_app::get_payroll_run_detail(state.db(), &employer_id, &payroll_run_id).await?;
-    for member in &mut detail.members {
-        member.refusal = refusals_by_member.remove(&member.employment_id);
-    }
 
-    Ok(Json(payroll_run_detail_to_response(detail)))
+    Ok(Json(payroll_run_detail_to_response(
+        detail,
+        refusals_by_member,
+    )))
 }
 
 #[derive(Deserialize)]

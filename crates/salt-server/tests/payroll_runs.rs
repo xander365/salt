@@ -1333,3 +1333,204 @@ async fn calculating_an_already_finalized_run_is_refused_with_its_stable_code() 
     let json = body_json(response).await;
     assert_eq!(json["error"]["code"], "payroll_run_already_finalized");
 }
+
+/// "A run in which **every** member refused still returns 200" (issue
+/// #55's own acceptance criterion), proved with **two** members rather than
+/// one: a single-member run cannot tell "the whole run refused" apart from
+/// "the only member refused", and it is the plural case the criterion is
+/// about.
+#[tokio::test]
+async fn a_run_in_which_every_member_refused_is_still_200() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let first_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let second_id = create_employment(&employer_id, &cookie, "Grace Hopper").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "every member refusing is a normal outcome, not an error (§0.25)"
+    );
+    let detail = body_json(response).await;
+    assert_eq!(
+        detail["status"], "draft",
+        "no member calculated, so Finalize is not allowed"
+    );
+    let members = detail["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    for employment_id in [&first_id, &second_id] {
+        let member = members
+            .iter()
+            .find(|member| member["employmentId"] == *employment_id)
+            .expect("every member of the run is still listed");
+        assert!(member["figures"].is_null());
+        assert_eq!(member["refusal"]["code"], "no_compensation_terms_in_force");
+    }
+}
+
+/// A per-member `refusal` carries **details**, not only a code (issue #55's
+/// own acceptance criterion), and a `blocker` and a `refusal` are different
+/// things that may both be present on one member (its own Deep
+/// Instructions). A member declared to have unsupported deductions is the
+/// case that shows both at once: `blockers` names the standing fact,
+/// `refusal` is what the calculator actually said about it, and each
+/// carries the kinds a screen must name.
+#[tokio::test]
+async fn a_member_refusal_carries_its_details_beside_its_own_blocker() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+
+    let recorded = router()
+        .await
+        .oneshot(record_compensation_terms_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            "2026-01-01",
+            1_500_000,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recorded.status(), StatusCode::OK);
+
+    let declared = router()
+        .await
+        .oneshot(declare_prior_employment_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            2025,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::OK);
+
+    let declared = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({
+                "effectiveFrom": "2026-01-01",
+                "status": "present",
+                "kinds": ["provident_fund"],
+                "acknowledgedDivergingPeriods": [],
+                "reason": "joined a provident fund",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::OK);
+
+    let run_id = create_run(&employer_id, &cookie).await;
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = body_json(response).await;
+    let member = &detail["members"][0];
+    assert!(member["figures"].is_null());
+    assert_eq!(member["refusal"]["code"], "unsupported_deductions_present");
+    assert_eq!(
+        member["refusal"]["details"]["kinds"],
+        serde_json::json!(["provident_fund"]),
+        "a refusal that cannot be acted on without naming the kinds must name them"
+    );
+    assert!(
+        member["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "unsupported_deductions_present"),
+        "a blocker read from standing facts and a refusal from the calculator \
+         are different fields, and both are present here"
+    );
+}
+
+/// A member whose calculation succeeded and then refused on a later
+/// Calculate must not keep showing the figures from the earlier one: stale
+/// figures beside a fresh refusal is the one way this response could lie
+/// about money.
+#[tokio::test]
+async fn recalculating_after_a_fact_is_withdrawn_clears_the_stale_figures() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let calculated = body_json(
+        router()
+            .await
+            .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(calculated["status"], "calculated");
+    assert_eq!(
+        calculated["members"][0]["figures"]["basicPayCents"],
+        1_500_000
+    );
+
+    // The same period now has unsupported deductions declared present, so
+    // the next Calculate refuses the member it previously calculated.
+    let declared = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({
+                "effectiveFrom": "2026-01-01",
+                "status": "present",
+                "kinds": ["provident_fund"],
+                "acknowledgedDivergingPeriods": [],
+                "reason": "joined a provident fund",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::OK);
+
+    let recalculated = body_json(
+        router()
+            .await
+            .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(recalculated["status"], "draft");
+    assert!(
+        recalculated["members"][0]["figures"].is_null(),
+        "a refused member never keeps the figures of an earlier calculation"
+    );
+    assert_eq!(
+        recalculated["members"][0]["refusal"]["code"],
+        "unsupported_deductions_present"
+    );
+
+    // And a plain refresh agrees: the stored calculation is gone, not just
+    // hidden by Calculate's own response.
+    let refreshed = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refreshed["status"], "draft");
+    assert!(refreshed["members"][0]["figures"].is_null());
+}

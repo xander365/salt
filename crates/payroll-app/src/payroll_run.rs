@@ -891,14 +891,19 @@ impl PayrollFigures {
 /// a bare `Vec<Earning>` beside a name — so `blockers` is an added field
 /// here, not a reshaped response.
 ///
-/// `figures` and `refusal` (issue #55) are different things and both may be
-/// present: `figures` is read from a stored `WorkingPayrollCalculation`, so
-/// a refresh after a successful Calculate shows it again; `refusal` is
-/// "what the calculator actually said" on the call that just ran, and is
-/// never persisted, so [`get_payroll_run_detail`] always leaves it `None` —
-/// only `salt-server`'s own calculate handler fills it in, by matching
-/// [`crate::calculate_payroll_run`]'s returned refusals onto a freshly-read
-/// detail.
+/// `figures` (issue #55) is read from the member's stored
+/// `WorkingPayrollCalculation`, so a refresh after a successful Calculate
+/// shows it again, and a member whose last calculation refused has `None`
+/// — `calculate_payroll_run` clears the row rather than leaving a stale
+/// one looking current.
+///
+/// A member's **refusal** is deliberately not a field here. A refusal is
+/// "what the calculator actually said" on one call, is never persisted,
+/// and so could only ever be `None` on this read — a field that can never
+/// be filled is a field that lies. [`crate::calculate_payroll_run`]
+/// returns its refusals named by `EmploymentId` instead, and
+/// `salt-server`'s calculate handler joins them onto this detail when it
+/// builds its response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayrollRunMember {
     pub employment_id: EmploymentId,
@@ -906,7 +911,6 @@ pub struct PayrollRunMember {
     pub earnings: Vec<Earning>,
     pub blockers: Vec<PayrollRunBlocker>,
     pub figures: Option<PayrollFigures>,
-    pub refusal: Option<PayrollAppError>,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -1015,7 +1019,6 @@ pub async fn get_payroll_run_detail(
             earnings,
             blockers,
             figures,
-            refusal: None,
         });
     }
 
