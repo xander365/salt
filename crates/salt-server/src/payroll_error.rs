@@ -1950,6 +1950,122 @@ mod tests {
         );
     }
 
+    // ---- the run detail's `blockers` (issue #54, §0.31) ----
+
+    fn some_kinds() -> UnsupportedDeductionKinds {
+        UnsupportedDeductionKinds::new(vec![
+            payroll::UnsupportedDeductionKind::ApprovedPensionFund,
+            payroll::UnsupportedDeductionKind::ProvidentFund,
+        ])
+        .unwrap()
+    }
+
+    fn some_figures() -> PriorEmploymentFigures {
+        PriorEmploymentFigures::new(
+            Money::from_cents(100_000).unwrap(),
+            Money::from_cents(20_000).unwrap(),
+        )
+    }
+
+    /// Exactly five codes exist and no others. The `match` in
+    /// [`blocker_code_and_details`] has no wildcard arm, so a sixth
+    /// [`PayrollRunBlocker`] variant fails the build; this test is what
+    /// pins the five strings themselves, which no compiler can check.
+    #[test]
+    fn every_blocker_maps_to_its_code_and_details() {
+        let mapped: Vec<(&str, Option<Value>)> = [
+            PayrollRunBlocker::PriorEmploymentUnknown,
+            PayrollRunBlocker::PriorEmploymentTreatmentUnconfirmed {
+                figures: some_figures(),
+            },
+            PayrollRunBlocker::UnsupportedDeductionStatusUnknown,
+            PayrollRunBlocker::UnsupportedDeductionsPresent {
+                kinds: some_kinds(),
+            },
+            PayrollRunBlocker::NoCompensationTermsInForce,
+        ]
+        .iter()
+        .map(blocker_code_and_details)
+        .collect();
+
+        assert_eq!(
+            mapped,
+            vec![
+                ("prior_employment_unknown", None),
+                (
+                    "prior_employment_treatment_unconfirmed",
+                    Some(json!({ "taxableRemunerationCents": 100_000, "payeCents": 20_000 })),
+                ),
+                ("unsupported_deduction_status_unknown", None),
+                (
+                    "unsupported_deductions_present",
+                    Some(json!({ "kinds": ["approved_pension_fund", "provident_fund"] })),
+                ),
+                ("no_compensation_terms_in_force", None),
+            ]
+        );
+    }
+
+    /// The four blockers a `PayrollError` also reports carry that refusal's
+    /// own code *and* its own `details`, read out of the two mappings rather
+    /// than written twice as literals here — issue #54's "the five codes are
+    /// the same strings the mapping in #50 already owns. Do not mint
+    /// parallel ones." A rename on either side fails this test.
+    #[test]
+    fn a_blocker_and_the_refusal_for_the_same_fact_are_the_same_code_and_details() {
+        for (blocker, refusal) in [
+            (
+                PayrollRunBlocker::PriorEmploymentUnknown,
+                PayrollError::PriorEmploymentUnknown,
+            ),
+            (
+                PayrollRunBlocker::PriorEmploymentTreatmentUnconfirmed {
+                    figures: some_figures(),
+                },
+                PayrollError::PriorEmploymentPresent {
+                    figures: some_figures(),
+                },
+            ),
+            (
+                PayrollRunBlocker::UnsupportedDeductionStatusUnknown,
+                PayrollError::UnsupportedDeductionStatusUnknown,
+            ),
+            (
+                PayrollRunBlocker::UnsupportedDeductionsPresent {
+                    kinds: some_kinds(),
+                },
+                PayrollError::UnsupportedDeductionsPresent {
+                    kinds: some_kinds(),
+                },
+            ),
+        ] {
+            let (blocker_code, blocker_details) = blocker_code_and_details(&blocker);
+            let (_, refusal_code, refusal_details) = classify_payroll_error(&refusal);
+            assert_eq!(blocker_code, refusal_code);
+            assert_eq!(
+                blocker_details, refusal_details,
+                "details for {blocker_code}"
+            );
+        }
+    }
+
+    /// The fifth code is `payroll-app`'s, not the pure crate's, and it is
+    /// the one place the two `details` deliberately differ: the refusal
+    /// names the Employment it is about, while a blocker is already listed
+    /// under the member it belongs to, so repeating the id there would say
+    /// nothing.
+    #[test]
+    fn the_no_compensation_terms_blocker_is_the_refusals_own_code() {
+        let refusal: ApiError =
+            PayrollAppError::NoCompensationTermsInForce(EmploymentId::new("employment-1")).into();
+
+        let (code, details) =
+            blocker_code_and_details(&PayrollRunBlocker::NoCompensationTermsInForce);
+
+        assert_eq!(code, refusal.code());
+        assert_eq!(details, None);
+    }
+
     // ---- variants that need an id only `payroll-app` itself can mint ----
 
     fn test_database_config() -> DatabaseConfig {

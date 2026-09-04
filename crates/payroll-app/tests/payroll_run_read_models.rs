@@ -70,6 +70,42 @@ async fn an_employment(db: &SaltDatabase, employer_id: &EmployerId, person: &str
     .1
 }
 
+/// Records every standing fact `calculate_payroll_run` needs, so the
+/// Employment reads back with an empty `blockers` list.
+async fn a_fully_declared_employment(db: &SaltDatabase, employment_id: &EmploymentId) {
+    record_compensation_terms(
+        db,
+        employment_id,
+        well_before_the_period(),
+        Money::from_cents(1500000).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_prior_employment(
+        db,
+        employment_id,
+        TaxYear::starting(2025),
+        PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    declare_unsupported_deduction_status(
+        db,
+        employment_id,
+        well_before_the_period(),
+        UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+}
+
 async fn a_run(db: &SaltDatabase, employer_id: &EmployerId, period: PayPeriod) -> PayrollRunId {
     create_ordinary_payroll_run(db, employer_id, period, date(2026, 3, 1), "actor")
         .await
@@ -88,6 +124,15 @@ async fn stored_status(pool: &PgPool, run_id: &PayrollRunId) -> String {
 
 async fn action_log_entry_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM action_log_entry")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Read raw for the same reason as [`stored_status`]: `WorkingPayrollCalculation`
+/// is what `calculate_payroll_run` produces, and no read model reports it.
+async fn working_calculation_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM working_payroll_calculation")
         .fetch_one(pool)
         .await
         .unwrap()
@@ -240,23 +285,41 @@ async fn a_run_whose_only_member_was_removed_still_reads_back(pool: PgPool) {
 /// Reading is reading. A GET never runs the calculator and never moves a run
 /// out of `Draft` (parent #49's third `blockers` limit, which this read model
 /// is the one that could break).
+///
+/// The member is set up with every fact on record, so this run is one a
+/// calculation *would* succeed for: a read model that quietly ran the
+/// calculator would leave the `WorkingPayrollCalculation` row and the
+/// `calculated` status behind for these assertions to catch. A member with
+/// blockers would prove far less — a calculator run behind the GET would
+/// have refused and stored nothing either way.
 #[sqlx::test]
 async fn reading_a_runs_detail_changes_nothing(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db, "Employer").await;
-    an_employment(&db, &employer_id, "Ada Lovelace").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    a_fully_declared_employment(&db, &employment_id).await;
     let run_id = a_run(&db, &employer_id, february_period()).await;
     let entries_before = action_log_entry_count(&pool).await;
 
-    get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
         .await
         .unwrap();
     get_payroll_run_detail(&db, &employer_id, run_id.as_str())
         .await
         .unwrap();
 
+    assert_eq!(
+        detail.members[0].blockers,
+        Vec::new(),
+        "the member must be one a calculation would have succeeded for"
+    );
     assert_eq!(stored_status(&pool, &run_id).await, "draft");
     assert_eq!(action_log_entry_count(&pool).await, entries_before);
+    assert_eq!(
+        working_calculation_count(&pool).await,
+        0,
+        "reading a run's detail must never produce a calculation"
+    );
 }
 
 #[sqlx::test]
@@ -313,37 +376,7 @@ async fn a_member_with_every_fact_confirmed_has_no_blockers(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool);
     let employer_id = an_employer(&db, "Employer").await;
     let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
-    record_compensation_terms(
-        &db,
-        &employment_id,
-        well_before_the_period(),
-        Money::from_cents(1500000).unwrap(),
-        &[],
-        "",
-        "actor",
-    )
-    .await
-    .unwrap();
-    declare_prior_employment(
-        &db,
-        &employment_id,
-        TaxYear::starting(2025),
-        PriorEmployment::None,
-        "actor",
-    )
-    .await
-    .unwrap();
-    declare_unsupported_deduction_status(
-        &db,
-        &employment_id,
-        well_before_the_period(),
-        UnsupportedDeductionStatus::ConfirmedNone,
-        &[],
-        "a reason",
-        "actor",
-    )
-    .await
-    .unwrap();
+    a_fully_declared_employment(&db, &employment_id).await;
     let run_id = a_run(&db, &employer_id, february_period()).await;
 
     let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())

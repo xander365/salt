@@ -948,11 +948,14 @@ pub async fn get_payroll_run_detail(
 /// UnsupportedDeductionStatus, then CompensationTerms. Each fact yields at
 /// most one blocker, so the list holds zero to three entries.
 ///
-/// Every other [`PayrollAppError`] a read below could raise — an Employment
-/// that has gone missing or void since the caller's own membership row was
-/// read — is not one of the five standing-fact states this list reports, so
-/// it is propagated rather than swallowed into a blocker that would
-/// misname it.
+/// Only two other [`PayrollAppError`]s can reach the caller from here, and
+/// neither is one of the five standing-fact states this list may report, so
+/// both are propagated rather than swallowed into a blocker that would
+/// misname them. Neither is reachable in practice:
+/// [`PayrollAppError::EmploymentNotFound`] cannot happen because the
+/// membership row naming this Employment is a foreign key to it, and
+/// [`PayrollAppError::EmploymentIsVoid`] cannot happen because migration
+/// 0018 refuses to void an Employment that is an active run member.
 async fn member_blockers(
     db: &SaltDatabase,
     employment_id: &EmploymentId,

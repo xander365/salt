@@ -203,6 +203,28 @@ fn detail_request(employer_id: &str, run_id: &str, cookie: &str) -> Request<Body
         .unwrap()
 }
 
+/// `POST /api/employers/{e}/employments/{em}/unsupported-deductions`, the
+/// route issue #52 already ships. Used here only to record the one standing
+/// fact whose blocker carries `details`, so the wire shape of a
+/// details-carrying blocker is proven end to end.
+fn declare_unsupported_deductions_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn set_earnings_request(
     employer_id: &str,
     run_id: &str,
@@ -925,4 +947,58 @@ async fn a_payroll_operator_reaches_all_four_routes() {
             "{method} {uri} must be reachable by a PayrollOperator"
         );
     }
+}
+
+/// `unsupported_deductions_present` is the one blocker whose `details` a
+/// screen must read: "you have unsupported deductions" without naming them
+/// is unactionable (issue #54, §0.31). This proves the kinds survive the
+/// whole path — declaration route, read model, DTO — under the same code
+/// the refusal itself uses.
+#[tokio::test]
+async fn a_present_unsupported_deduction_blocker_names_its_kinds_on_the_wire() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+
+    let declared = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({
+                "effectiveFrom": "2026-01-01",
+                "status": "present",
+                "kinds": ["provident_fund", "education_policy"],
+                "acknowledgedDivergingPeriods": [],
+                "reason": "joined a provident fund",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::OK);
+
+    let run_id = create_run(&employer_id, &cookie).await;
+    let response = router()
+        .await
+        .oneshot(detail_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = body_json(response).await;
+    let blockers = detail["members"][0]["blockers"].as_array().unwrap();
+    let present = blockers
+        .iter()
+        .find(|blocker| blocker["code"] == "unsupported_deductions_present")
+        .expect("a present declaration blocks under its own code");
+    assert_eq!(
+        present["details"]["kinds"],
+        serde_json::json!(["provident_fund", "education_policy"])
+    );
+    assert!(
+        !blockers
+            .iter()
+            .any(|blocker| blocker["code"] == "unsupported_deduction_status_unknown"),
+        "a declaration in force is never also reported as unknown"
+    );
 }
