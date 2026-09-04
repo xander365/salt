@@ -15,13 +15,13 @@ use std::collections::HashMap;
 
 use crate::database::SaltDatabase;
 use crate::employer::pay_schedule_for_employer;
-use crate::employment::get_employment_snapshot_on;
+use crate::employment::get_employment_snapshot_conn;
 use crate::error::PayrollAppError;
 use crate::payroll_run::{
     PayrollRunId, RunStatus, active_member_ids, finalized_payrolls_for_run, lock_run,
 };
-use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
-use crate::year_to_date::build_year_to_date_context_on;
+use crate::unsupported_deduction_status::get_unsupported_deduction_status_conn;
+use crate::year_to_date::build_year_to_date_context_conn;
 use payroll::{
     Earning, EmploymentId, PayPeriod, PaySchedule, PayrollCalculation, PayrollInput, PayrollRules,
     calculate, ruleset_for,
@@ -186,6 +186,17 @@ pub(crate) async fn run_earnings_by_member(
 /// calculated against different facts; and holding one pooled connection
 /// while asking for another is how a pool of N deadlocks under N concurrent
 /// callers.
+///
+/// Calls the `_conn`-suffixed sibling of each read (`get_employment_snapshot_conn`,
+/// not `get_employment_snapshot_on`), passing `&mut **tx` — a concrete
+/// `&mut PgConnection` — rather than the generic `impl Acquire<'a>` entry
+/// point every other caller of these reads uses. Issue #55 is what first
+/// requires this function's own caller (`calculate_payroll_run`) to be
+/// `Send`, awaited as it is from an `axum` handler; reborrowing `tx` three
+/// times into a generic `impl Acquire<'a>` parameter from inside a `Send`-
+/// checked call chain is a known rustc/sqlx limitation ("implementation of
+/// `Acquire` is not general enough") that the concrete-typed siblings don't
+/// have a generic lifetime parameter to trip.
 pub(crate) async fn assemble_and_calculate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     employment_id: &EmploymentId,
@@ -194,11 +205,10 @@ pub(crate) async fn assemble_and_calculate(
     earnings: Vec<Earning>,
     rules: &PayrollRules,
 ) -> Result<(PayrollInput, PayrollCalculation), PayrollAppError> {
-    let employment = get_employment_snapshot_on(&mut **tx, employment_id, period.end()).await?;
+    let employment = get_employment_snapshot_conn(tx, employment_id, period.end()).await?;
     let unsupported_deductions =
-        get_unsupported_deduction_status_on(&mut **tx, employment_id, period.end()).await?;
-    let year_to_date =
-        build_year_to_date_context_on(&mut **tx, employment_id, period.end()).await?;
+        get_unsupported_deduction_status_conn(tx, employment_id, period.end()).await?;
+    let year_to_date = build_year_to_date_context_conn(tx, employment_id, period.end()).await?;
 
     let input = PayrollInput::new(
         employment,

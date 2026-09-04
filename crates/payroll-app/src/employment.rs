@@ -7,7 +7,7 @@ use payroll::{
     CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, PersonId,
     PersonReference,
 };
-use sqlx::{Acquire, Postgres};
+use sqlx::{Acquire, PgConnection, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
@@ -357,13 +357,37 @@ pub async fn get_employment_snapshot(
 /// standalone read, or a `&mut Transaction` so a caller assembling several
 /// facts at once reads them all on the one connection, inside its own
 /// transaction and under whatever lock it already holds.
+///
+/// A thin wrapper over [`get_employment_snapshot_conn`]: this generic
+/// `impl Acquire` entry point is for callers that may hand it either a pool
+/// or a transaction. A caller that already holds a concrete
+/// `&mut PgConnection` — `calculate.rs`'s per-member loop among them —
+/// calls that function directly instead (see its own doc comment for why).
 pub(crate) async fn get_employment_snapshot_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     as_of: NaiveDate,
 ) -> Result<EmploymentSnapshot, PayrollAppError> {
     let mut conn = conn.acquire().await?;
+    get_employment_snapshot_conn(&mut conn, employment_id, as_of).await
+}
 
+/// The concrete-connection core [`get_employment_snapshot_on`] delegates to.
+///
+/// Called directly, bypassing that generic `impl Acquire<'a>` entry point,
+/// by a caller that already holds a `&mut PgConnection` (a reborrowed
+/// `&mut Transaction` included, since `Transaction` derefs to it) and whose
+/// own future must be `Send` — awaiting the generic entry point with a
+/// reborrow from such a caller is a known rustc/sqlx limitation
+/// ("implementation of `Acquire` is not general enough"), because it forces
+/// `Send` to be proven for the generic `impl Acquire<'a>` parameter's own
+/// lifetime rather than for one already-concrete type. A concrete
+/// `&mut PgConnection` parameter has no such generic lifetime to trip it.
+pub(crate) async fn get_employment_snapshot_conn(
+    conn: &mut PgConnection,
+    employment_id: &EmploymentId,
+    as_of: NaiveDate,
+) -> Result<EmploymentSnapshot, PayrollAppError> {
     type SnapshotRow = (
         String,
         String,

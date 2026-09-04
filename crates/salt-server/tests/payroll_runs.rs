@@ -2,9 +2,10 @@
 //! /api/employers/{e}/payroll-runs`, `GET
 //! /api/employers/{e}/payroll-runs/{r}` and `PUT
 //! /api/employers/{e}/payroll-runs/{r}/members/{em}/earnings` (issue #53,
-//! parent #49 Spec 2 of 3). Driven with `tower::ServiceExt::oneshot` against
-//! the real router, the same discipline `tests/employments.rs` already
-//! follows.
+//! parent #49 Spec 2 of 3), plus `POST
+//! /api/employers/{e}/payroll-runs/{r}/calculate` (issue #55). Driven with
+//! `tower::ServiceExt::oneshot` against the real router, the same
+//! discipline `tests/employments.rs` already follows.
 
 use std::time::Duration;
 
@@ -244,6 +245,131 @@ fn set_earnings_request(
         builder = builder.header("x-salt-request", "1");
     }
     builder.body(Body::from(body.to_string())).unwrap()
+}
+
+fn calculate_request(
+    employer_id: &str,
+    run_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/calculate"
+        ))
+        .header(header::COOKIE, cookie);
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// `POST /api/employers/{e}/employments/{em}/compensation-terms`, the route
+/// issue #52 already ships. Used here to give a member the one fact
+/// `calculate` reads first, so a member missing only this one is the
+/// minimal way to prove a per-member `refusal` on the calculate route.
+fn record_compensation_terms_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    effective_from: &str,
+    basic_pay_cents: i64,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/compensation-terms"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "effectiveFrom": effective_from,
+                "basicPayCents": basic_pay_cents,
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// `POST /api/employers/{e}/employments/{em}/prior-employment`, the route
+/// issue #52 already ships. Used here only to declare `confirmed_none`, so
+/// a fully-declared member has no standing blocker left.
+fn declare_prior_employment_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    tax_year: i32,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/prior-employment"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "taxYear": tax_year,
+                "status": "confirmed_none",
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// Declares every fact `calculate` needs for `employment_id` under
+/// `january_period()`'s own `PaySchedule` and `TaxYear` — `CompensationTerms`
+/// effective from the start of that period, a confirmed absence of
+/// `PriorEmployment` for the TaxYear `january_period()`'s end falls in, and
+/// a confirmed absence of unsupported deductions. Ready to calculate the
+/// instant it is a run member.
+async fn fully_declare_employment(employer_id: &str, employment_id: &str, cookie: &str) {
+    let response = router()
+        .await
+        .oneshot(record_compensation_terms_request(
+            employer_id,
+            employment_id,
+            cookie,
+            "2026-01-01",
+            1_500_000,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 2026-01-31 (january_period()'s own end) falls in the TaxYear starting
+    // 2025 (1 March 2025 - end of February 2026).
+    let response = router()
+        .await
+        .oneshot(declare_prior_employment_request(
+            employer_id,
+            employment_id,
+            cookie,
+            2025,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            employer_id,
+            employment_id,
+            cookie,
+            serde_json::json!({
+                "effectiveFrom": "2026-01-01",
+                "status": "confirmed_none",
+                "reason": "no unsupported deductions",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -591,6 +717,7 @@ async fn without_membership_the_routes_answer_404() {
             true,
             serde_json::json!({ "earnings": [] }),
         ),
+        calculate_request(&employer_id, &run_id, &outsider_cookie, true),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -639,6 +766,7 @@ async fn every_route_answers_401_without_a_session() {
             true,
             serde_json::json!({ "earnings": [] }),
         ),
+        calculate_request(&employer_id, &run_id, no_cookie, true),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -901,7 +1029,7 @@ async fn an_employer_id_in_the_body_is_ignored() {
 /// A `PayrollOperator`, not only an `Owner`, is let through all four routes
 /// (§0.6, parent #49: none of this spec's routes is Owner-only).
 #[tokio::test]
-async fn a_payroll_operator_reaches_all_four_routes() {
+async fn a_payroll_operator_reaches_every_route() {
     let db = test_db().await;
     let email = unique_email("bob");
     let operator_id = create_operator(&email).await;
@@ -937,6 +1065,7 @@ async fn a_payroll_operator_reaches_all_four_routes() {
             true,
             serde_json::json!({ "earnings": [] }),
         ),
+        calculate_request(&employer_id, &run_id, &cookie, true),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -1001,4 +1130,172 @@ async fn a_present_unsupported_deduction_blocker_names_its_kinds_on_the_wire() {
             .any(|blocker| blocker["code"] == "unsupported_deduction_status_unknown"),
         "a declaration in force is never also reported as unknown"
     );
+}
+
+/// Issue #55's central acceptance criterion: a fully-declared member gets
+/// its figures back, cents-exact, and the run's own `status` says Finalize
+/// is now allowed.
+#[tokio::test]
+async fn calculating_a_fully_declared_run_returns_figures_and_the_run_becomes_calculated() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = body_json(response).await;
+    assert_eq!(detail["status"], "calculated");
+    let member = &detail["members"][0];
+    assert!(member["refusal"].is_null());
+    let figures = &member["figures"];
+    assert_eq!(figures["basicPayCents"], 1_500_000);
+    assert_eq!(figures["taxableAllowancesCents"], 0);
+    assert_eq!(figures["grossCents"], 1_500_000);
+    assert_eq!(figures["taxableRemunerationCents"], 1_500_000);
+    assert!(figures["payeCents"].is_i64());
+    assert!(figures["employeeSscCents"].is_i64());
+    assert!(figures["employerSscCents"].is_i64());
+    assert!(figures["netCents"].is_i64());
+
+    // A plain refresh reads the same figures back — the stored
+    // `WorkingPayrollCalculation`, not a claim only Calculate's own
+    // response can make.
+    let refreshed = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refreshed["status"], "calculated");
+    assert_eq!(refreshed["members"][0]["figures"], *figures);
+    assert!(refreshed["members"][0]["refusal"].is_null());
+}
+
+/// A member missing its `CompensationTerms` cannot calculate — but the
+/// route still answers 200, with the reason in that member's own
+/// `refusal`, under the same stable code the error envelope itself would
+/// use (§0.25, issue #55's own Deep Instructions). With one member, "the
+/// run refused" and "every member refused" are the same run, so this also
+/// proves that acceptance criterion.
+#[tokio::test]
+async fn calculating_a_blocked_member_returns_200_with_its_own_refusal() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a fully-refused run is still 200 (§0.25): Calculate is not an error"
+    );
+    let detail = body_json(response).await;
+    assert_eq!(detail["status"], "draft");
+    let member = &detail["members"][0];
+    assert!(member["figures"].is_null());
+    assert_eq!(member["refusal"]["code"], "no_compensation_terms_in_force");
+
+    // A plain refresh never recomputes: figures stay absent, but so does
+    // `refusal` — it is never persisted, unlike `blockers`.
+    let refreshed = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(refreshed["members"][0]["refusal"].is_null());
+}
+
+#[tokio::test]
+async fn the_calculate_route_requires_the_salt_request_header() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, false))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "salt_request_header_required");
+}
+
+#[tokio::test]
+async fn a_run_id_belonging_to_another_employer_is_not_found_on_the_calculate_route() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let run_id = create_run(&owning_employer, &owning_cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(
+            &other_employer,
+            &run_id,
+            &other_cookie,
+            true,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_not_found");
+}
+
+/// A retried Calculate against an already-`Finalized` run is refused with
+/// its own stable code (issue #55's own acceptance criterion), the same 409
+/// a retried Finalize itself gets (§0.28) — Calculate shares the refusal,
+/// not the DTO shape, with that outcome.
+#[tokio::test]
+async fn calculating_an_already_finalized_run_is_refused_with_its_stable_code() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let calculated = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    assert_eq!(calculated.status(), StatusCode::OK);
+
+    // Finalization has no HTTP route yet (a later ticket's own scope), so
+    // the run is finalized directly through `payroll_app` here.
+    let db = test_db().await;
+    let domain_employer_id = payroll::EmployerId::new(employer_id.clone());
+    let payroll_run_id =
+        payroll_app::verify_payroll_run_belongs_to_employer(&db, &domain_employer_id, &run_id)
+            .await
+            .unwrap();
+    payroll_app::finalize_payroll_run(&db, &payroll_run_id, "test-setup")
+        .await
+        .unwrap();
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_already_finalized");
 }

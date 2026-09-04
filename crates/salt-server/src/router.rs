@@ -93,6 +93,10 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/earnings",
             axum::routing::put(payroll_runs::set_run_earnings),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
+            axum::routing::post(payroll_runs::calculate_payroll_run),
         );
 
     #[cfg(feature = "test-support")]

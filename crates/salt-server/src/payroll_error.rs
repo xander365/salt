@@ -802,6 +802,38 @@ pub(crate) fn blocker_code_and_details(
     }
 }
 
+/// A member's `refusal` in `POST .../calculate`'s response (issue #55):
+/// the same stable `code` and `details` [`classify_payroll_app_error`]
+/// already assigns that refusal in the general error envelope, reused
+/// rather than reinvented, so a client branches on one set of codes
+/// regardless of where a refusal surfaces. The status half of the
+/// classification is irrelevant here — a per-member refusal never becomes
+/// the response's own status; "Calculate is not an error" (§0.25) is a run
+/// that returns 200 with every refusal named inside it, even when every
+/// member refused.
+///
+/// [`Classification::Internal`] should never actually reach a calculation
+/// refusal — every fact-assembly step and `calculate` itself only ever
+/// raises a mapped domain refusal — but a database hiccup mid-calculation
+/// is still technically possible, so it is logged and given the same
+/// `internal_error` code and `requestId` detail [`ApiError::internal`]
+/// would give it, rather than a panic taking the whole request down over
+/// one member's calculation.
+pub(crate) fn refusal_code_and_details(err: &PayrollAppError) -> (&'static str, Option<Value>) {
+    match classify_payroll_app_error(err) {
+        Classification::Mapped(_status, code, details) => (code, details),
+        Classification::Internal => {
+            let request_id = current_request_id();
+            tracing::error!(
+                error = %err,
+                request_id = %request_id,
+                "internal error inside a per-member calculation refusal"
+            );
+            ("internal_error", Some(json!({ "requestId": request_id })))
+        }
+    }
+}
+
 /// Permanent, hand-picked `snake_case` names — never the `#[derive]`d
 /// serialization of the domain enum, which is free to change shape for
 /// storage reasons no API contract should feel. The HTTP request parser uses

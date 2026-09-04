@@ -1,9 +1,11 @@
 //! The four routes issue #53 adds (parent #49 Spec 2 of 3): `POST
 //! .../payroll-runs`, `GET .../payroll-runs`, `GET .../payroll-runs/{r}` and
-//! `PUT .../payroll-runs/{r}/members/{em}/earnings`. An Operator creates the
+//! `PUT .../payroll-runs/{r}/members/{em}/earnings`, plus `POST
+//! .../payroll-runs/{r}/calculate` (issue #55). An Operator creates the
 //! next Ordinary run for a period, sees the Employer's runs, opens one and
-//! reads every member it proposes to pay, and sets one member's earning
-//! lines — the whole working state of a run, before any arithmetic happens.
+//! reads every member it proposes to pay, sets one member's earning lines,
+//! and calculates the run to see the figures — or the reason — for every
+//! member.
 //!
 //! Earnings is `PUT`, not `POST`: `payroll_app::set_run_earnings` replaces
 //! the member's whole earnings list, and naming that idempotence in the
@@ -18,22 +20,34 @@
 //! Every handler here takes its `EmployerId` from
 //! [`AuthorizedEmployerContext`] and never from the path (ADR-0017). `GET`
 //! and `PUT`/`POST` `.../payroll-runs/{r}...` routes that do not already
-//! take an `EmployerId` inside `payroll_app` (the earnings route) call
-//! [`payroll_app::verify_payroll_run_belongs_to_employer`] first, so a run
-//! id belonging to another Employer is 404 before any use case runs.
+//! take an `EmployerId` inside `payroll_app` (the earnings and calculate
+//! routes) call [`payroll_app::verify_payroll_run_belongs_to_employer`]
+//! first, so a run id belonging to another Employer is 404 before any use
+//! case runs.
+//!
+//! Calculate is not an error (§0.25): `calculate_payroll_run` below always
+//! answers 200 with the run detail, even when every member refused. No
+//! handler here recalculates anything, inspects a figure, or decides
+//! whether Finalize is allowed (issue #55's own Deep Instructions) — a
+//! client reads that straight off `status`, which is `"calculated"` exactly
+//! when Finalize is allowed.
+
+use std::collections::HashMap;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, State};
 use chrono::NaiveDate;
 use payroll::{Earning, EmployerId, EmploymentId, Money};
-use payroll_app::{PayrollRunBlocker, RunStatus};
+use payroll_app::{
+    PayrollAppError, PayrollFigures, PayrollRunBlocker, PayrollRunDetail, RunStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::employment_facts::{PayPeriodDto, RecordedResponse};
 use crate::error::ApiError;
-use crate::payroll_error::blocker_code_and_details;
+use crate::payroll_error::{blocker_code_and_details, refusal_code_and_details};
 use crate::state::AppState;
 
 /// `payroll_run.status`'s wire spelling — the same three states
@@ -170,6 +184,14 @@ pub(crate) struct PayrollRunDetailResponse {
 /// One member of a run's detail response: who is being proposed to pay, by
 /// name, their current Earning lines, and why they cannot be paid right now,
 /// if at all. An empty `blockers` means ready (issue #54, §0.31).
+///
+/// `figures` and `refusal` (issue #55) are different things and both may be
+/// present: a `blocker` is read from standing facts, a `refusal` is what
+/// Calculate's own most recent call actually said. `figures` comes back on
+/// this same DTO whether the response is Calculate's own or a later plain
+/// `GET` refresh — both read the member's stored `WorkingPayrollCalculation`
+/// — but `refusal` is never persisted, so a `GET` refresh always carries
+/// `null` there even for a member still blocked.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PayrollRunMemberDto {
@@ -177,6 +199,8 @@ struct PayrollRunMemberDto {
     full_name: String,
     earnings: Vec<EarningLineDto>,
     blockers: Vec<BlockerDto>,
+    figures: Option<FiguresDto>,
+    refusal: Option<RefusalDto>,
 }
 
 /// One entry of a member's `blockers` list, under the same stable `code`s
@@ -194,6 +218,73 @@ fn blocker_to_dto(blocker: PayrollRunBlocker) -> BlockerDto {
     BlockerDto { code, details }
 }
 
+/// The eight figures §0.29 names for a member's current calculation.
+/// Cents-exact integers on the wire, never a JSON float (INV-001).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FiguresDto {
+    basic_pay_cents: i64,
+    taxable_allowances_cents: i64,
+    gross_cents: i64,
+    taxable_remuneration_cents: i64,
+    paye_cents: i64,
+    employee_ssc_cents: i64,
+    employer_ssc_cents: i64,
+    net_cents: i64,
+}
+
+fn figures_to_dto(figures: PayrollFigures) -> FiguresDto {
+    FiguresDto {
+        basic_pay_cents: figures.basic_pay.cents(),
+        taxable_allowances_cents: figures.taxable_allowances.cents(),
+        gross_cents: figures.gross.cents(),
+        taxable_remuneration_cents: figures.taxable_remuneration.cents(),
+        paye_cents: figures.paye.cents(),
+        employee_ssc_cents: figures.employee_social_security.cents(),
+        employer_ssc_cents: figures.employer_social_security.cents(),
+        net_cents: figures.net_pay.cents(),
+    }
+}
+
+/// A member's `refusal`, under the same stable `code`s the error envelope
+/// itself uses for the same refusal (issue #55's own Deep Instructions).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefusalDto {
+    code: &'static str,
+    details: Option<Value>,
+}
+
+fn refusal_to_dto(refusal: PayrollAppError) -> RefusalDto {
+    let (code, details) = refusal_code_and_details(&refusal);
+    RefusalDto { code, details }
+}
+
+/// Turns a [`PayrollRunDetail`] into the wire response both `GET
+/// .../payroll-runs/{r}` and `POST .../payroll-runs/{r}/calculate` answer
+/// with (issue #55's own Deep Instructions: one DTO, not two shapes for the
+/// same run).
+fn payroll_run_detail_to_response(detail: PayrollRunDetail) -> PayrollRunDetailResponse {
+    PayrollRunDetailResponse {
+        payroll_run_id: detail.id.to_string(),
+        period: PayPeriodDto::from(detail.period),
+        pay_date: detail.pay_date,
+        status: status_str(detail.status),
+        members: detail
+            .members
+            .into_iter()
+            .map(|member| PayrollRunMemberDto {
+                employment_id: member.employment_id.to_string(),
+                full_name: member.full_name,
+                earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
+                blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
+                figures: member.figures.map(figures_to_dto),
+                refusal: member.refusal.map(refusal_to_dto),
+            })
+            .collect(),
+    }
+}
+
 /// `GET /api/employers/{e}/payroll-runs/{r}`: the run's period, pay date,
 /// status, and every member it proposes to pay, by name, with their current
 /// Earning lines. A run id belonging to another Employer is 404
@@ -208,22 +299,56 @@ pub(crate) async fn get_payroll_run(
     let detail =
         payroll_app::get_payroll_run_detail(state.db(), &employer_id, &payroll_run_id).await?;
 
-    Ok(Json(PayrollRunDetailResponse {
-        payroll_run_id: detail.id.to_string(),
-        period: PayPeriodDto::from(detail.period),
-        pay_date: detail.pay_date,
-        status: status_str(detail.status),
-        members: detail
-            .members
-            .into_iter()
-            .map(|member| PayrollRunMemberDto {
-                employment_id: member.employment_id.to_string(),
-                full_name: member.full_name,
-                earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
-                blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
-            })
-            .collect(),
-    }))
+    Ok(Json(payroll_run_detail_to_response(detail)))
+}
+
+/// `POST /api/employers/{e}/payroll-runs/{r}/calculate` (issue #55):
+/// recalculates every active member and answers **200** with the same run
+/// detail `GET` reads, whether every member calculated cleanly, some
+/// refused, or all of them did — Calculate is not an error (§0.25), so a
+/// refusal lives in a member's own `refusal` field, never in the response's
+/// status.
+///
+/// Confirms `payroll_run_id` belongs to `employer_id` first (ADR-0017):
+/// `payroll_app::calculate_payroll_run` takes no `EmployerId` of its own, so
+/// a run id belonging to another Employer must be refused here, the same as
+/// a missing one, before any calculation runs. An already-`Finalized` run
+/// is refused with its own stable code from that same call.
+///
+/// The only thing `payroll_app::get_payroll_run_detail` itself can never
+/// show is filled in after reading it back: each refused member's own
+/// `refusal`, matched onto the freshly-read detail by `EmploymentId`. Every
+/// other member's `figures` already comes from that read, because the
+/// calculation above just wrote its `WorkingPayrollCalculation` row before
+/// this handler re-reads it — the same row a later plain `GET` would also
+/// see.
+pub(crate) async fn calculate_payroll_run(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id)): Path<(String, String)>,
+) -> Result<Json<PayrollRunDetailResponse>, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+    let run_id = payroll_app::verify_payroll_run_belongs_to_employer(
+        state.db(),
+        &employer_id,
+        &payroll_run_id,
+    )
+    .await?;
+
+    let refusals =
+        payroll_app::calculate_payroll_run(state.db(), &run_id, &context.actor()).await?;
+    let mut refusals_by_member: HashMap<EmploymentId, PayrollAppError> = refusals
+        .into_iter()
+        .map(|refusal| (refusal.employment_id, refusal.refusal))
+        .collect();
+
+    let mut detail =
+        payroll_app::get_payroll_run_detail(state.db(), &employer_id, &payroll_run_id).await?;
+    for member in &mut detail.members {
+        member.refusal = refusals_by_member.remove(&member.employment_id);
+    }
+
+    Ok(Json(payroll_run_detail_to_response(detail)))
 }
 
 #[derive(Deserialize)]

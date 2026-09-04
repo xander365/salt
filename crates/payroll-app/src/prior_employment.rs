@@ -1,7 +1,7 @@
 //! `DeclarePriorEmployment` and the read that resolves it (§4.5b, §12).
 
 use payroll::{EmployerId, EmploymentId, Money, PriorEmployment, PriorEmploymentFigures, TaxYear};
-use sqlx::{Acquire, Postgres};
+use sqlx::{Acquire, PgConnection, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
@@ -148,13 +148,33 @@ pub async fn get_prior_employment(
 /// standalone read, or a `&mut Transaction` so a caller assembling several
 /// facts at once reads them all on the one connection, inside its own
 /// transaction and under whatever lock it already holds.
+///
+/// A thin wrapper over [`get_prior_employment_conn`]; see that function's
+/// own doc comment for why a caller that already holds a concrete
+/// `&mut PgConnection` calls it directly instead of this generic entry
+/// point.
 pub(crate) async fn get_prior_employment_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     tax_year: TaxYear,
 ) -> Result<PriorEmployment, PayrollAppError> {
     let mut conn = conn.acquire().await?;
+    get_prior_employment_conn(&mut conn, employment_id, tax_year).await
+}
 
+/// The concrete-connection core [`get_prior_employment_on`] delegates to,
+/// for the same reason [`crate::employment::get_employment_snapshot_conn`]
+/// exists: awaiting the generic `impl Acquire<'a>` entry point with a
+/// reborrowed connection, from inside a caller whose own future must be
+/// `Send` (`year_to_date.rs`'s `build_year_to_date_context_conn`,
+/// ultimately `calculate.rs`'s per-member loop), trips a known rustc/sqlx
+/// limitation. This concrete-typed sibling has no generic lifetime
+/// parameter to trip it.
+pub(crate) async fn get_prior_employment_conn(
+    conn: &mut PgConnection,
+    employment_id: &EmploymentId,
+    tax_year: TaxYear,
+) -> Result<PriorEmployment, PayrollAppError> {
     type DeclarationRow = (bool, Option<String>, Option<i64>, Option<i64>);
 
     // One statement, and an outer join rather than two reads: "the

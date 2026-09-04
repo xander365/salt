@@ -4,11 +4,11 @@
 
 use chrono::NaiveDate;
 use payroll::{EmploymentId, Money, PayrollError, PeriodsElapsed, TaxYear, YearToDateContext};
-use sqlx::{Acquire, Postgres};
+use sqlx::{Acquire, PgConnection, Postgres};
 
 use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
-use crate::prior_employment::get_prior_employment_on;
+use crate::prior_employment::get_prior_employment_conn;
 
 /// Builds the `YearToDateContext` for `employment_id` as of `period_end` —
 /// the end date of the `PayPeriod` being calculated (§8):
@@ -57,16 +57,37 @@ pub async fn build_year_to_date_context(
 /// below share that connection, so the `OpeningBalance`, the live history
 /// and the `PriorEmployment` are one consistent account of the TaxYear
 /// rather than three snapshots taken moments apart.
+///
+/// A thin wrapper over [`build_year_to_date_context_conn`]; see that
+/// function's own doc comment for why a caller that already holds a
+/// concrete `&mut PgConnection` calls it directly instead of this generic
+/// entry point.
 pub(crate) async fn build_year_to_date_context_on<'a>(
     conn: impl Acquire<'a, Database = Postgres>,
     employment_id: &EmploymentId,
     period_end: NaiveDate,
 ) -> Result<YearToDateContext, PayrollAppError> {
     let mut conn = conn.acquire().await?;
+    build_year_to_date_context_conn(&mut conn, employment_id, period_end).await
+}
 
+/// The concrete-connection core [`build_year_to_date_context_on`] delegates
+/// to, for the same reason
+/// [`crate::employment::get_employment_snapshot_conn`] exists: awaiting the
+/// generic `impl Acquire<'a>` entry point with a reborrowed
+/// `&mut Transaction`, from inside a caller whose own future must be
+/// `Send` (`calculate.rs`'s per-member loop), trips a known rustc/sqlx
+/// limitation. This concrete-typed sibling — and its own call into
+/// [`get_prior_employment_conn`], the same fix applied one level down —
+/// has no generic lifetime parameter to trip it.
+pub(crate) async fn build_year_to_date_context_conn(
+    conn: &mut PgConnection,
+    employment_id: &EmploymentId,
+    period_end: NaiveDate,
+) -> Result<YearToDateContext, PayrollAppError> {
     let tax_year = TaxYear::for_period_end(period_end);
     let periods_elapsed = PeriodsElapsed::from_period_end(period_end);
-    let prior_employment = get_prior_employment_on(&mut *conn, employment_id, tax_year).await?;
+    let prior_employment = get_prior_employment_conn(conn, employment_id, tax_year).await?;
 
     let opening: Option<(i64, i64)> = sqlx::query_as(
         "SELECT prior_taxable_remuneration, prior_paye

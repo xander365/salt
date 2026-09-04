@@ -17,8 +17,9 @@ use crate::prior_employment::get_prior_employment_on;
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use chrono::NaiveDate;
 use payroll::{
-    Earning, EmployerId, EmploymentId, PayPeriod, PaySchedule, PayrollError, PriorEmployment,
-    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    Earning, EmployerId, EmploymentId, Money, PayPeriod, PaySchedule, PayrollCalculation,
+    PayrollError, PriorEmployment, PriorEmploymentFigures, TaxYear, UnsupportedDeductionKinds,
+    UnsupportedDeductionStatus,
 };
 
 app_id! {
@@ -824,18 +825,88 @@ pub enum PayrollRunBlocker {
     NoCompensationTermsInForce,
 }
 
+/// The figures §0.29 names for one member's current calculation: Basic Pay,
+/// Taxable Allowances, Gross, Taxable Remuneration, PAYE, Employee SSC,
+/// Employer SSC and Net, read straight off a stored `PayrollCalculation`
+/// (issue #55). `basic_pay` and `taxable_allowances` are summed from
+/// `earning_lines` here, once, because `calculate` itself never stores
+/// either as a bare total — `RemunerationBases` accumulates into three
+/// statutory bases, not per-kind totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayrollFigures {
+    pub basic_pay: Money,
+    pub taxable_allowances: Money,
+    pub gross: Money,
+    pub taxable_remuneration: Money,
+    pub paye: Money,
+    pub employee_social_security: Money,
+    pub employer_social_security: Money,
+    pub net_pay: Money,
+}
+
+impl PayrollFigures {
+    /// Reads a stored calculation's figures straight off it — no handler
+    /// upstream of this ever inspects a figure or recomputes one (issue
+    /// #55's own Deep Instructions).
+    ///
+    /// Summing `earning_lines` into `basic_pay` and `taxable_allowances`
+    /// cannot overflow: `calculate` already summed the same lines into
+    /// `gross_remuneration` via `checked_add` without overflowing, and
+    /// every line is non-negative, so no subset of them can overflow
+    /// either.
+    fn from_calculation(calculation: &PayrollCalculation) -> Self {
+        let mut basic_pay = Money::ZERO;
+        let mut taxable_allowances = Money::ZERO;
+        for line in &calculation.earning_lines {
+            match *line {
+                Earning::BasicPay(amount) => {
+                    basic_pay = basic_pay
+                        .checked_add(amount)
+                        .expect("see from_calculation's own doc comment: cannot overflow here")
+                }
+                Earning::TaxableAllowance(amount) => {
+                    taxable_allowances = taxable_allowances
+                        .checked_add(amount)
+                        .expect("see from_calculation's own doc comment: cannot overflow here")
+                }
+            }
+        }
+        PayrollFigures {
+            basic_pay,
+            taxable_allowances,
+            gross: calculation.gross_remuneration,
+            taxable_remuneration: calculation.taxable_remuneration,
+            paye: calculation.paye.amount,
+            employee_social_security: calculation.employee_social_security.amount,
+            employer_social_security: calculation.employer_social_security.amount,
+            net_pay: calculation.net_pay,
+        }
+    }
+}
+
 /// One member of a PayrollRun in `GET
 /// /api/employers/{e}/payroll-runs/{r}` (issue #53): who is being proposed
 /// to pay, by name, their current Earning lines, and why they cannot be paid
 /// right now, if at all (issue #54). A struct of its own — not a tuple, not
 /// a bare `Vec<Earning>` beside a name — so `blockers` is an added field
 /// here, not a reshaped response.
+///
+/// `figures` and `refusal` (issue #55) are different things and both may be
+/// present: `figures` is read from a stored `WorkingPayrollCalculation`, so
+/// a refresh after a successful Calculate shows it again; `refusal` is
+/// "what the calculator actually said" on the call that just ran, and is
+/// never persisted, so [`get_payroll_run_detail`] always leaves it `None` —
+/// only `salt-server`'s own calculate handler fills it in, by matching
+/// [`crate::calculate_payroll_run`]'s returned refusals onto a freshly-read
+/// detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayrollRunMember {
     pub employment_id: EmploymentId,
     pub full_name: String,
     pub earnings: Vec<Earning>,
     pub blockers: Vec<PayrollRunBlocker>,
+    pub figures: Option<PayrollFigures>,
+    pub refusal: Option<PayrollAppError>,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -888,10 +959,16 @@ pub async fn get_payroll_run_detail(
     let period = PayPeriod::new(period_start, period_end)
         .expect("payroll_run CHECK: period_end is never before period_start");
 
-    type MemberRow = (String, String, Option<serde_json::Value>);
+    type MemberRow = (
+        String,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    );
 
     let member_rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT employment.id, person.full_name, earnings.earning_jsons
+        "SELECT employment.id, person.full_name, earnings.earning_jsons,
+                working_payroll_calculation.payroll_calculation_json
          FROM payroll_run_employment
          JOIN employment
            ON employment.id = payroll_run_employment.employment_id
@@ -904,6 +981,9 @@ pub async fn get_payroll_run_detail(
              WHERE payroll_run_earning.payroll_run_id = payroll_run_employment.payroll_run_id
                AND payroll_run_earning.employment_id = payroll_run_employment.employment_id
          ) AS earnings ON TRUE
+         LEFT JOIN working_payroll_calculation
+           ON working_payroll_calculation.payroll_run_id = payroll_run_employment.payroll_run_id
+          AND working_payroll_calculation.employment_id = payroll_run_employment.employment_id
          WHERE payroll_run_employment.payroll_run_id = $1::uuid
            AND payroll_run_employment.removed_at IS NULL
          ORDER BY employment.id",
@@ -913,13 +993,20 @@ pub async fn get_payroll_run_detail(
     .await?;
 
     let mut members = Vec::with_capacity(member_rows.len());
-    for (employment_id, full_name, earning_jsons) in member_rows {
+    for (employment_id, full_name, earning_jsons, calculation_json) in member_rows {
         let earnings = earning_jsons
             .map(|value| {
                 serde_json::from_value::<Vec<Earning>>(value)
                     .expect("payroll_run_earning.earning_json always serializes an Earning")
             })
             .unwrap_or_default();
+        let figures = calculation_json.map(|value| {
+            let calculation: PayrollCalculation = serde_json::from_value(value).expect(
+                "working_payroll_calculation.payroll_calculation_json always serializes a \
+                 PayrollCalculation",
+            );
+            PayrollFigures::from_calculation(&calculation)
+        });
         let employment_id = EmploymentId::new(employment_id);
         let blockers = member_blockers(db, &employment_id, period).await?;
         members.push(PayrollRunMember {
@@ -927,6 +1014,8 @@ pub async fn get_payroll_run_detail(
             full_name,
             earnings,
             blockers,
+            figures,
+            refusal: None,
         });
     }
 
