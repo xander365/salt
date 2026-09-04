@@ -1221,6 +1221,40 @@ async fn calculating_a_blocked_member_returns_200_with_its_own_refusal() {
     assert!(refreshed["members"][0]["refusal"].is_null());
 }
 
+/// A partial calculation is still a successful response: the ready member's
+/// figures must not be hidden by another member's refusal (#49 §0.25).
+#[tokio::test]
+async fn calculating_a_partially_blocked_run_returns_figures_and_a_member_refusal() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let ready_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &ready_id, &cookie).await;
+    let blocked_id = create_employment(&employer_id, &cookie, "Grace Hopper").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = body_json(response).await;
+    assert_eq!(detail["status"], "draft");
+    let members = detail["members"].as_array().unwrap();
+    let ready = members
+        .iter()
+        .find(|member| member["employmentId"] == ready_id)
+        .unwrap();
+    assert_eq!(ready["figures"]["basicPayCents"], 1_500_000);
+    assert!(ready["refusal"].is_null());
+    let blocked = members
+        .iter()
+        .find(|member| member["employmentId"] == blocked_id)
+        .unwrap();
+    assert!(blocked["figures"].is_null());
+    assert_eq!(blocked["refusal"]["code"], "no_compensation_terms_in_force");
+}
+
 #[tokio::test]
 async fn the_calculate_route_requires_the_salt_request_header() {
     let (cookie, employer_id) = an_authorized_operator().await;
