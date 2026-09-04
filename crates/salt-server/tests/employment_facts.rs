@@ -164,6 +164,25 @@ fn post_request(
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
+/// The same four routes with no session cookie at all — §0.22's blanket
+/// rule that an unauthenticated request to any payroll route is 401.
+fn unauthenticated_post_request(
+    employer_id: &str,
+    employment_id: &str,
+    route: &str,
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/{route}"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-salt-request", "1")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn compensation_terms_body() -> Value {
     serde_json::json!({
         "effectiveFrom": "2026-04-01",
@@ -680,4 +699,191 @@ async fn a_payroll_operator_reaches_all_four_routes() {
             "{route} must be reachable by a PayrollOperator"
         );
     }
+}
+
+/// §0.22: an unauthenticated request to any payroll route is 401, not the
+/// 404 a signed-in non-member gets. The distinction matters — "sign in" and
+/// "this is not yours" are different instructions to a client.
+#[tokio::test]
+async fn every_route_answers_401_when_unauthenticated() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    for (route, body) in [
+        ("compensation-terms", compensation_terms_body()),
+        ("prior-employment", prior_employment_confirmed_none_body()),
+        (
+            "unsupported-deductions",
+            unsupported_deductions_confirmed_none_body(),
+        ),
+        ("opening-balance", opening_balance_body()),
+    ] {
+        let response = router()
+            .await
+            .oneshot(unauthenticated_post_request(
+                &employer_id,
+                &employment_id,
+                route,
+                body,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{route} must 401 an unauthenticated caller"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "unauthenticated");
+    }
+}
+
+/// INV-001 reaches the HTTP boundary too (issue #52's Deep Instructions):
+/// money crosses the wire as exact integer cents, so a JSON float is a
+/// malformed request rather than something quietly rounded into a payroll
+/// figure nobody typed.
+#[tokio::test]
+async fn money_as_a_json_float_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    for (route, body) in [
+        (
+            "compensation-terms",
+            serde_json::json!({
+                "effectiveFrom": "2026-04-01",
+                "basicPayCents": 1_500_000.5,
+            }),
+        ),
+        (
+            "prior-employment",
+            serde_json::json!({
+                "taxYear": 2026,
+                "status": "present",
+                "taxableRemunerationCents": 10_000.5,
+                "payeCents": 2_000,
+            }),
+        ),
+        (
+            "opening-balance",
+            serde_json::json!({
+                "taxYear": 2026,
+                "saltCoverageStart": "2026-04-30",
+                "priorTaxableRemunerationCents": 10_000.5,
+                "priorPayeCents": 2_000,
+            }),
+        ),
+    ] {
+        let response = router()
+            .await
+            .oneshot(post_request(
+                &employer_id,
+                &employment_id,
+                route,
+                &cookie,
+                true,
+                body,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{route} must refuse a JSON float amount"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "malformed_request");
+    }
+}
+
+/// A body that declares no prior employment and names prior figures states
+/// two different things. Keeping the status and dropping the figures would
+/// leave an Operator believing amounts were recorded that were not.
+#[tokio::test]
+async fn confirmed_none_prior_employment_carrying_figures_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(post_request(
+            &employer_id,
+            &employment_id,
+            "prior-employment",
+            &cookie,
+            true,
+            serde_json::json!({
+                "taxYear": 2026,
+                "status": "confirmed_none",
+                "taxableRemunerationCents": 10_000,
+                "payeCents": 2_000,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "malformed_request");
+}
+
+/// The same contradiction on the other declaration: "there are none" beside
+/// a list naming some.
+#[tokio::test]
+async fn confirmed_none_unsupported_deductions_carrying_kinds_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(post_request(
+            &employer_id,
+            &employment_id,
+            "unsupported-deductions",
+            &cookie,
+            true,
+            serde_json::json!({
+                "effectiveFrom": "2026-04-01",
+                "status": "confirmed_none",
+                "kinds": ["provident_fund"],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "malformed_request");
+}
+
+/// `"present"` with an empty `kinds` is refused too — by
+/// `UnsupportedDeductionKinds` itself, but the client sees the same 400 as
+/// any other transport-shape mistake.
+#[tokio::test]
+async fn present_unsupported_deductions_without_kinds_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(post_request(
+            &employer_id,
+            &employment_id,
+            "unsupported-deductions",
+            &cookie,
+            true,
+            serde_json::json!({
+                "effectiveFrom": "2026-04-01",
+                "status": "present",
+                "kinds": [],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "malformed_request");
 }

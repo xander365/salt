@@ -28,7 +28,6 @@ use payroll::{
     UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::error::ApiError;
@@ -91,6 +90,14 @@ pub(crate) struct DivergingPeriodsResponse {
     diverging_periods: Vec<PayPeriodDto>,
 }
 
+/// The body of a route that records a fact and has nothing to report back:
+/// `{}`. A hand-written DTO rather than an ad-hoc `serde_json::json!({})`,
+/// so that the day one of these routes does gain a field, the field is added
+/// to a named type the rest of this file already returns (§0.32).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecordedResponse {}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RecordCompensationTermsRequest {
@@ -152,11 +159,23 @@ pub(crate) struct DeclarePriorEmploymentRequest {
     paye_cents: Option<i64>,
 }
 
+/// Transport shape only — never a payroll rule. `"present"` needs both
+/// figures and `"confirmed_none"` must carry neither: a body stating there
+/// was no prior employment *and* naming a prior PAYE amount says two
+/// different things, and silently keeping one of them would leave an
+/// Operator believing figures were recorded that were not. This is the same
+/// judgement `POST /employments` already makes about `personId` and
+/// `fullName` together (issue #51).
 fn parse_prior_employment(
     request: &DeclarePriorEmploymentRequest,
 ) -> Result<PriorEmployment, ApiError> {
     match request.status.as_str() {
-        "confirmed_none" => Ok(PriorEmployment::None),
+        "confirmed_none" => {
+            if request.taxable_remuneration_cents.is_some() || request.paye_cents.is_some() {
+                return Err(ApiError::malformed_request());
+            }
+            Ok(PriorEmployment::None)
+        }
         "present" => {
             let (Some(taxable_remuneration_cents), Some(paye_cents)) =
                 (request.taxable_remuneration_cents, request.paye_cents)
@@ -181,7 +200,7 @@ pub(crate) async fn declare_prior_employment(
     context: AuthorizedEmployerContext,
     Path((_employer_id, employment_id)): Path<(String, String)>,
     body: Result<Json<DeclarePriorEmploymentRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RecordedResponse>, ApiError> {
     let Json(request) = body.map_err(|_rejection| ApiError::malformed_request())?;
     let (_employer_id, employment_id) =
         authorized_employment(&state, &context, employment_id).await?;
@@ -196,7 +215,7 @@ pub(crate) async fn declare_prior_employment(
     )
     .await?;
 
-    Ok(Json(json!({})))
+    Ok(Json(RecordedResponse {}))
 }
 
 #[derive(Deserialize)]
@@ -215,11 +234,21 @@ pub(crate) struct DeclareUnsupportedDeductionStatusRequest {
     reason: String,
 }
 
+/// Transport shape only, and refusing a contradiction for the same reason
+/// [`parse_prior_employment`] does: `"confirmed_none"` alongside a non-empty
+/// `kinds` claims both that there are no unsupported deductions and that
+/// there are these ones. An empty `kinds` under `"present"` is refused by
+/// [`UnsupportedDeductionKinds::new`] itself.
 fn parse_unsupported_deduction_status(
     request: &DeclareUnsupportedDeductionStatusRequest,
 ) -> Result<UnsupportedDeductionStatus, ApiError> {
     match request.status.as_str() {
-        "confirmed_none" => Ok(UnsupportedDeductionStatus::ConfirmedNone),
+        "confirmed_none" => {
+            if !request.kinds.is_empty() {
+                return Err(ApiError::malformed_request());
+            }
+            Ok(UnsupportedDeductionStatus::ConfirmedNone)
+        }
         "present" => {
             let mut kinds = Vec::with_capacity(request.kinds.len());
             for code in &request.kinds {
@@ -283,7 +312,7 @@ pub(crate) async fn record_opening_balance(
     context: AuthorizedEmployerContext,
     Path((_employer_id, employment_id)): Path<(String, String)>,
     body: Result<Json<RecordOpeningBalanceRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RecordedResponse>, ApiError> {
     let Json(request) = body.map_err(|_rejection| ApiError::malformed_request())?;
     let (_employer_id, employment_id) =
         authorized_employment(&state, &context, employment_id).await?;
@@ -304,5 +333,5 @@ pub(crate) async fn record_opening_balance(
     )
     .await?;
 
-    Ok(Json(json!({})))
+    Ok(Json(RecordedResponse {}))
 }
