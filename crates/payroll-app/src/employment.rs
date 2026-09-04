@@ -71,7 +71,13 @@ pub async fn create_employment(
 
     let person_id = match person {
         EmploymentPerson::New(full_name) => {
-            if full_name.trim().is_empty() {
+            // Stored trimmed, not merely checked for content: the column is
+            // append-only (migration 0031 revokes UPDATE), so surrounding
+            // whitespace a form submitted would be unfixable for the life of
+            // the row, and would make two otherwise identical names sort and
+            // read differently on every screen.
+            let full_name = full_name.trim();
+            if full_name.is_empty() {
                 return Err(PayrollAppError::PersonFullNameCannotBeEmpty);
             }
             let id = PersonId::new(new_id());
@@ -81,7 +87,7 @@ pub async fn create_employment(
             )
             .bind(id.as_str())
             .bind(employer_id.as_str())
-            .bind(&full_name)
+            .bind(full_name)
             .bind(created_by)
             .execute(&mut *tx)
             .await?;
@@ -137,6 +143,10 @@ pub struct EmploymentListing {
 /// Ordered by `created_at, id` for the same reason
 /// [`crate::list_employers_for_operator`] is: a stable, total order with no
 /// sort parameter to expose.
+///
+/// The join to `person` names both halves of migration 0031's composite
+/// foreign key, so the Person's own `employer_id` is filtered in SQL too
+/// rather than being trusted to follow from the Employment's.
 pub async fn list_employments_for_employer(
     db: &SaltDatabase,
     employer_id: &EmployerId,
@@ -146,7 +156,9 @@ pub async fn list_employments_for_employer(
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT employment.id, employment.person_id, person.full_name
          FROM employment
-         JOIN person ON person.id = employment.person_id
+         JOIN person
+           ON person.id = employment.person_id
+          AND person.employer_id = employment.employer_id
          WHERE employment.employer_id = $1
          ORDER BY employment.created_at, employment.id",
     )
@@ -197,7 +209,9 @@ pub async fn get_employment_detail(
         "SELECT person.full_name, employment.person_id, employment.start_date,
                 employment.end_date, in_force.basic_pay
          FROM employment
-         JOIN person ON person.id = employment.person_id
+         JOIN person
+           ON person.id = employment.person_id
+          AND person.employer_id = employment.employer_id
          LEFT JOIN LATERAL (
              SELECT basic_pay
              FROM compensation_terms

@@ -375,3 +375,29 @@ async fn an_unknown_employment_id_is_not_found_identically(pool: PgPool) {
 
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 }
+
+/// The `person.full_name` column is append-only (migration 0031 revokes
+/// UPDATE), so whitespace a form padded a name with would be unfixable for
+/// the life of the row. It is trimmed on the way in instead.
+#[sqlx::test]
+async fn a_padded_full_name_is_stored_trimmed(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+
+    let (_, employment_id) = create_employment(
+        &db,
+        &employer_id,
+        EmploymentPerson::New("  Ada Lovelace\t".to_string()),
+        date(2026, 1, 26),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let detail = get_employment_detail(&db, &employer_id, &employment_id, date(2026, 2, 1))
+        .await
+        .unwrap();
+
+    assert_eq!(detail.full_name, "Ada Lovelace");
+}

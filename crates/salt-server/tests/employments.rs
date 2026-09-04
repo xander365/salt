@@ -400,3 +400,102 @@ async fn without_membership_the_routes_answer_404() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+/// A blank `fullName` reaches `payroll_app` — the "exactly one of" rule is
+/// satisfied, so the handler cannot refuse it — and comes back as a 400 with
+/// its own code, structurally the same envelope as a malformed body but
+/// never the same code (§0.24).
+#[tokio::test]
+async fn a_blank_full_name_is_refused_as_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+
+    let response = router()
+        .await
+        .oneshot(create_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({ "fullName": "   ", "startDate": "2026-01-26" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "person_full_name_cannot_be_empty");
+}
+
+/// A name a form padded with whitespace is stored trimmed, so every screen
+/// reads it the same way. The column is append-only, so getting this wrong
+/// on write could not be corrected afterwards.
+#[tokio::test]
+async fn a_padded_full_name_is_stored_trimmed() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+
+    let created = router()
+        .await
+        .oneshot(create_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({ "fullName": "  Ada Lovelace  ", "startDate": "2026-01-26" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let employment_id = body_json(created).await["employmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let detail = router()
+        .await
+        .oneshot(detail_request(&employer_id, &employment_id, &cookie))
+        .await
+        .unwrap();
+
+    assert_eq!(body_json(detail).await["fullName"], "Ada Lovelace");
+}
+
+/// None of the three routes is reachable without a session (§0.24): an
+/// unauthenticated request is 401, and never the 404 an authenticated
+/// caller outside the Employer gets.
+#[tokio::test]
+async fn every_route_answers_401_without_a_session() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let created = router()
+        .await
+        .oneshot(create_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({ "fullName": "Ada Lovelace", "startDate": "2026-01-26" }),
+        ))
+        .await
+        .unwrap();
+    let employment_id = body_json(created).await["employmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let no_cookie = "";
+    for request in [
+        create_request(
+            &employer_id,
+            no_cookie,
+            true,
+            serde_json::json!({ "fullName": "Grace Hopper", "startDate": "2026-01-26" }),
+        ),
+        list_request(&employer_id, no_cookie),
+        detail_request(&employer_id, &employment_id, no_cookie),
+    ] {
+        let uri = request.uri().clone();
+        let method = request.method().clone();
+        let response = router().await.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} must refuse an unauthenticated caller"
+        );
+    }
+}
