@@ -753,6 +753,9 @@ async fn a_finalized_run_is_refused(pool: PgPool) {
 
     assert_eq!(
         result,
-        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id))
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id,
+            finalized_payroll_id: None,
+        })
     );
 }

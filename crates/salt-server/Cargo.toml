@@ -26,6 +26,12 @@ test-support = []
 # crate needs from PostgreSQL goes through `payroll-app`'s `SaltDatabase` and
 # its use cases.
 payroll-app = { path = "../payroll-app" }
+# Needed only to name the concrete `payroll` types (`PayrollError`,
+# `EmployerId`, `PayPeriod`, ...) that appear inside `PayrollAppError`'s own
+# variants — issue #50's exhaustive mapping in `payroll_error.rs` matches on
+# them directly. Everything else in this crate still reaches PostgreSQL only
+# through `payroll-app`'s `SaltDatabase` (ADR-0018).
+payroll = { path = "../payroll" }
 axum = "0.8"
 chrono = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
@@ -48,11 +54,6 @@ rpassword = "7"
 salt-server = { path = ".", features = ["test-support"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-# Test-only, to build the `PaySchedule` value `payroll_app::create_employer`
-# takes when seeding an Employer for `tests/session.rs`'s own membership
-# fixtures — never a dependency of this crate's production code, which
-# reaches `payroll` only indirectly through `payroll-app`.
-payroll = { path = "../payroll" }
 
 [lints]
 workspace = true

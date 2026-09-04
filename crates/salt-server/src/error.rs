@@ -1,10 +1,12 @@
 //! The envelope every route answers a refusal with (issue #45's own
 //! acceptance criteria): `{ "error": { code, message, details } }`. This
-//! spec ships no payroll routes, so it maps only the refusals it actually
-//! raises — an unmatched route, a mutating request missing
-//! `X-Salt-Request`, and the catch-all "something went wrong". `payroll-app`
-//! and `PayrollAppError`'s exhaustive mapping is Spec 2's, and is
-//! deliberately not started here.
+//! file names only the refusals `salt-server` itself raises — an unmatched
+//! route, a mutating request missing `X-Salt-Request`, and the catch-all
+//! "something went wrong". Every `PayrollAppError` and `PayrollError`
+//! variant's own status, `code` and `details` are decided in one place,
+//! [`crate::payroll_error`] (issue #50), which builds an [`ApiError`]
+//! through [`ApiError::payroll_refusal`] rather than adding constructors of
+//! its own here.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -157,9 +159,39 @@ impl ApiError {
         }
     }
 
+    /// Builds a refusal from the payroll domain's own exhaustive mapping —
+    /// `payroll_error.rs`'s `match`, which is the one place that decides a
+    /// `PayrollAppError` or `PayrollError` variant's status, `code` and
+    /// `details` (issue #50). `message` is always the refusal's own
+    /// `Display`: only `code` is the promise a client may branch on forever,
+    /// so nothing here hand-writes a second, competing piece of text.
+    pub(crate) fn payroll_refusal(
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+        details: Option<Value>,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            message,
+            details,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn status(&self) -> StatusCode {
         self.status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    #[cfg(test)]
+    pub(crate) fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
     }
 }
 

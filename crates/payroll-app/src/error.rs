@@ -147,7 +147,17 @@ pub enum PayrollAppError {
     /// asked to change on a run that is already `Finalized`. Once history
     /// has been written there is nothing left to overwrite (§4.7). A
     /// `Calculated` run is not refused: editing it reopens it as `Draft`.
-    PayrollRunAlreadyFinalized(PayrollRunId),
+    PayrollRunAlreadyFinalized {
+        payroll_run_id: PayrollRunId,
+        /// The single live `FinalizedPayroll` this run answers with, when
+        /// there is exactly one active member to answer for (issue #50,
+        /// §0.28) — always true of a Correction run (§4.8), and true of an
+        /// Ordinary run that happens to have one. An Ordinary run with more
+        /// than one active member finalizes each into its own separate row,
+        /// so there is no single answer to give, and this is `None` rather
+        /// than a guess.
+        finalized_payroll_id: Option<FinalizedPayrollId>,
+    },
     /// `FinalizePayrollRun` was asked for a run that is not yet `Calculated`
     /// — still `Draft`, with at least one member unresolved. `Finalized` is
     /// the separate, absolute refusal above.
@@ -622,8 +632,8 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "BasicPay is derived by calculate() from the compensation terms and cannot be supplied as a run Earning"
             ),
-            Self::PayrollRunAlreadyFinalized(id) => {
-                write!(f, "PayrollRun {id} is already Finalized")
+            Self::PayrollRunAlreadyFinalized { payroll_run_id, .. } => {
+                write!(f, "PayrollRun {payroll_run_id} is already Finalized")
             }
             Self::PayrollRunNotCalculated(id) => {
                 write!(f, "PayrollRun {id} is not Calculated")
@@ -968,7 +978,7 @@ impl std::error::Error for PayrollAppError {
             | Self::RemovalReasonCannotBeEmpty
             | Self::EmploymentNotAnActiveRunMember { .. }
             | Self::BasicPayCannotBeSetAsAnEarning
-            | Self::PayrollRunAlreadyFinalized(_)
+            | Self::PayrollRunAlreadyFinalized { .. }
             | Self::PayrollRunNotCalculated(_)
             | Self::FinalizationInputMismatch { .. }
             | Self::FinalizationRulesMismatch { .. }

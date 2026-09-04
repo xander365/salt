@@ -17,12 +17,17 @@
 //! and, from issue #48, `bootstrap_cli`'s argument parsing for
 //! `salt-server bootstrap` — a CLI command, not an HTTP route, so it ships
 //! no route of its own and its actual work is `payroll_app::bootstrap`.
+//!
+//! From issue #50: `payroll_error` maps every `PayrollAppError` and
+//! `PayrollError` variant to a status, a stable `code` and `details`, ahead
+//! of the payroll routes that lean on it — this ticket ships none itself.
 
 mod authorized_employer;
 mod bootstrap_cli;
 mod config;
 mod employers;
 mod error;
+mod payroll_error;
 mod request_id;
 mod router;
 mod session;

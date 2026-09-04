@@ -9,6 +9,7 @@ use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
 use crate::employer::{generates_the_period_end, pay_schedule_from_columns};
 use crate::error::PayrollAppError;
+use crate::finalize::FinalizedPayrollId;
 use crate::freeze::finalized_period_ends_in;
 use crate::ids::app_id;
 use chrono::NaiveDate;
@@ -421,6 +422,40 @@ pub(crate) async fn active_member_ids(
     Ok(member_ids)
 }
 
+/// The one live `FinalizedPayroll` an already-finalized run can point a
+/// caller at, or `None` when there is no single answer to give (issue #50,
+/// §0.28). An Ordinary run's members each finalize into their own separate
+/// row, so a run with more than one active member has nothing unambiguous
+/// to name; only when exactly one active member remains — always true of a
+/// Correction run (§4.8), and true of an Ordinary run that happens to have
+/// one — is there a single row this can resolve to.
+///
+/// Reads `live_finalized_payroll` rather than trusting a caller-supplied
+/// id, for the same reason every other lookup in this crate does: the row
+/// this run actually finalized into is a fact of the database, not
+/// something to reconstruct from what was asked for.
+pub(crate) async fn live_finalized_payroll_id_if_unambiguous(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+    period_end: NaiveDate,
+) -> Result<Option<FinalizedPayrollId>, PayrollAppError> {
+    let member_ids = active_member_ids(tx, payroll_run_id).await?;
+    let [employment_id] = member_ids.as_slice() else {
+        return Ok(None);
+    };
+
+    let finalized_payroll_id: Option<String> = sqlx::query_scalar(
+        "SELECT finalized_payroll_id::text FROM live_finalized_payroll
+         WHERE employment_id = $1 AND period_end = $2",
+    )
+    .bind(employment_id)
+    .bind(period_end)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(finalized_payroll_id.map(FinalizedPayrollId::new))
+}
+
 /// Locks a run, verifies working state may still change, and puts the run
 /// back into `Draft` so the edit about to happen is reflected in its status.
 ///
@@ -447,9 +482,12 @@ pub(crate) async fn lock_and_reopen_run(
 ) -> Result<LockedRun, PayrollAppError> {
     let run = lock_run(tx, payroll_run_id).await?;
     if run.status == RunStatus::Finalized {
-        return Err(PayrollAppError::PayrollRunAlreadyFinalized(
-            payroll_run_id.clone(),
-        ));
+        let finalized_payroll_id =
+            live_finalized_payroll_id_if_unambiguous(tx, payroll_run_id, run.period.end()).await?;
+        return Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: payroll_run_id.clone(),
+            finalized_payroll_id,
+        });
     }
 
     sqlx::query(

@@ -17,7 +17,9 @@ use crate::database::SaltDatabase;
 use crate::employer::pay_schedule_for_employer;
 use crate::employment::get_employment_snapshot_on;
 use crate::error::PayrollAppError;
-use crate::payroll_run::{PayrollRunId, RunStatus, active_member_ids, lock_run};
+use crate::payroll_run::{
+    PayrollRunId, RunStatus, active_member_ids, live_finalized_payroll_id_if_unambiguous, lock_run,
+};
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use crate::year_to_date::build_year_to_date_context_on;
 use payroll::{
@@ -84,9 +86,13 @@ pub async fn calculate_payroll_run(
     // way to pick up a corrected fact.
     let run = lock_run(&mut tx, payroll_run_id).await?;
     if run.status == RunStatus::Finalized {
-        return Err(PayrollAppError::PayrollRunAlreadyFinalized(
-            payroll_run_id.clone(),
-        ));
+        let finalized_payroll_id =
+            live_finalized_payroll_id_if_unambiguous(&mut tx, payroll_run_id, run.period.end())
+                .await?;
+        return Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: payroll_run_id.clone(),
+            finalized_payroll_id,
+        });
     }
     let period = run.period;
 

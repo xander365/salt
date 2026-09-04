@@ -397,7 +397,53 @@ async fn finalizing_an_already_finalized_run_is_refused(pool: PgPool) {
 
     assert_eq!(
         result,
-        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id))
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id,
+            finalized_payroll_id: None,
+        })
+    );
+}
+
+/// Two members each finalize into their own separate `FinalizedPayroll` row
+/// (issue #50, §0.28) — there is no single one to name, so a retried
+/// finalize gets `None` rather than either of them chosen arbitrarily.
+#[sqlx::test]
+async fn an_already_finalized_run_with_two_members_names_no_single_finalized_payroll(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "alice",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "bob",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    calculate_payroll_run(&db, &run_id, "calculator")
+        .await
+        .unwrap();
+    finalize_payroll_run(&db, &run_id, "finalizer")
+        .await
+        .unwrap();
+
+    let result = finalize_payroll_run(&db, &run_id, "finalizer").await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id,
+            finalized_payroll_id: None,
+        })
     );
 }
 
@@ -856,10 +902,21 @@ async fn two_finalizations_of_the_same_run_end_with_exactly_one_success(pool: Pg
     );
     // The loser is refused by re-reading the status the winner committed —
     // the lock releasing is what lets it read at all — not by an
-    // application-side check made before the race.
+    // application-side check made before the race. It also gets back the
+    // one `FinalizedPayrollId` the winner actually minted, read from
+    // `live_finalized_payroll` rather than assumed: the run has exactly one
+    // member, so that id is unambiguous.
+    let finalized_payroll_id = winner
+        .as_ref()
+        .ok()
+        .and_then(|outcome| outcome.finalized.first())
+        .map(|(_, id)| id.clone());
     assert_eq!(
         *loser,
-        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id.clone()))
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id.clone(),
+            finalized_payroll_id,
+        })
     );
     assert_eq!(run_status(&pool, &run_id).await, "finalized");
 

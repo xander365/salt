@@ -511,7 +511,10 @@ async fn a_member_cannot_be_removed_after_finalization(pool: PgPool) {
 
     assert_eq!(
         result,
-        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id))
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id,
+            finalized_payroll_id: None,
+        })
     );
 }
 
@@ -688,7 +691,10 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
 
     assert_eq!(
         result,
-        Err(PayrollAppError::PayrollRunAlreadyFinalized(run_id))
+        Err(PayrollAppError::PayrollRunAlreadyFinalized {
+            payroll_run_id: run_id,
+            finalized_payroll_id: None,
+        })
     );
 }
 
