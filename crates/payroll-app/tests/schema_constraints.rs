@@ -18,9 +18,14 @@ use sqlx::{Acquire, PgPool};
 use tokio::sync::oneshot;
 
 const UNIQUE_VIOLATION: &str = "23505";
+const FOREIGN_KEY_VIOLATION: &str = "23503";
 
 fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION))
+}
+
+fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(FOREIGN_KEY_VIOLATION))
 }
 
 const NOT_NULL_VIOLATION: &str = "23502";
@@ -55,6 +60,40 @@ async fn an_employer_and_two_employments(conn: &mut sqlx::PgConnection) {
     .execute(&mut *conn)
     .await
     .expect("insert employments");
+}
+
+/// A Person is scoped to one Employer (ADR-0020), so an Employment may not
+/// name a Person of another Employer even if a caller bypasses the use case.
+#[sqlx::test]
+async fn an_employment_cannot_name_a_person_of_another_employer(pool: PgPool) {
+    sqlx::query(
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-1', 'Employer One', 'day', 25, 'actor'),
+                ('employer-2', 'Employer Two', 'day', 25, 'actor')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert employers");
+    sqlx::query(
+        "INSERT INTO person (id, employer_id, full_name, created_by)
+         VALUES ('person-2', 'employer-2', 'Other Employer Person', 'actor')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert the other Employer's Person");
+
+    let result = sqlx::query(
+        "INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
+         VALUES ('employment-1', 'employer-1', 'person-2', '2026-01-01', 'actor')",
+    )
+    .execute(&pool)
+    .await;
+
+    let error = result.expect_err("an Employment must not cross the Employer boundary");
+    assert!(
+        is_foreign_key_violation(&error),
+        "expected a foreign key violation, got {error}"
+    );
 }
 
 #[sqlx::test]
