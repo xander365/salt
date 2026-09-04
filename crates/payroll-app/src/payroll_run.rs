@@ -422,40 +422,42 @@ pub(crate) async fn active_member_ids(
     Ok(member_ids)
 }
 
-/// The `FinalizedPayroll` an already-finalized run produced, or `None` when
-/// there is no single answer to give (issue #50, §0.28). An Ordinary run's
-/// members each finalize into their own separate row, so a run with more than
-/// one active member has nothing unambiguous to name; only when exactly one
-/// active member remains — always true of a Correction run (§4.8), and true
-/// of an Ordinary run that happens to have one — is there a single row this
-/// can resolve to.
+/// Every `FinalizedPayroll` an already-finalized run produced, paired with
+/// the Employment it belongs to and ordered by that Employment's id (issue
+/// #50, §0.28). An Ordinary run finalizes each active member into its own
+/// separate row, so the answer to "which finalized payroll does this run
+/// already have" is a list, not one id; a Correction run holds at most one
+/// member (§4.8) and so yields at most one pair.
 ///
-/// Reads the immutable history row belonging to this run rather than the
-/// current liveness index. Reversing it may remove its liveness row and a
+/// Reads the immutable history rows belonging to this run rather than the
+/// current liveness index. Reversing one may remove its liveness row and a
 /// later Correction may install a different live row for the same Employment
-/// and period, but neither operation changes which row the already-finalized
+/// and period, but neither operation changes which rows the already-finalized
 /// run produced.
-pub(crate) async fn finalized_payroll_id_if_unambiguous(
+pub(crate) async fn finalized_payrolls_for_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
     period_end: NaiveDate,
-) -> Result<Option<FinalizedPayrollId>, PayrollAppError> {
-    let member_ids = active_member_ids(tx, payroll_run_id).await?;
-    let [employment_id] = member_ids.as_slice() else {
-        return Ok(None);
-    };
-
-    let finalized_payroll_id: Option<String> = sqlx::query_scalar(
-        "SELECT id::text FROM finalized_payroll
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2 AND period_end = $3",
+) -> Result<Vec<(EmploymentId, FinalizedPayrollId)>, PayrollAppError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT employment_id, id::text FROM finalized_payroll
+         WHERE payroll_run_id = $1::uuid AND period_end = $2
+         ORDER BY employment_id",
     )
     .bind(payroll_run_id.as_str())
-    .bind(employment_id)
     .bind(period_end)
-    .fetch_optional(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
 
-    Ok(finalized_payroll_id.map(FinalizedPayrollId::new))
+    Ok(rows
+        .into_iter()
+        .map(|(employment_id, finalized_payroll_id)| {
+            (
+                EmploymentId::new(employment_id),
+                FinalizedPayrollId::new(finalized_payroll_id),
+            )
+        })
+        .collect())
 }
 
 /// Locks a run, verifies working state may still change, and puts the run
@@ -484,11 +486,11 @@ pub(crate) async fn lock_and_reopen_run(
 ) -> Result<LockedRun, PayrollAppError> {
     let run = lock_run(tx, payroll_run_id).await?;
     if run.status == RunStatus::Finalized {
-        let finalized_payroll_id =
-            finalized_payroll_id_if_unambiguous(tx, payroll_run_id, run.period.end()).await?;
+        let finalized_payrolls =
+            finalized_payrolls_for_run(tx, payroll_run_id, run.period.end()).await?;
         return Err(PayrollAppError::PayrollRunAlreadyFinalized {
             payroll_run_id: payroll_run_id.clone(),
-            finalized_payroll_id,
+            finalized_payrolls,
         });
     }
 

@@ -6,10 +6,13 @@
 //! refusals to the documented envelope.
 //!
 //! Every kind of login failure looks the same from outside (issue #46's own
-//! acceptance criterion): the central [`crate::payroll_error`] mapping maps
+//! acceptance criterion): [`login`] maps
 //! [`payroll_app::PayrollAppError::OperatorCredentialInvalid`] to the
-//! identical 401 `invalid_credentials`, carrying nothing a caller could use
-//! to tell a wrong password apart from an unknown email, a disabled
+//! identical 401 `invalid_credentials` and everything else to a 500, rather
+//! than going through the central [`crate::payroll_error`] mapping, which
+//! would give some other refusal a code of its own. It carries nothing a
+//! caller could use to tell a wrong password apart from an unknown email, a
+//! disabled
 //! Operator or a locked account — `payroll_app::verify_operator_credential`
 //! already made that decision; this module only forwards it.
 
@@ -18,7 +21,9 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use payroll_app::{MembershipRole, MembershipStatus, OperatorSnapshot, OperatorStatus};
+use payroll_app::{
+    MembershipRole, MembershipStatus, OperatorSnapshot, OperatorStatus, PayrollAppError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -95,7 +100,16 @@ pub(crate) async fn login(
 
     let operator_id = payroll_app::verify_operator_credential(state.db(), &email, &password, now)
         .await
-        .map_err(ApiError::from)?;
+        // Deliberately not the central `ApiError::from` mapping (issue
+        // #50): that names a status and a code for every refusal, and login
+        // must have exactly two outcomes from outside. Anything other than
+        // `OperatorCredentialInvalid` becomes a 500 here rather than
+        // whatever code it maps to elsewhere, so no future variant can turn
+        // this route into an oracle over which emails exist.
+        .map_err(|err| match err {
+            PayrollAppError::OperatorCredentialInvalid => ApiError::invalid_credentials(),
+            other => ApiError::internal(other),
+        })?;
 
     // Minting the new row and clearing that Operator's already-expired ones
     // are one use case (§0.12: "the token rotates on login, and that

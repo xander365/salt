@@ -64,7 +64,7 @@ use crate::error::PayrollAppError;
 use crate::ids::app_id;
 use crate::payroll_run::{
     EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids,
-    finalized_payroll_id_if_unambiguous, lock_run,
+    finalized_payrolls_for_run, lock_run,
 };
 use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
 use chrono::NaiveDate;
@@ -134,11 +134,11 @@ pub async fn finalize_payroll_run(
     // application-side `if status != Finalized` is doing that work.
     let run = lock_run(&mut tx, payroll_run_id).await?;
     if run.status == RunStatus::Finalized {
-        let finalized_payroll_id =
-            finalized_payroll_id_if_unambiguous(&mut tx, payroll_run_id, run.period.end()).await?;
+        let finalized_payrolls =
+            finalized_payrolls_for_run(&mut tx, payroll_run_id, run.period.end()).await?;
         return Err(PayrollAppError::PayrollRunAlreadyFinalized {
             payroll_run_id: payroll_run_id.clone(),
-            finalized_payroll_id,
+            finalized_payrolls,
         });
     }
     if run.status != RunStatus::Calculated {

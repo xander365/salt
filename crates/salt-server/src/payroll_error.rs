@@ -34,17 +34,48 @@ use payroll_app::{PayrollAppError, ScheduleBoundedFact};
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
+use crate::request_id::current_request_id;
 
 impl From<PayrollAppError> for ApiError {
     fn from(err: PayrollAppError) -> Self {
         match classify_payroll_app_error(&err) {
             Classification::Internal => ApiError::internal(err),
             Classification::Mapped(status, code, details) => {
-                let message = err.to_string();
-                ApiError::payroll_refusal(status, code, message, details)
+                ApiError::payroll_refusal(status, code, wire_message(&err), details)
             }
         }
     }
+}
+
+/// The `message` a refusal reaches a client with: the refusal's own
+/// `Display`, with one exception.
+///
+/// The three finalization mismatches describe themselves by diffing the
+/// frozen `PayrollInput`, `PayrollRules` or `PayrollCalculation` field by
+/// field, so their `Display` spells out the internal field names and values
+/// of a frozen snapshot. #49's own rule is that a raw frozen snapshot is
+/// never a response body, precisely so its internal shape does not silently
+/// become a public contract, and a `message` a client can read is a response
+/// body. The diff is logged instead — it is what an engineer wants and no
+/// client should depend on — and the caller gets §0.26's own recovery
+/// sentence, with the Employment named in `details` (§0.26 again: naming the
+/// employment that moved is what the refusal owes).
+fn wire_message(err: &PayrollAppError) -> String {
+    let describes_a_frozen_snapshot = matches!(
+        err,
+        PayrollAppError::FinalizationInputMismatch { .. }
+            | PayrollAppError::FinalizationRulesMismatch { .. }
+            | PayrollAppError::FinalizationCalculationMismatch { .. }
+    );
+    if describes_a_frozen_snapshot {
+        tracing::warn!(
+            error = %err,
+            request_id = %current_request_id(),
+            "finalization refused: the facts moved since the run was calculated"
+        );
+        return "the facts changed since this run was calculated; calculate it again".to_string();
+    }
+    err.to_string()
 }
 
 /// The outcome of classifying one refusal: either it belongs on the
@@ -197,15 +228,33 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "basic_pay_cannot_be_set_as_an_earning",
             None,
         ),
+        // §0.28: the client that lost a Finalize response reads this code
+        // and shows the success that already happened, so `details` names
+        // every `FinalizedPayroll` the run produced. `finalizedPayrollId`
+        // is the direct-navigation shortcut for the case with one answer —
+        // a Correction run always, an Ordinary run of one member — and is
+        // `null` when the run has more than one, where `finalizedPayrolls`
+        // is the only truthful answer.
         PayrollAppError::PayrollRunAlreadyFinalized {
             payroll_run_id,
-            finalized_payroll_id,
+            finalized_payrolls,
         } => Classification::Mapped(
             StatusCode::CONFLICT,
             "payroll_run_already_finalized",
             Some(json!({
                 "payrollRunId": payroll_run_id.to_string(),
-                "finalizedPayrollId": finalized_payroll_id.as_ref().map(ToString::to_string),
+                "finalizedPayrollId": if let [(_, only)] = finalized_payrolls.as_slice() {
+                    Some(only.to_string())
+                } else {
+                    None
+                },
+                "finalizedPayrolls": finalized_payrolls
+                    .iter()
+                    .map(|(employment_id, finalized_payroll_id)| json!({
+                        "employmentId": employment_id.to_string(),
+                        "finalizedPayrollId": finalized_payroll_id.to_string(),
+                    }))
+                    .collect::<Vec<_>>(),
             })),
         ),
         PayrollAppError::PayrollRunNotCalculated(id) => Classification::Mapped(
@@ -225,12 +274,17 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             refusal,
         } => match classify_payroll_app_error(refusal) {
             Classification::Internal => Classification::Internal,
-            Classification::Mapped(_, inner_code, _) => Classification::Mapped(
+            // The nested refusal's own `details` are carried through
+            // unchanged: "finalizing Alice refused" without the kinds of
+            // unsupported deduction, or the period nothing covers, is a
+            // refusal nobody can act on.
+            Classification::Mapped(_, inner_code, inner_details) => Classification::Mapped(
                 StatusCode::CONFLICT,
                 "finalization_rebuild_refused",
                 Some(json!({
                     "employmentId": employment_id.to_string(),
                     "refusalCode": inner_code,
+                    "refusalDetails": inner_details,
                 })),
             ),
         },
@@ -683,9 +737,14 @@ fn classify_payroll_error(err: &PayrollError) -> (StatusCode, &'static str, Opti
             })),
         ),
         PayrollError::PriorEmploymentUnknown => (unprocessable, "prior_employment_unknown", None),
+        // Named for the refusal's own meaning, not for the Rust variant
+        // (issue #50's Deep Instructions): the figures being *present* is
+        // not the refusal — how a new Employer must treat them is
+        // unconfirmed. §0.31 gives the run detail's `blockers` this exact
+        // code for the same standing fact, and the two must not drift.
         PayrollError::PriorEmploymentPresent { figures } => (
             unprocessable,
-            "prior_employment_present",
+            "prior_employment_treatment_unconfirmed",
             Some(json!({
                 "taxableRemunerationCents": figures.taxable_remuneration().cents(),
                 "payeCents": figures.paye().cents(),
@@ -725,7 +784,7 @@ mod tests {
     use axum::response::IntoResponse;
     use chrono::NaiveDate;
     use payroll::{
-        CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, PayPeriod,
+        CompensationTerms, Earning, EmployerId, EmploymentId, EmploymentSnapshot, Money, PayPeriod,
         PaySchedule, PayeTableId, PayrollCalculation, PayrollInput, PayrollRules, PeriodEndDay,
         PersonId, PersonReference, PriorEmployment, PriorEmploymentFigures, SscRulesId, TaxYear,
         UnsupportedDeductionKinds, UnsupportedDeductionStatus, YearToDateContext, calculate,
@@ -747,8 +806,11 @@ mod tests {
     /// for all three names only the `employment_id` (§0.26). Built from
     /// `payroll`'s own public constructors and `ruleset_for`/`calculate`,
     /// entirely in-process — no database involved.
-    fn a_calculable_input_rules_and_calculation() -> (PayrollInput, PayrollRules, PayrollCalculation)
-    {
+    /// The same `PayrollInput` as [`a_calculable_input_rules_and_calculation`]
+    /// but with its own earning lines, so a test can hold two inputs that
+    /// genuinely differ. `PayrollInput`'s fields are private, which is the
+    /// point: only its constructor builds one.
+    fn an_input_with_earnings(earnings: Vec<Earning>) -> PayrollInput {
         let period = period();
         let compensation_terms =
             CompensationTerms::new(period.start(), None, Money::from_cents(1_500_000).unwrap())
@@ -761,18 +823,22 @@ mod tests {
             None,
             compensation_terms,
         );
-        let year_to_date = YearToDateContext::first_period_with_no_prior_employment(
-            TaxYear::for_period_end(period.end()),
-        );
-        let input = PayrollInput::new(
+        PayrollInput::new(
             snapshot,
             period,
-            Vec::new(),
-            year_to_date,
+            earnings,
+            YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
+                period.end(),
+            )),
             PaySchedule::new(PeriodEndDay::LastDayOfMonth),
             UnsupportedDeductionStatus::ConfirmedNone,
-        );
-        let rules = ruleset_for(period.end()).unwrap();
+        )
+    }
+
+    fn a_calculable_input_rules_and_calculation() -> (PayrollInput, PayrollRules, PayrollCalculation)
+    {
+        let input = an_input_with_earnings(Vec::new());
+        let rules = ruleset_for(period().end()).unwrap();
         let calculation = calculate(&input, &rules).unwrap();
         (input, rules, calculation)
     }
@@ -876,6 +942,29 @@ mod tests {
             Some(json!({
                 "employmentId": employment_id.to_string(),
                 "refusalCode": "employment_is_void",
+                "refusalDetails": { "employmentId": employment_id.to_string() },
+            })),
+        );
+    }
+
+    /// A nested refusal with no `details` of its own still says so
+    /// explicitly, rather than leaving the key out of the envelope.
+    #[test]
+    fn finalization_rebuild_refused_carries_a_null_when_the_inner_refusal_has_no_details() {
+        let employment_id = EmploymentId::new("employment-1");
+        check(
+            PayrollAppError::FinalizationRebuildRefused {
+                employment_id: employment_id.clone(),
+                refusal: Box::new(PayrollAppError::Payroll(
+                    PayrollError::PriorEmploymentUnknown,
+                )),
+            },
+            StatusCode::CONFLICT,
+            "finalization_rebuild_refused",
+            Some(json!({
+                "employmentId": employment_id.to_string(),
+                "refusalCode": "prior_employment_unknown",
+                "refusalDetails": null,
             })),
         );
     }
@@ -1067,6 +1156,42 @@ mod tests {
             "basic_pay_cannot_be_set_as_an_earning",
             None,
         );
+    }
+
+    /// #49's rule that a raw frozen snapshot is never a response body
+    /// reaches the `message` too: the mismatch `Display` diffs the frozen
+    /// `PayrollInput` field by field, and none of those field names may
+    /// cross the wire. The Employment that moved is still named, in
+    /// `details`, and the recovery §0.26 states is the whole message.
+    #[tokio::test]
+    async fn a_finalization_mismatch_never_spells_out_the_frozen_snapshot() {
+        let (approved, _, _) = a_calculable_input_rules_and_calculation();
+        let current = an_input_with_earnings(vec![Earning::TaxableAllowance(
+            Money::from_cents(50_000).unwrap(),
+        )]);
+        assert_ne!(approved, current, "the two inputs must actually differ");
+
+        let api_err: ApiError = PayrollAppError::FinalizationInputMismatch {
+            employment_id: EmploymentId::new("employment-1"),
+            approved: Box::new(approved),
+            current: Box::new(current),
+        }
+        .into();
+
+        let response = api_err.into_response();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read the response body");
+        let body = String::from_utf8(bytes.to_vec()).expect("the body is UTF-8 JSON");
+
+        for frozen_field in ["earnings", "year_to_date", "compensation_terms", "approved"] {
+            assert!(
+                !body.contains(frozen_field),
+                "the frozen snapshot's field {frozen_field} must not reach the body, got {body}"
+            );
+        }
+        assert!(body.contains("calculate it again"), "got {body}");
+        assert!(body.contains("employment-1"), "got {body}");
     }
 
     #[test]
@@ -1705,14 +1830,14 @@ mod tests {
     }
 
     #[test]
-    fn prior_employment_present_carries_the_figures_in_cents() {
+    fn prior_employment_treatment_unconfirmed_carries_the_figures_in_cents() {
         let figures = PriorEmploymentFigures::new(
             Money::from_cents(100_000).unwrap(),
             Money::from_cents(20_000).unwrap(),
         );
         check_payroll_error(
             PayrollError::PriorEmploymentPresent { figures },
-            "prior_employment_present",
+            "prior_employment_treatment_unconfirmed",
             Some(json!({ "taxableRemunerationCents": 100_000, "payeCents": 20_000 })),
         );
     }
@@ -1851,28 +1976,69 @@ mod tests {
             "payroll_run_not_calculated",
             Some(json!({ "payrollRunId": unfinalized_run_id.to_string() })),
         );
+        // A vacuous run: finalized with no active member, so there is
+        // nothing to name and both keys say so.
         check(
             PayrollAppError::PayrollRunAlreadyFinalized {
                 payroll_run_id: unfinalized_run_id.clone(),
-                finalized_payroll_id: None,
+                finalized_payrolls: Vec::new(),
             },
             StatusCode::CONFLICT,
             "payroll_run_already_finalized",
             Some(json!({
                 "payrollRunId": unfinalized_run_id.to_string(),
                 "finalizedPayrollId": null,
+                "finalizedPayrolls": [],
             })),
         );
+        // One member: `finalizedPayrollId` is the id a client navigates to
+        // directly (§0.28).
         check(
             PayrollAppError::PayrollRunAlreadyFinalized {
                 payroll_run_id: finalized_run_id.clone(),
-                finalized_payroll_id: Some(finalized_payroll_id.clone()),
+                finalized_payrolls: vec![(employment_id.clone(), finalized_payroll_id.clone())],
             },
             StatusCode::CONFLICT,
             "payroll_run_already_finalized",
             Some(json!({
                 "payrollRunId": finalized_run_id.to_string(),
                 "finalizedPayrollId": finalized_payroll_id.to_string(),
+                "finalizedPayrolls": [{
+                    "employmentId": employment_id.to_string(),
+                    "finalizedPayrollId": finalized_payroll_id.to_string(),
+                }],
+            })),
+        );
+        // Two members: each finalizes into its own row, so there is no
+        // single id to shortcut to, and every one is still named.
+        let second_employment_id = EmploymentId::new("employment-2");
+        let second_finalized_payroll_id = finalized_payroll_id.clone();
+        check(
+            PayrollAppError::PayrollRunAlreadyFinalized {
+                payroll_run_id: finalized_run_id.clone(),
+                finalized_payrolls: vec![
+                    (employment_id.clone(), finalized_payroll_id.clone()),
+                    (
+                        second_employment_id.clone(),
+                        second_finalized_payroll_id.clone(),
+                    ),
+                ],
+            },
+            StatusCode::CONFLICT,
+            "payroll_run_already_finalized",
+            Some(json!({
+                "payrollRunId": finalized_run_id.to_string(),
+                "finalizedPayrollId": null,
+                "finalizedPayrolls": [
+                    {
+                        "employmentId": employment_id.to_string(),
+                        "finalizedPayrollId": finalized_payroll_id.to_string(),
+                    },
+                    {
+                        "employmentId": second_employment_id.to_string(),
+                        "finalizedPayrollId": second_finalized_payroll_id.to_string(),
+                    },
+                ],
             })),
         );
         check(

@@ -149,14 +149,16 @@ pub enum PayrollAppError {
     /// `Calculated` run is not refused: editing it reopens it as `Draft`.
     PayrollRunAlreadyFinalized {
         payroll_run_id: PayrollRunId,
-        /// The single `FinalizedPayroll` this run produced, when there is
-        /// exactly one active member to answer for (issue #50, §0.28) —
-        /// always true of a Correction run (§4.8), and true of an Ordinary
-        /// run that happens to have one. An Ordinary run with more than one
-        /// active member finalizes each into its own separate row, so there
-        /// is no single answer to give, and this is `None` rather than a
-        /// guess.
-        finalized_payroll_id: Option<FinalizedPayrollId>,
+        /// Every `FinalizedPayroll` this run produced, paired with the
+        /// Employment it belongs to and ordered by that Employment's id
+        /// (issue #50, §0.28). A retry after a lost response is answered
+        /// with the whole result, not a summary of it: an Ordinary run
+        /// finalizes each active member into its own separate row, so a
+        /// single id would be a guess for any run with more than one, and a
+        /// caller that got no id at all could not show the success that
+        /// already happened. Empty only for a vacuous run — one finalized
+        /// with no active member.
+        finalized_payrolls: Vec<(EmploymentId, FinalizedPayrollId)>,
     },
     /// `FinalizePayrollRun` was asked for a run that is not yet `Calculated`
     /// — still `Draft`, with at least one member unresolved. `Finalized` is

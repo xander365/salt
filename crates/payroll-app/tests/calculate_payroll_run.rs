@@ -755,7 +755,7 @@ async fn a_finalized_run_is_refused(pool: PgPool) {
         result,
         Err(PayrollAppError::PayrollRunAlreadyFinalized {
             payroll_run_id: run_id,
-            finalized_payroll_id: None,
+            finalized_payrolls: Vec::new(),
         })
     );
 }
