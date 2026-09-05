@@ -14,6 +14,11 @@
 //! Creating an Operator, an Employer or a membership has no route in Specs
 //! 1–3 (§0.39) — the one exception the issue's own Deep Instructions name —
 //! so those, and only those, go through `payroll_app` directly.
+//!
+//! Three tests here claim to walk *every* route, from lists written by
+//! hand. `the_declared_route_table_is_exactly_the_one_these_tests_walk`
+//! keeps those claims honest: it reads `src/router.rs` at compile time and
+//! fails if the declared table ever stops being §0.22's own.
 
 use std::time::Duration;
 
@@ -653,11 +658,17 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             .unwrap(),
     )
     .await;
+    assert_eq!(detail["status"], "draft");
     let members = detail["members"].as_array().unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0]["employmentId"], employment_id);
     assert_eq!(members[0]["fullName"], "Ada Lovelace");
-    assert_eq!(members[0]["blockers"].as_array().unwrap().len(), 0);
+    // Both declarations and CompensationTerms are in force, so nothing
+    // stands between this member and Calculate (§0.31).
+    assert_eq!(
+        members[0]["blockers"].as_array().unwrap(),
+        &Vec::<Value>::new()
+    );
 
     // Set a taxable allowance.
     let earnings_set = router()
@@ -686,27 +697,71 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
     let member = &calculated_body["members"][0];
     assert!(member["refusal"].is_null());
 
-    // Read the nine figures.
+    // Read the nine figures. Exactly nine, all cents-exact integers and
+    // never a JSON float (INV-001, §0.29).
     let figures = &member["figures"];
-    assert_eq!(figures["basicPayCents"], 1_500_000);
-    assert_eq!(figures["taxableAllowancesCents"], 20_000);
-    assert_eq!(figures["grossCents"], 1_520_000);
-    assert_eq!(figures["taxableRemunerationCents"], 1_520_000);
-    for field in [
-        "payeCents",
-        "employeeSscCents",
-        "employerSscCents",
-        "totalDeductionsCents",
-        "netCents",
-    ] {
-        assert!(
-            figures[field].is_i64(),
-            "{field} must be a cents-exact integer"
-        );
+    let mut figure_names: Vec<&str> = figures
+        .as_object()
+        .expect("figures is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    figure_names.sort_unstable();
+    assert_eq!(
+        figure_names,
+        [
+            "basicPayCents",
+            "employeeSscCents",
+            "employerSscCents",
+            "grossCents",
+            "netCents",
+            "payeCents",
+            "taxableAllowancesCents",
+            "taxableRemunerationCents",
+            "totalDeductionsCents",
+        ],
+        "the wire carries exactly the nine figures §0.29 names",
+    );
+    let cents = |field: &str| {
+        figures[field]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{field} must be a cents-exact integer, not a JSON float"))
+    };
+
+    assert_eq!(cents("basicPayCents"), 1_500_000);
+    assert_eq!(cents("taxableAllowancesCents"), 20_000);
+    assert_eq!(cents("grossCents"), 1_520_000);
+    assert_eq!(cents("taxableRemunerationCents"), 1_520_000);
+
+    // The calculator really ran: both social security figures are positive.
+    // Asserting only that they are integers would pass on a row of zeros.
+    for field in ["employeeSscCents", "employerSscCents"] {
+        assert!(cents(field) > 0, "{field} must be positive for this salary");
     }
-    let net =
-        figures["grossCents"].as_i64().unwrap() - figures["totalDeductionsCents"].as_i64().unwrap();
-    assert_eq!(figures["netCents"].as_i64().unwrap(), net);
+    // PAYE is deliberately not asserted positive. This Employment starts
+    // inside january_period() with no OpeningBalance, so its year-to-date
+    // taxable remuneration for the whole TaxYear is this one period's
+    // R15,200 — below the annual threshold, and cumulative PAYE (ADR-0001)
+    // therefore owes nothing yet. Zero here is the right answer, not an
+    // uncalculated one; the statutory figures themselves are proven by the
+    // `payroll` crate's own ruleset tests (ADR-0008).
+    assert!(cents("payeCents") >= 0);
+
+    // The two figures that are sums are the sums of the others, and the
+    // employer's own contribution is a cost to the Employer, never a
+    // deduction from the employee.
+    assert_eq!(
+        cents("totalDeductionsCents"),
+        cents("payeCents") + cents("employeeSscCents"),
+    );
+    assert_eq!(
+        cents("netCents"),
+        cents("grossCents") - cents("totalDeductionsCents"),
+    );
+    assert_eq!(
+        cents("grossCents"),
+        cents("basicPayCents") + cents("taxableAllowancesCents"),
+    );
 
     // Finalize.
     let finalized = router()
@@ -761,7 +816,13 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
         traces["paye"]["thisPeriodTaxableRemunerationCents"],
         1_520_000
     );
-    assert!(traces["paye"]["bandsApplied"].is_array());
+    assert!(
+        !traces["paye"]["bandsApplied"]
+            .as_array()
+            .expect("bandsApplied is an array")
+            .is_empty(),
+        "a PAYE figure this size is explained by at least one band",
+    );
     for role in ["employeeSsc", "employerSsc"] {
         assert_eq!(traces[role]["basicPayCents"], 1_500_000);
         assert!(
@@ -1178,5 +1239,114 @@ async fn a_malformed_body_and_a_payroll_refusal_are_structurally_different() {
     assert_ne!(
         malformed_json["error"]["code"],
         refused_json["error"]["code"]
+    );
+
+    // Both still speak Salt's one envelope (§0.23) — the difference is in
+    // the status, the code and the details, never in the shape — and
+    // neither hands a client a map of the database (§0.28, user story 42).
+    for (name, json) in [("malformed", &malformed_json), ("refusal", &refused_json)] {
+        let error = json["error"]
+            .as_object()
+            .unwrap_or_else(|| panic!("the {name} response carries an `error` object"));
+        let mut keys: Vec<&str> = error.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["code", "details", "message"], "{name}");
+        assert!(
+            !error["message"].as_str().unwrap().is_empty(),
+            "the {name} response carries a human-readable message",
+        );
+        let body = json.to_string().to_lowercase();
+        for leak in ["select ", "insert ", "sqlx", "panicked", "backtrace"] {
+            assert!(
+                !body.contains(leak),
+                "the {name} response must not leak {leak:?}: {body}",
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// The three loops above are exhaustive, and stay that way.
+// ---------------------------------------------------------------------
+
+/// The `/api` route paths `crate::router` declares, read from its own
+/// source at compile time. Only the literal after `.route(` is taken, so a
+/// path named in a comment or a doc-comment cannot be mistaken for a
+/// declared route. `/__test/*` routes are excluded: they exist only behind
+/// the `test-support` feature, are no part of §0.22's contract, and none of
+/// them is a payroll route these tests must walk.
+fn declared_route_paths() -> Vec<String> {
+    const ROUTER_SOURCE: &str = include_str!("../src/router.rs");
+    let mut paths: Vec<String> = ROUTER_SOURCE
+        .split(".route(")
+        .skip(1)
+        .filter_map(|rest| {
+            let rest = rest.trim_start();
+            let rest = rest.strip_prefix('"').or_else(|| {
+                // `.route(\n    "…"` — the literal is on the next line.
+                rest.split_once('"').map(
+                    |(before, after)| {
+                        if before.trim().is_empty() { after } else { "" }
+                    },
+                )
+            })?;
+            rest.split_once('"').map(|(path, _)| path.to_string())
+        })
+        .filter(|path| path.starts_with("/api/"))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The three loops in this file — 401, `PayrollOperator`, and the
+/// `X-Salt-Request` header — each name every route by hand, and issue #58's
+/// acceptance criteria say "every". A route added to `build_router` would
+/// otherwise escape all three in silence. This test fails the moment the
+/// declared route table stops being exactly §0.22's own, so adding a route
+/// forces a decision about those loops rather than allowing an omission.
+/// It is also parent #49's user story 48: the route table is exactly §0.22
+/// and nothing more.
+#[test]
+fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
+    assert_eq!(
+        declared_route_paths(),
+        [
+            "/api/employers",
+            "/api/employers/{employer_id}/employments",
+            "/api/employers/{employer_id}/employments/{employment_id}",
+            "/api/employers/{employer_id}/employments/{employment_id}/compensation-terms",
+            "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
+            "/api/employers/{employer_id}/employments/{employment_id}/prior-employment",
+            "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions",
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
+            "/api/employers/{employer_id}/payroll-runs",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/finalize",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/earnings",
+            "/api/health",
+            "/api/ready",
+            "/api/session",
+        ],
+        "the route table changed: revisit every `for request in [..]` loop in \
+         this file before changing this list",
+    );
+}
+
+/// Guards the guard: a parser that found nothing would pass the test above
+/// for the wrong reason, and one that swept up comments would pass it for a
+/// different wrong reason.
+#[test]
+fn the_router_source_parser_finds_the_routes_that_are_there() {
+    let paths = declared_route_paths();
+    assert_eq!(paths.len(), 17, "{paths:?}");
+    assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
+    assert!(
+        paths
+            .iter()
+            .any(|path| path == "/api/employers/{employer_id}/payroll-runs"),
+        "{paths:?}"
     );
 }
