@@ -44,17 +44,27 @@ fn parse_finalized_payroll_id(
     Ok(FinalizedPayrollId::new(finalized_payroll_id))
 }
 
-/// Decodes one frozen calculation by the layout named on its own row. Version
-/// 1 is the only layout Salt has written so far; a later layout gets an
-/// explicit match arm and decoder while this one remains available for
-/// history (ADR-0012).
+/// The one snapshot layout this build knows how to decode: a
+/// `PayrollCalculation` as `serde` serializes it today. A later layout gets
+/// its own constant, its own match arm and its own decoder, while this one
+/// stays for history — finalized snapshots are never migrated in place
+/// (ADR-0012), so an old row keeps reading through the reader written for
+/// it.
+const SNAPSHOT_LAYOUT_V1: i32 = 1;
+
+/// Decodes one frozen calculation by the layout named on its own row. A
+/// version this build has no decoder for is refused rather than deserialized
+/// as if it were current — the unit tests below pin both halves of that:
+/// an unknown layout is never fed to `serde`, and the layout
+/// [`crate::SNAPSHOT_SCHEMA_VERSION`] writes is always one of the layouts
+/// decoded here.
 fn calculation_from_snapshot(
     finalized_payroll_id: &FinalizedPayrollId,
     schema_version: i32,
     calculation_json: serde_json::Value,
 ) -> Result<PayrollCalculation, PayrollAppError> {
     match schema_version {
-        1 => serde_json::from_value(calculation_json).map_err(|_| {
+        SNAPSHOT_LAYOUT_V1 => serde_json::from_value(calculation_json).map_err(|_| {
             PayrollAppError::FinalizedPayrollSnapshotUnreadable {
                 finalized_payroll_id: finalized_payroll_id.clone(),
                 schema_version,
@@ -210,6 +220,20 @@ mod tests {
                 finalized_payroll_id: id,
                 schema_version: 2,
             })
+        );
+    }
+
+    /// Bumping [`crate::SNAPSHOT_SCHEMA_VERSION`] without adding the
+    /// matching decoder arm above would make every payroll finalized by the
+    /// new build unreadable by it — a 500 on the route whose whole job is
+    /// explaining a past month. The compiler cannot see that link, so this
+    /// test is what holds it.
+    #[test]
+    fn the_layout_this_build_writes_is_a_layout_this_build_can_read() {
+        assert_eq!(
+            crate::SNAPSHOT_SCHEMA_VERSION,
+            SNAPSHOT_LAYOUT_V1,
+            "a new snapshot layout needs its own arm in calculation_from_snapshot"
         );
     }
 }

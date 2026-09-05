@@ -460,6 +460,22 @@ async fn reading_a_finalized_payrolls_traces_returns_the_paye_and_ssc_workings()
         assert!(trace["floorCents"].is_i64());
         assert!(trace["ceilingCents"].is_i64());
     }
+
+    // Never the raw snapshot (§0.29) — the acceptance criterion is "on
+    // either route", so the traces response is held to it as firmly as the
+    // detail response is. Only the three hand-written trace DTOs appear.
+    assert!(body.get("payrollInputJson").is_none());
+    assert!(body.get("payrollRulesJson").is_none());
+    assert!(body.get("payrollCalculationJson").is_none());
+    assert!(body.get("earningLines").is_none());
+    assert!(body.get("deductions").is_none());
+    let keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        // `serde_json`'s object map is sorted, so this is the response's
+        // three keys in name order, not in declaration order.
+        vec!["employeeSsc", "employerSsc", "paye"]
+    );
 }
 
 #[tokio::test]
