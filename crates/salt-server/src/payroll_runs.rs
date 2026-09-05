@@ -418,6 +418,12 @@ struct FinalizedMemberDto {
 /// `details.finalizedPayrollId`, which is the recovery itself (§0.28): no
 /// idempotency key is needed because the database's own uniqueness and the
 /// run lock already make a duplicate impossible.
+///
+/// `FinalizationOutcome::later_finalized_periods` is deliberately not on the
+/// wire: it is a Correction run's own §6.4 warning and is always empty for
+/// an Ordinary run, and §0.22 gives Corrections no route at all. Putting an
+/// always-empty field in the response would make a permanent contract out of
+/// something no caller in this spec can ever see filled in.
 pub(crate) async fn finalize_payroll_run(
     State(state): State<AppState>,
     context: AuthorizedEmployerContext,

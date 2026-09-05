@@ -3,7 +3,8 @@
 //! /api/employers/{e}/payroll-runs/{r}` and `PUT
 //! /api/employers/{e}/payroll-runs/{r}/members/{em}/earnings` (issue #53,
 //! parent #49 Spec 2 of 3), plus `POST
-//! /api/employers/{e}/payroll-runs/{r}/calculate` (issue #55). Driven with
+//! /api/employers/{e}/payroll-runs/{r}/calculate` (issue #55) and `POST
+//! /api/employers/{e}/payroll-runs/{r}/finalize` (issue #56). Driven with
 //! `tower::ServiceExt::oneshot` against the real router, the same
 //! discipline `tests/employments.rs` already follows.
 
@@ -123,7 +124,12 @@ fn january_period() -> Value {
     serde_json::json!({ "start": "2026-01-01", "end": "2026-01-31" })
 }
 
-fn create_employment_request(employer_id: &str, cookie: &str, full_name: &str) -> Request<Body> {
+fn create_employment_request(
+    employer_id: &str,
+    cookie: &str,
+    full_name: &str,
+    start_date: &str,
+) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(format!("/api/employers/{employer_id}/employments"))
@@ -131,15 +137,32 @@ fn create_employment_request(employer_id: &str, cookie: &str, full_name: &str) -
         .header("x-salt-request", "1")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::json!({ "fullName": full_name, "startDate": "2026-01-01" }).to_string(),
+            serde_json::json!({ "fullName": full_name, "startDate": start_date }).to_string(),
         ))
         .unwrap()
 }
 
 async fn create_employment(employer_id: &str, cookie: &str, full_name: &str) -> String {
+    create_employment_starting(employer_id, cookie, full_name, "2026-01-01").await
+}
+
+/// An Employment whose `startDate` is chosen by the caller. Only the one
+/// test that adopts Salt part-way through a TaxYear needs a start earlier
+/// than `january_period()`; every other test wants the default above.
+async fn create_employment_starting(
+    employer_id: &str,
+    cookie: &str,
+    full_name: &str,
+    start_date: &str,
+) -> String {
     let response = router()
         .await
-        .oneshot(create_employment_request(employer_id, cookie, full_name))
+        .oneshot(create_employment_request(
+            employer_id,
+            cookie,
+            full_name,
+            start_date,
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -333,6 +356,38 @@ fn declare_prior_employment_request(
             serde_json::json!({
                 "taxYear": tax_year,
                 "status": "confirmed_none",
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// `POST /api/employers/{e}/employments/{em}/opening-balance`, the route
+/// issue #52 already ships. Used here to record — and then to change — the
+/// one fact an Operator can still move after a run is `Calculated` without
+/// the run itself reopening.
+fn record_opening_balance_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    salt_coverage_start: &str,
+    prior_taxable_remuneration_cents: i64,
+    prior_paye_cents: i64,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/opening-balance"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "taxYear": 2025,
+                "saltCoverageStart": salt_coverage_start,
+                "priorTaxableRemunerationCents": prior_taxable_remuneration_cents,
+                "priorPayeCents": prior_paye_cents,
             })
             .to_string(),
         ))
@@ -1625,7 +1680,12 @@ async fn a_run_id_belonging_to_another_employer_is_not_found_on_the_finalize_rou
 
     let response = router()
         .await
-        .oneshot(finalize_request(&other_employer, &run_id, &other_cookie, true))
+        .oneshot(finalize_request(
+            &other_employer,
+            &run_id,
+            &other_cookie,
+            true,
+        ))
         .await
         .unwrap();
 
@@ -1658,8 +1718,7 @@ async fn finalizing_a_run_that_was_never_calculated_is_refused_with_its_own_stab
 /// lost response is answered with the success that already happened, not an
 /// unexplained error, and there is no idempotency key mechanism behind it.
 #[tokio::test]
-async fn retrying_finalize_on_an_already_finalized_run_answers_409_with_the_finalized_payroll_id()
-{
+async fn retrying_finalize_on_an_already_finalized_run_answers_409_with_the_finalized_payroll_id() {
     let (cookie, employer_id) = an_authorized_operator().await;
     let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
     fully_declare_employment(&employer_id, &employment_id, &cookie).await;
@@ -1708,15 +1767,11 @@ async fn retrying_finalize_on_an_already_finalized_run_answers_409_with_the_fina
 ///
 /// This lands as `finalization_rebuild_refused`, not one of the three named
 /// mismatch codes: those three name a rebuild that *succeeds* but disagrees
-/// with what was approved, and the only fact that can move that way without
-/// itself blocking recalculation is a `CompensationTerms.effective_from`
-/// correction — a route issue #56 does not ship (§6.5 is a separate,
-/// later ticket). That exact scenario is already proven exhaustively in
-/// `payroll-app`'s own `finalize_payroll_run` tests and in
-/// `crate::payroll_error`'s mapping tests (which also prove the frozen
-/// snapshot never reaches the response body); this test proves the same
-/// "facts moved" story is reachable, and correctly refused, through the HTTP
-/// route this ticket actually adds.
+/// with what was approved, and a fact that blocks the rebuild outright never
+/// gets that far. The named codes have their own test below
+/// (`finalizing_after_the_opening_balance_moved_answers_finalization_input_mismatch`);
+/// the two refusals are different answers to "a fact moved", and both are a
+/// 409 an Operator recovers from by calculating again.
 #[tokio::test]
 async fn finalizing_after_a_fact_moved_without_recalculating_is_refused() {
     let (cookie, employer_id) = an_authorized_operator().await;
@@ -1762,5 +1817,137 @@ async fn finalizing_after_a_fact_moved_without_recalculating_is_refused() {
     assert_eq!(
         json["error"]["details"]["refusalCode"],
         "unsupported_deductions_present"
+    );
+}
+
+/// Issue #56's mismatch criterion, reached through the routes this spec
+/// actually ships: an `OpeningBalance` is the one fact an Operator can still
+/// move after Calculate that the rebuild *re-reads successfully* and then
+/// disagrees about. Its figures land in the member's `YearToDateContext`,
+/// which is part of the frozen `PayrollInput`, so a changed balance makes
+/// the reassembled input differ from the approved one and finalization is
+/// refused with `finalization_input_mismatch` naming the employment — the
+/// first of §5.2's three comparisons, which stop at the first that differs.
+///
+/// The Employment starts in March 2025 and the balance says Salt's coverage
+/// begins with January 2026, so December 2025 is resolved by the balance
+/// itself (§7.1 branch 2) and the Ordinary run's own sequencing check passes.
+#[tokio::test]
+async fn finalizing_after_the_opening_balance_moved_answers_finalization_input_mismatch() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id =
+        create_employment_starting(&employer_id, &cookie, "Grace Hopper", "2025-03-01").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+
+    let recorded = router()
+        .await
+        .oneshot(record_opening_balance_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            "2026-01-31",
+            3_000_000,
+            0,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recorded.status(), StatusCode::OK);
+
+    let run_id = create_run(&employer_id, &cookie).await;
+    let calculated = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    assert_eq!(calculated.status(), StatusCode::OK);
+
+    // The same balance, corrected: the year-to-date position the Operator
+    // approved is no longer the one Salt now holds.
+    let corrected = router()
+        .await
+        .oneshot(record_opening_balance_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            "2026-01-31",
+            6_000_000,
+            0,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(corrected.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "finalization_input_mismatch");
+    assert_eq!(json["error"]["details"]["employmentId"], employment_id);
+
+    // A refused finalization writes no history at all (§5.1), so the run is
+    // still the `Calculated` one the Operator can recalculate.
+    let refreshed = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refreshed["status"], "calculated");
+}
+
+/// Two finalizers of one run, in flight together: the run's own `FOR UPDATE`
+/// lock serialises them (§5.4), so exactly one `FinalizedPayroll` is ever
+/// written and the loser reads back the winner's own id under
+/// `payroll_run_already_finalized` — the same recovery a retry after a lost
+/// response gets, because it is the same situation. Each request goes
+/// through its own router, and therefore its own connection pool, so the
+/// two really do contend in the database rather than queueing on one
+/// connection.
+#[tokio::test]
+async fn two_concurrent_finalizes_write_exactly_one_finalized_payroll() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let calculated = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    assert_eq!(calculated.status(), StatusCode::OK);
+
+    let first_router = router().await;
+    let second_router = router().await;
+    let (first, second) = tokio::join!(
+        first_router.oneshot(finalize_request(&employer_id, &run_id, &cookie, true)),
+        second_router.oneshot(finalize_request(&employer_id, &run_id, &cookie, true)),
+    );
+    let (first, second) = (first.unwrap(), second.unwrap());
+
+    let (winner, loser) = if first.status() == StatusCode::OK {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(winner.status(), StatusCode::OK);
+    assert_eq!(loser.status(), StatusCode::CONFLICT);
+
+    let winner = body_json(winner).await;
+    let finalized = winner["finalized"].as_array().unwrap();
+    assert_eq!(finalized.len(), 1);
+    let finalized_payroll_id = finalized[0]["finalizedPayrollId"].as_str().unwrap();
+
+    let loser = body_json(loser).await;
+    assert_eq!(loser["error"]["code"], "payroll_run_already_finalized");
+    assert_eq!(
+        loser["error"]["details"]["finalizedPayrollId"],
+        finalized_payroll_id
     );
 }
