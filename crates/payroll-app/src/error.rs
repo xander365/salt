@@ -216,6 +216,14 @@ pub enum PayrollAppError {
     },
     /// No `FinalizedPayroll` exists with this id.
     FinalizedPayrollNotFound(FinalizedPayrollId),
+    /// A `FinalizedPayroll` snapshot names a layout this build does not know
+    /// how to render. Finalized history is never migrated in place
+    /// (ADR-0012), so readers must branch on the row's schema version rather
+    /// than deserializing an unknown layout as if it were current.
+    FinalizedPayrollSnapshotUnreadable {
+        finalized_payroll_id: FinalizedPayrollId,
+        schema_version: i32,
+    },
     /// `ReverseFinalizedPayroll` was asked for a `FinalizedPayroll` that
     /// already has a `Reversal` (§6.1) — `reversal.finalized_payroll_id` is
     /// UNIQUE (migration 0011), and there is no unreversal record type to
@@ -703,6 +711,14 @@ impl std::fmt::Display for PayrollAppError {
             Self::FinalizedPayrollNotFound(id) => {
                 write!(f, "no FinalizedPayroll exists with id {id}")
             }
+            Self::FinalizedPayrollSnapshotUnreadable {
+                finalized_payroll_id,
+                schema_version,
+            } => write!(
+                f,
+                "FinalizedPayroll {finalized_payroll_id} has snapshot schema version \
+                 {schema_version}, which this build cannot read"
+            ),
             Self::FinalizedPayrollAlreadyReversed(id) => {
                 write!(f, "FinalizedPayroll {id} has already been reversed")
             }
@@ -1002,6 +1018,7 @@ impl std::error::Error for PayrollAppError {
             | Self::FinalizationRulesMismatch { .. }
             | Self::FinalizationCalculationMismatch { .. }
             | Self::FinalizedPayrollNotFound(_)
+            | Self::FinalizedPayrollSnapshotUnreadable { .. }
             | Self::FinalizedPayrollAlreadyReversed(_)
             | Self::ReversalReasonCannotBeEmpty
             | Self::OpeningBalanceFrozenByFinalization { .. }

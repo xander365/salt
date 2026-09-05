@@ -44,6 +44,29 @@ fn parse_finalized_payroll_id(
     Ok(FinalizedPayrollId::new(finalized_payroll_id))
 }
 
+/// Decodes one frozen calculation by the layout named on its own row. Version
+/// 1 is the only layout Salt has written so far; a later layout gets an
+/// explicit match arm and decoder while this one remains available for
+/// history (ADR-0012).
+fn calculation_from_snapshot(
+    finalized_payroll_id: &FinalizedPayrollId,
+    schema_version: i32,
+    calculation_json: serde_json::Value,
+) -> Result<PayrollCalculation, PayrollAppError> {
+    match schema_version {
+        1 => serde_json::from_value(calculation_json).map_err(|_| {
+            PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+                finalized_payroll_id: finalized_payroll_id.clone(),
+                schema_version,
+            }
+        }),
+        _ => Err(PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+            finalized_payroll_id: finalized_payroll_id.clone(),
+            schema_version,
+        }),
+    }
+}
+
 /// One `FinalizedPayroll` in full, for `GET
 /// /api/employers/{e}/finalized-payroll/{f}` (issue #57): the nine figures,
 /// the period, the pay date and the `SaltVersion` that produced them. Never
@@ -82,6 +105,7 @@ pub async fn get_finalized_payroll_detail(
         NaiveDate,
         NaiveDate,
         NaiveDate,
+        i32,
         serde_json::Value,
         String,
     );
@@ -89,6 +113,7 @@ pub async fn get_finalized_payroll_detail(
     let row: Option<Row> = sqlx::query_as(
         "SELECT finalized_payroll.employment_id, finalized_payroll.period_start,
                 finalized_payroll.period_end, payroll_run.pay_date,
+                finalized_payroll.snapshot_schema_version,
                 finalized_payroll.payroll_calculation_json, finalized_payroll.salt_version
          FROM finalized_payroll
          JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
@@ -99,13 +124,18 @@ pub async fn get_finalized_payroll_detail(
     .fetch_optional(db.pool())
     .await?;
 
-    let (employment_id, period_start, period_end, pay_date, calculation_json, salt_version) =
+    let (
+        employment_id,
+        period_start,
+        period_end,
+        pay_date,
+        schema_version,
+        calculation_json,
+        salt_version,
+    ) =
         row.ok_or_else(|| PayrollAppError::FinalizedPayrollNotFound(finalized_payroll_id.clone()))?;
-
-    let calculation: PayrollCalculation = serde_json::from_value(calculation_json).expect(
-        "finalized_payroll.payroll_calculation_json always serializes a PayrollCalculation at \
-         the snapshot_schema_version this code reads (§9.1)",
-    );
+    let calculation =
+        calculation_from_snapshot(&finalized_payroll_id, schema_version, calculation_json)?;
 
     Ok(FinalizedPayrollDetail {
         id: finalized_payroll_id,
@@ -142,8 +172,8 @@ pub async fn get_finalized_payroll_traces(
 ) -> Result<FinalizedPayrollTraces, PayrollAppError> {
     let finalized_payroll_id = parse_finalized_payroll_id(finalized_payroll_id)?;
 
-    let calculation_json: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT payroll_calculation_json
+    let snapshot: Option<(i32, serde_json::Value)> = sqlx::query_as(
+        "SELECT snapshot_schema_version, payroll_calculation_json
          FROM finalized_payroll
          WHERE id = $1::uuid AND employer_id = $2",
     )
@@ -152,16 +182,34 @@ pub async fn get_finalized_payroll_traces(
     .fetch_optional(db.pool())
     .await?;
 
-    let calculation_json = calculation_json
+    let (schema_version, calculation_json) = snapshot
         .ok_or_else(|| PayrollAppError::FinalizedPayrollNotFound(finalized_payroll_id.clone()))?;
-    let calculation: PayrollCalculation = serde_json::from_value(calculation_json).expect(
-        "finalized_payroll.payroll_calculation_json always serializes a PayrollCalculation at \
-         the snapshot_schema_version this code reads (§9.1)",
-    );
+    let calculation =
+        calculation_from_snapshot(&finalized_payroll_id, schema_version, calculation_json)?;
 
     Ok(FinalizedPayrollTraces {
         paye: calculation.paye.trace,
         employee_social_security: calculation.employee_social_security.trace,
         employer_social_security: calculation.employer_social_security.trace,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_snapshot_layout_is_refused_without_deserializing_it() {
+        let id = FinalizedPayrollId::new("finalized-payroll-1");
+
+        let result = calculation_from_snapshot(&id, 2, serde_json::json!({ "not": "v1" }));
+
+        assert_eq!(
+            result,
+            Err(PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+                finalized_payroll_id: id,
+                schema_version: 2,
+            })
+        );
+    }
 }

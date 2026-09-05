@@ -100,6 +100,7 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
         // criterion — no mapped body carries SQL text or a stack trace).
         PayrollAppError::Database(_)
         | PayrollAppError::SchemaOutOfDate { .. }
+        | PayrollAppError::FinalizedPayrollSnapshotUnreadable { .. }
         | PayrollAppError::PasswordHashingFailed(_) => Classification::Internal,
 
         PayrollAppError::EmployerNameCannotBeEmpty => Classification::Mapped(
@@ -2327,6 +2328,10 @@ mod tests {
             "finalized_payroll_not_found",
             Some(json!({ "finalizedPayrollId": finalized_payroll_id.to_string() })),
         );
+        check_internal(PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+            finalized_payroll_id: finalized_payroll_id.clone(),
+            schema_version: 2,
+        });
         check(
             PayrollAppError::FinalizedPayrollAlreadyReversed(finalized_payroll_id.clone()),
             StatusCode::CONFLICT,
