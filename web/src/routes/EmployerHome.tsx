@@ -12,9 +12,10 @@ export function EmployerHome() {
   return (
     <main>
       <p>Signed in as {session.operator.displayName}.</p>
-      {/* Relative, not `peoplePath(employerId)`: this screen already renders
-          beneath `/app/employers/:employerId`, so resolving against the
-          current route needs no second read of the same param. */}
+      {/* Relative, not an absolute path rebuilt from `:employerId`: this
+          screen already renders beneath `/app/employers/:employerId`, so
+          resolving against the current route needs no second read of the
+          same param — and cannot disagree with it. */}
       <p>
         <Link to="people">People</Link>
       </p>
