@@ -1,0 +1,37 @@
+/* Plain, legible, accessible markup — this spec buys usability, not visual
+   identity (docs/domain/operator-auth-http-web-grill.md, "no design
+   system"). Nothing here is a component library. */
+
+:root {
+  color-scheme: light dark;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 1rem;
+}
+
+main {
+  max-width: 24rem;
+}
+
+label {
+  display: block;
+  margin-top: 0.75rem;
+}
+
+input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 0.4rem;
+  margin-top: 0.25rem;
+}
+
+button {
+  margin-top: 1rem;
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+}

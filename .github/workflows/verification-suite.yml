@@ -170,3 +170,35 @@ jobs:
             echo "SaltVersion is $after but HEAD says it should be $expected" >&2
             exit 1
           fi
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Install the pinned Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        # --locked's own equivalent: installs exactly what package-lock.json
+        # names rather than re-resolving, the same reason cargo test above
+        # runs --locked.
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
