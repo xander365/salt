@@ -1,8 +1,11 @@
 //! Proves issue #58's own acceptance criteria (parent #49 Spec 2 of 3): one
 //! test drives a whole ordinary payroll through the real router, and a set
-//! of tests proves that ids from another Employer are not keys, that a
-//! request body cannot forge an actor, and that a typo is never mistaken for
-//! a payroll refusal. Driven with `tower::ServiceExt::oneshot` against the
+//! of tests proves that ids from another Employer are not keys and that a
+//! typo is never mistaken for a payroll refusal. Actor integrity is proven
+//! in `crates/payroll-app/tests/http_actor_integrity.rs`, where the existing
+//! SQLx harness can inspect the HTTP-written ActionLog without giving
+//! salt-server SQL access (ADR-0018).
+//! Driven with `tower::ServiceExt::oneshot` against the
 //! real router, the same discipline every other file under this directory
 //! already follows — no TCP port, no browser.
 //!
@@ -1114,90 +1117,6 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
         let json = body_json(response).await;
         assert_eq!(json["error"]["code"], "salt_request_header_required");
     }
-}
-
-// ---------------------------------------------------------------------
-// A request body cannot forge an actor.
-// ---------------------------------------------------------------------
-
-/// Acceptance: a body claiming a different actor changes nothing about the
-/// ActionLog entry an HTTP call writes (ADR-0019: "the actor is never
-/// accepted from an HTTP request body. A forged `actor` field has no route
-/// that reads it."). This is that proof's HTTP-observable half:
-/// `CreatePayrollRunRequest` (`salt_server::payroll_runs`) simply has no
-/// `actor` field, so an extra one in the body is dropped by `serde`
-/// before the handler ever runs, and the two calls below — one plain, one
-/// carrying a forged `actor` naming a real, different Operator — behave
-/// identically: same status, same response shape, both scoped to the
-/// caller's own session. The row itself (`action_log_entry.actor`) is not
-/// independently reread here: `salt-server` has no database access of its
-/// own (ADR-0018, enforced by
-/// `salt_server::manifest::no_dependency_named_sqlx_is_declared`), and no
-/// route or `payroll_app` query exposes an ActionLog entry back over HTTP —
-/// reading it directly would need a production change this ticket is not
-/// meant to make.
-#[tokio::test]
-async fn a_forged_actor_in_the_body_changes_nothing_observable_about_the_response() {
-    let (_operator_id, cookie, employer_id) = an_authorized_operator(MembershipRole::Owner).await;
-    let forged_operator_id = create_operator(&unique_email("mallory")).await;
-
-    let plain = router()
-        .await
-        .oneshot(create_run_request(
-            &employer_id,
-            &cookie,
-            true,
-            json!({ "period": january_period(), "payDate": "2026-02-05" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(plain.status(), StatusCode::OK);
-    let plain_json = body_json(plain).await;
-    let plain_run_id = plain_json["payrollRunId"].as_str().unwrap().to_string();
-
-    // A different period, since only one Ordinary run exists per Employer
-    // per pay period — the forged body must still be free to succeed on its
-    // own merits, not fail for reasons unrelated to the field under test.
-    let forged = router()
-        .await
-        .oneshot(create_run_request(
-            &employer_id,
-            &cookie,
-            true,
-            json!({
-                "period": { "start": "2026-02-01", "end": "2026-02-28" },
-                "payDate": "2026-03-05",
-                "actor": format!("operator:{forged_operator_id}"),
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        forged.status(),
-        StatusCode::OK,
-        "an extra actor field must not be treated as malformed or refused"
-    );
-    let forged_json = body_json(forged).await;
-
-    // Same response shape either way: one field, `payrollRunId`, and
-    // nothing naming or echoing the forged actor.
-    assert_eq!(
-        plain_json.as_object().unwrap().keys().collect::<Vec<_>>(),
-        forged_json.as_object().unwrap().keys().collect::<Vec<_>>(),
-    );
-    let forged_run_id = forged_json["payrollRunId"].as_str().unwrap().to_string();
-    assert_ne!(plain_run_id, forged_run_id);
-
-    // The run the forged call created is readable back under the caller's
-    // own real session, scoped to the caller's own Employer exactly as the
-    // plain call's run is — the forged field named no Operator and no
-    // Employer that changed anything a client can observe.
-    let read_back = router()
-        .await
-        .oneshot(run_detail_request(&employer_id, &forged_run_id, &cookie))
-        .await
-        .unwrap();
-    assert_eq!(read_back.status(), StatusCode::OK);
 }
 
 // ---------------------------------------------------------------------

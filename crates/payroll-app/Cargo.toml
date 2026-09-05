@@ -24,6 +24,12 @@ hex = "0.4"
 base64 = "0.22"
 
 [dev-dependencies]
+# Issue #58: drive the real HTTP router and inspect its committed ActionLog
+# using this crate's existing SQLx test harness. The reverse dependency is
+# test-only; salt-server still has no SQL access (ADR-0018).
+salt-server = { path = "../salt-server" }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]

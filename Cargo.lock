@@ -1165,15 +1165,18 @@ name = "payroll-app"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "axum",
  "base64",
  "chrono",
  "hex",
  "payroll",
  "rand",
+ "salt-server",
  "serde_json",
  "sha2",
  "sqlx",
  "tokio",
+ "tower",
  "uuid",
 ]
 
