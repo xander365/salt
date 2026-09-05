@@ -6,3 +6,7 @@
 export function employerPath(employerId: string): string {
   return `/app/employers/${encodeURIComponent(employerId)}`;
 }
+
+export function peoplePath(employerId: string): string {
+  return `${employerPath(employerId)}/people`;
+}

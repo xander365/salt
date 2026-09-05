@@ -4,6 +4,7 @@ import { EmployerHome } from './routes/EmployerHome';
 import { EmployerShell } from './routes/EmployerShell';
 import { LoginPage } from './routes/LoginPage';
 import { NotFound } from './routes/NotFound';
+import { People } from './routes/People';
 import { RequireSession } from './routes/RequireSession';
 import { UnauthorizedRedirect } from './session/UnauthorizedRedirect';
 
@@ -23,6 +24,7 @@ export function App() {
           <Route path="/app" element={<AppLanding />} />
           <Route path="/app/employers/:employerId" element={<EmployerShell />}>
             <Route index element={<EmployerHome />} />
+            <Route path="people" element={<People />} />
           </Route>
         </Route>
 

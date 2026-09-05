@@ -27,3 +27,27 @@ export interface SessionResponse {
   operator: OperatorDto;
   memberships: MembershipDto[];
 }
+
+// `crates/salt-server/src/employments.rs` (issue #62, §0.38): the interface
+// only ever sends `fullName`, never `personId` — there is no Person screen to
+// have picked one from.
+
+export interface EmploymentListingDto {
+  employmentId: string;
+  personId: string;
+  fullName: string;
+}
+
+export interface EmploymentsResponse {
+  employments: EmploymentListingDto[];
+}
+
+export interface CreateEmploymentRequest {
+  fullName: string;
+  startDate: string;
+}
+
+export interface CreateEmploymentResponse {
+  employmentId: string;
+  personId: string;
+}
