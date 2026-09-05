@@ -17,7 +17,7 @@ export function AppLanding() {
   const { memberships } = session.data;
 
   if (memberships.length === 1) {
-    return <Navigate to={`/app/${memberships[0].employerId}`} replace />;
+    return <Navigate to={`/app/employers/${memberships[0].employerId}`} replace />;
   }
 
   return (
@@ -29,7 +29,7 @@ export function AppLanding() {
         <ul>
           {memberships.map((membership) => (
             <li key={membership.employerId}>
-              <Link to={`/app/${membership.employerId}`}>{membership.name}</Link>
+              <Link to={`/app/employers/${membership.employerId}`}>{membership.name}</Link>
             </li>
           ))}
         </ul>

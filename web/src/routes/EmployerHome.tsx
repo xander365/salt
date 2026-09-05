@@ -1,4 +1,4 @@
-// `/app/:employerId` (issue #61, parent #59 Spec 3). The application shell
+// `/app/employers/:employerId` (issue #61, parent #59 Spec 3). The application shell
 // for every authorized screen: it names the Employer the Operator is about
 // to touch, from the membership `GET /api/session` already returned for it —
 // no separate call to look the Employer up.

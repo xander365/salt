@@ -20,7 +20,7 @@ export function App() {
           }
         />
         <Route
-          path="/app/:employerId"
+          path="/app/employers/:employerId"
           element={
             <RequireSession>
               <EmployerHome />
