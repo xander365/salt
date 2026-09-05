@@ -5,19 +5,15 @@
 // second call to make here.
 
 import { Link, Navigate } from 'react-router-dom';
-import { useSession } from '../session/useSession';
+import { useAuthorizedSession } from '../session/AuthorizedSession';
+import { SignOutButton } from '../session/SignOutButton';
+import { employerPath } from './paths';
 
 export function AppLanding() {
-  const session = useSession();
-
-  if (session.data === undefined) {
-    return null;
-  }
-
-  const { memberships } = session.data;
+  const { memberships } = useAuthorizedSession();
 
   if (memberships.length === 1) {
-    return <Navigate to={`/app/employers/${memberships[0].employerId}`} replace />;
+    return <Navigate to={employerPath(memberships[0].employerId)} replace />;
   }
 
   return (
@@ -29,11 +25,12 @@ export function AppLanding() {
         <ul>
           {memberships.map((membership) => (
             <li key={membership.employerId}>
-              <Link to={`/app/employers/${membership.employerId}`}>{membership.name}</Link>
+              <Link to={employerPath(membership.employerId)}>{membership.name}</Link>
             </li>
           ))}
         </ul>
       )}
+      <SignOutButton />
     </main>
   );
 }
