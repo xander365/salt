@@ -1,11 +1,12 @@
 //! The four routes issue #53 adds (parent #49 Spec 2 of 3): `POST
 //! .../payroll-runs`, `GET .../payroll-runs`, `GET .../payroll-runs/{r}` and
 //! `PUT .../payroll-runs/{r}/members/{em}/earnings`, plus `POST
-//! .../payroll-runs/{r}/calculate` (issue #55). An Operator creates the
+//! .../payroll-runs/{r}/calculate` (issue #55) and `POST
+//! .../payroll-runs/{r}/finalize` (issue #56). An Operator creates the
 //! next Ordinary run for a period, sees the Employer's runs, opens one and
 //! reads every member it proposes to pay, sets one member's earning lines,
-//! and calculates the run to see the figures — or the reason — for every
-//! member.
+//! calculates the run to see the figures — or the reason — for every
+//! member, and finalizes it into immutable history.
 //!
 //! Earnings is `PUT`, not `POST`: `payroll_app::set_run_earnings` replaces
 //! the member's whole earnings list, and naming that idempotence in the
@@ -382,6 +383,66 @@ pub(crate) async fn calculate_payroll_run(
         detail,
         refusals_by_member,
     )))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FinalizePayrollRunResponse {
+    finalized: Vec<FinalizedMemberDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalizedMemberDto {
+    employment_id: String,
+    finalized_payroll_id: String,
+}
+
+/// `POST /api/employers/{e}/payroll-runs/{r}/finalize` (issue #56): the one
+/// atomic act that turns a `Calculated` run into immutable history. Answers
+/// **200** with each member's new `finalizedPayrollId` alongside its
+/// `employmentId` — the ids an Operator needs to open what was just written.
+///
+/// Confirms `payroll_run_id` belongs to `employer_id` first (ADR-0017):
+/// `payroll_app::finalize_payroll_run` takes no `EmployerId` of its own, so a
+/// run id belonging to another Employer must be refused here, the same as a
+/// missing one, before finalization runs.
+///
+/// This handler never re-checks a run's status, re-compares a figure, or
+/// decides a run "looks finalizable" (issue #56's own Deep Instructions) — it
+/// calls `payroll_app::finalize_payroll_run` and maps the outcome. Facts
+/// that moved since Calculate, a retry against an already-finalized run, and
+/// a run that was never calculated are all that use case's own refusals,
+/// mapped to their stable codes by [`crate::payroll_error`] — a retried
+/// finalize reads back `payroll_run_already_finalized` with
+/// `details.finalizedPayrollId`, which is the recovery itself (§0.28): no
+/// idempotency key is needed because the database's own uniqueness and the
+/// run lock already make a duplicate impossible.
+pub(crate) async fn finalize_payroll_run(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id)): Path<(String, String)>,
+) -> Result<Json<FinalizePayrollRunResponse>, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+    let run_id = payroll_app::verify_payroll_run_belongs_to_employer(
+        state.db(),
+        &employer_id,
+        &payroll_run_id,
+    )
+    .await?;
+
+    let outcome = payroll_app::finalize_payroll_run(state.db(), &run_id, &context.actor()).await?;
+
+    Ok(Json(FinalizePayrollRunResponse {
+        finalized: outcome
+            .finalized
+            .into_iter()
+            .map(|(employment_id, finalized_payroll_id)| FinalizedMemberDto {
+                employment_id: employment_id.to_string(),
+                finalized_payroll_id: finalized_payroll_id.to_string(),
+            })
+            .collect(),
+    }))
 }
 
 #[derive(Deserialize)]

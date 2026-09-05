@@ -265,6 +265,24 @@ fn calculate_request(
     builder.body(Body::empty()).unwrap()
 }
 
+fn finalize_request(
+    employer_id: &str,
+    run_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/finalize"
+        ))
+        .header(header::COOKIE, cookie);
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
 /// `POST /api/employers/{e}/employments/{em}/compensation-terms`, the route
 /// issue #52 already ships. Used here to give a member the one fact
 /// `calculate` reads first, so a member missing only this one is the
@@ -718,6 +736,7 @@ async fn without_membership_the_routes_answer_404() {
             serde_json::json!({ "earnings": [] }),
         ),
         calculate_request(&employer_id, &run_id, &outsider_cookie, true),
+        finalize_request(&employer_id, &run_id, &outsider_cookie, true),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -767,6 +786,7 @@ async fn every_route_answers_401_without_a_session() {
             serde_json::json!({ "earnings": [] }),
         ),
         calculate_request(&employer_id, &run_id, no_cookie, true),
+        finalize_request(&employer_id, &run_id, no_cookie, true),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -1052,6 +1072,7 @@ async fn a_payroll_operator_reaches_every_route() {
     let cookie = login(&email).await;
     let employer_id = employer_id.to_string();
     let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
     let run_id = create_run(&employer_id, &cookie).await;
 
     for request in [
@@ -1066,6 +1087,7 @@ async fn a_payroll_operator_reaches_every_route() {
             serde_json::json!({ "earnings": [] }),
         ),
         calculate_request(&employer_id, &run_id, &cookie, true),
+        finalize_request(&employer_id, &run_id, &cookie, true),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -1311,17 +1333,12 @@ async fn calculating_an_already_finalized_run_is_refused_with_its_stable_code() 
         .unwrap();
     assert_eq!(calculated.status(), StatusCode::OK);
 
-    // Finalization has no HTTP route yet (a later ticket's own scope), so
-    // the run is finalized directly through `payroll_app` here.
-    let db = test_db().await;
-    let domain_employer_id = payroll::EmployerId::new(employer_id.clone());
-    let payroll_run_id =
-        payroll_app::verify_payroll_run_belongs_to_employer(&db, &domain_employer_id, &run_id)
-            .await
-            .unwrap();
-    payroll_app::finalize_payroll_run(&db, &payroll_run_id, "test-setup")
+    let finalized = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
         .await
         .unwrap();
+    assert_eq!(finalized.status(), StatusCode::OK);
 
     let response = router()
         .await
@@ -1533,4 +1550,217 @@ async fn recalculating_after_a_fact_is_withdrawn_clears_the_stale_figures() {
     .await;
     assert_eq!(refreshed["status"], "draft");
     assert!(refreshed["members"][0]["figures"].is_null());
+}
+
+// ---- issue #56: `POST /api/employers/{e}/payroll-runs/{r}/finalize` ----
+
+/// The route's own happy path: a `Calculated` run's active member finalizes
+/// into immutable history, and the response carries the id an Operator needs
+/// to go and open what was just written — its own `employmentId` beside the
+/// new `finalizedPayrollId` — while a later refresh shows the run itself as
+/// `"finalized"`.
+#[tokio::test]
+async fn finalizing_a_calculated_run_returns_each_members_finalized_payroll_id() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let calculated = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    assert_eq!(calculated.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let finalized = json["finalized"].as_array().unwrap();
+    assert_eq!(finalized.len(), 1);
+    assert_eq!(finalized[0]["employmentId"], employment_id);
+    assert!(
+        !finalized[0]["finalizedPayrollId"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
+    let refreshed = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refreshed["status"], "finalized");
+}
+
+#[tokio::test]
+async fn the_finalize_route_requires_the_salt_request_header() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, false))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "salt_request_header_required");
+}
+
+#[tokio::test]
+async fn a_run_id_belonging_to_another_employer_is_not_found_on_the_finalize_route() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let run_id = create_run(&owning_employer, &owning_cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(finalize_request(&other_employer, &run_id, &other_cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_not_found");
+}
+
+/// A run that was never calculated — still `Draft` — is refused with its own
+/// stable code, distinct from the already-finalized 409 below.
+#[tokio::test]
+async fn finalizing_a_run_that_was_never_calculated_is_refused_with_its_own_stable_code() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_not_calculated");
+}
+
+/// A retried Finalize against an already-`Finalized` run is refused with
+/// `payroll_run_already_finalized` and `details.finalizedPayrollId` names the
+/// payroll that already exists — the recovery *is* the 409 body (§0.28): a
+/// lost response is answered with the success that already happened, not an
+/// unexplained error, and there is no idempotency key mechanism behind it.
+#[tokio::test]
+async fn retrying_finalize_on_an_already_finalized_run_answers_409_with_the_finalized_payroll_id()
+{
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    let first = body_json(
+        router()
+            .await
+            .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let finalized_payroll_id = first["finalized"][0]["finalizedPayrollId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let retried = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(retried.status(), StatusCode::CONFLICT);
+    let json = body_json(retried).await;
+    assert_eq!(json["error"]["code"], "payroll_run_already_finalized");
+    assert_eq!(
+        json["error"]["details"]["finalizedPayrollId"],
+        finalized_payroll_id
+    );
+}
+
+/// A fact that moved since Calculate without a recalculation in between
+/// (issue #56's own acceptance criterion) — proved here with
+/// `UnsupportedDeductionStatus` turning `present`, which `finalize`'s rebuild
+/// of the member's `PayrollInput` re-reads and refuses on, unlike
+/// `payroll_run.status`, which stays `"calculated"` because declaring a
+/// standing fact is Employment-scoped and never reopens a run the way
+/// `set_run_earnings` and a membership removal do.
+///
+/// This lands as `finalization_rebuild_refused`, not one of the three named
+/// mismatch codes: those three name a rebuild that *succeeds* but disagrees
+/// with what was approved, and the only fact that can move that way without
+/// itself blocking recalculation is a `CompensationTerms.effective_from`
+/// correction — a route issue #56 does not ship (§6.5 is a separate,
+/// later ticket). That exact scenario is already proven exhaustively in
+/// `payroll-app`'s own `finalize_payroll_run` tests and in
+/// `crate::payroll_error`'s mapping tests (which also prove the frozen
+/// snapshot never reaches the response body); this test proves the same
+/// "facts moved" story is reachable, and correctly refused, through the HTTP
+/// route this ticket actually adds.
+#[tokio::test]
+async fn finalizing_after_a_fact_moved_without_recalculating_is_refused() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let calculated = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+    assert_eq!(calculated.status(), StatusCode::OK);
+
+    let declared = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({
+                "effectiveFrom": "2026-01-01",
+                "status": "present",
+                "kinds": ["provident_fund"],
+                "acknowledgedDivergingPeriods": [],
+                "reason": "joined a provident fund",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "finalization_rebuild_refused");
+    assert_eq!(json["error"]["details"]["employmentId"], employment_id);
+    assert_eq!(
+        json["error"]["details"]["refusalCode"],
+        "unsupported_deductions_present"
+    );
 }
