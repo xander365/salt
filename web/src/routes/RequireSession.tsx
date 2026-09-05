@@ -6,6 +6,7 @@
 
 import type { ReactNode } from 'react';
 import { Navigate } from 'react-router-dom';
+import { ApiError } from '../api/client';
 import { useSession } from '../session/useSession';
 
 export function RequireSession({ children }: { children: ReactNode }) {
@@ -16,7 +17,21 @@ export function RequireSession({ children }: { children: ReactNode }) {
   }
 
   if (session.isError) {
-    return <Navigate to="/login" replace />;
+    // Only the server's unauthenticated answer means the session is gone.
+    // A 500 or transport failure tells us nothing about the Operator's
+    // session and must remain retryable rather than posing as sign-out.
+    if (session.error instanceof ApiError && session.error.status === 401) {
+      return <Navigate to="/login" replace />;
+    }
+
+    return (
+      <main>
+        <p role="alert">We could not check your session. Please try again.</p>
+        <button type="button" onClick={() => void session.refetch()}>
+          Try again
+        </button>
+      </main>
+    );
   }
 
   return children;

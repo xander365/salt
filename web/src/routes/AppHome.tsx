@@ -13,7 +13,9 @@ export function AppHome() {
 
   async function handleSignOut() {
     await logout.mutateAsync();
-    navigate('/login', { replace: true });
+    // Keep `/app` in history. Back must re-check the deleted server session
+    // and return to `/login` on its resulting 401, never reveal cached UI.
+    navigate('/login');
   }
 
   if (session.data === undefined) {
