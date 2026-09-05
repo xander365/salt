@@ -17,9 +17,9 @@ use crate::prior_employment::get_prior_employment_on;
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use chrono::NaiveDate;
 use payroll::{
-    Earning, EmployerId, EmploymentId, Money, PayPeriod, PaySchedule, PayrollCalculation,
-    PayrollError, PriorEmployment, PriorEmploymentFigures, TaxYear, UnsupportedDeductionKinds,
-    UnsupportedDeductionStatus,
+    Deduction, Earning, EmployerId, EmploymentId, Money, PayPeriod, PaySchedule,
+    PayrollCalculation, PayrollError, PriorEmployment, PriorEmploymentFigures, TaxYear,
+    UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 
 app_id! {
@@ -827,11 +827,15 @@ pub enum PayrollRunBlocker {
 
 /// The figures §0.29 names for one member's current calculation: Basic Pay,
 /// Taxable Allowances, Gross, Taxable Remuneration, PAYE, Employee SSC,
-/// Employer SSC and Net, read straight off a stored `PayrollCalculation`
-/// (issue #55). `basic_pay` and `taxable_allowances` are summed from
-/// `earning_lines` here, once, because `calculate` itself never stores
-/// either as a bare total — `RemunerationBases` accumulates into three
-/// statutory bases, not per-kind totals.
+/// Employer SSC, Total Deductions and Net — nine in all — read straight off
+/// a stored `PayrollCalculation` (issue #55, extended to nine by issue #57
+/// so a finalized read and a working one share one shape). `basic_pay` and
+/// `taxable_allowances` are summed from `earning_lines` here, once, because
+/// `calculate` itself never stores either as a bare total —
+/// `RemunerationBases` accumulates into three statutory bases, not per-kind
+/// totals. `total_deductions` is summed from `calculation.deductions`
+/// itself, the same PAYE-plus-employee-SSC total `net_pay` is already
+/// derived from (INV-007: employer SSC never appears in it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PayrollFigures {
     pub basic_pay: Money,
@@ -841,20 +845,27 @@ pub struct PayrollFigures {
     pub paye: Money,
     pub employee_social_security: Money,
     pub employer_social_security: Money,
+    pub total_deductions: Money,
     pub net_pay: Money,
 }
 
 impl PayrollFigures {
     /// Reads a stored calculation's figures straight off it — no handler
     /// upstream of this ever inspects a figure or recomputes one (issue
-    /// #55's own Deep Instructions).
+    /// #55's own Deep Instructions). Shared by a working run's own detail
+    /// and by [`crate::get_finalized_payroll_detail`] (issue #57), so a
+    /// figure read while `Calculated` and the same figure read back after
+    /// `Finalized` can never silently diverge in shape.
     ///
     /// Summing `earning_lines` into `basic_pay` and `taxable_allowances`
     /// cannot overflow: `calculate` already summed the same lines into
     /// `gross_remuneration` via `checked_add` without overflowing, and
     /// every line is non-negative, so no subset of them can overflow
-    /// either.
-    fn from_calculation(calculation: &PayrollCalculation) -> Self {
+    /// either. Summing `deductions` into `total_deductions` cannot overflow
+    /// for the same reason: `calculate` already subtracted the same two
+    /// amounts from `gross_remuneration` via `checked_sub` without going
+    /// negative.
+    pub(crate) fn from_calculation(calculation: &PayrollCalculation) -> Self {
         let mut basic_pay = Money::ZERO;
         let mut taxable_allowances = Money::ZERO;
         for line in &calculation.earning_lines {
@@ -871,6 +882,14 @@ impl PayrollFigures {
                 }
             }
         }
+        let total_deductions = Money::checked_sum(
+            calculation
+                .deductions
+                .iter()
+                .copied()
+                .map(Deduction::amount),
+        )
+        .expect("see from_calculation's own doc comment: cannot overflow here");
         PayrollFigures {
             basic_pay,
             taxable_allowances,
@@ -879,6 +898,7 @@ impl PayrollFigures {
             paye: calculation.paye.amount,
             employee_social_security: calculation.employee_social_security.amount,
             employer_social_security: calculation.employer_social_security.amount,
+            total_deductions,
             net_pay: calculation.net_pay,
         }
     }

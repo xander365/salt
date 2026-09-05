@@ -29,6 +29,7 @@ mod employers;
 mod employment_facts;
 mod employments;
 mod error;
+mod finalized_payroll;
 mod payroll_error;
 mod payroll_runs;
 mod request_id;

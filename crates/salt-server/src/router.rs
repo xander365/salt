@@ -16,6 +16,7 @@ use crate::employers;
 use crate::employment_facts;
 use crate::employments;
 use crate::error::ApiError;
+use crate::finalized_payroll;
 use crate::payroll_runs;
 use crate::request_id;
 use crate::session;
@@ -101,6 +102,14 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/finalize",
             axum::routing::post(payroll_runs::finalize_payroll_run),
+        )
+        .route(
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",
+            get(finalized_payroll::get_finalized_payroll),
+        )
+        .route(
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
+            get(finalized_payroll::get_finalized_payroll_traces),
         );
 
     #[cfg(feature = "test-support")]

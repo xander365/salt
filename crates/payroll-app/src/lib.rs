@@ -18,6 +18,7 @@ mod employer_access;
 mod employment;
 mod error;
 mod finalize;
+mod finalized_payroll_read;
 mod freeze;
 mod ids;
 mod membership;
@@ -49,6 +50,10 @@ pub use employment::{
 pub use error::{PayrollAppError, ScheduleBoundedFact};
 pub use finalize::{
     FinalizationOutcome, FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run,
+};
+pub use finalized_payroll_read::{
+    FinalizedPayrollDetail, FinalizedPayrollTraces, get_finalized_payroll_detail,
+    get_finalized_payroll_traces,
 };
 pub use membership::{
     EmployerMembershipSnapshot, MembershipRole, MembershipStatus, active_membership_role,
