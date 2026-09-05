@@ -312,6 +312,7 @@ async fn who_am_i_returns_the_operator_and_their_active_memberships() {
     assert_eq!(json["memberships"].as_array().unwrap().len(), 1);
     assert_eq!(json["memberships"][0]["employerId"], employer_id.as_str());
     assert_eq!(json["memberships"][0]["role"], "owner");
+    assert_eq!(json["memberships"][0]["name"], "Acme Corp");
 }
 
 #[tokio::test]

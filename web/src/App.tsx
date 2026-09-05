@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { AppHome } from './routes/AppHome';
+import { AppLanding } from './routes/AppLanding';
+import { EmployerHome } from './routes/EmployerHome';
 import { LoginPage } from './routes/LoginPage';
 import { RequireSession } from './routes/RequireSession';
 import { UnauthorizedRedirect } from './session/UnauthorizedRedirect';
@@ -14,7 +15,15 @@ export function App() {
           path="/app"
           element={
             <RequireSession>
-              <AppHome />
+              <AppLanding />
+            </RequireSession>
+          }
+        />
+        <Route
+          path="/app/:employerId"
+          element={
+            <RequireSession>
+              <EmployerHome />
             </RequireSession>
           }
         />

@@ -13,6 +13,7 @@ export type MembershipRole = 'owner' | 'payrollOperator';
 
 export interface MembershipDto {
   employerId: string;
+  name: string;
   role: MembershipRole;
 }
 

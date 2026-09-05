@@ -21,9 +21,7 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use payroll_app::{
-    MembershipRole, MembershipStatus, OperatorSnapshot, OperatorStatus, PayrollAppError,
-};
+use payroll_app::{MembershipRole, OperatorSnapshot, OperatorStatus, PayrollAppError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -61,6 +59,7 @@ struct OperatorDto {
 #[serde(rename_all = "camelCase")]
 struct MembershipDto {
     employer_id: String,
+    name: String,
     role: RoleDto,
 }
 
@@ -170,15 +169,17 @@ pub(crate) async fn who_am_i(
     // Only active memberships: a revoked one grants nothing (ADR-0017), and
     // this response exists so a client can offer the Employers this
     // Operator can actually enter, not an audit trail of ones they once
-    // could.
-    let memberships = payroll_app::list_employer_memberships(state.db(), &operator.id)
+    // could. Named beside each membership (issue #61) so the browser's
+    // Employer landing screen needs no second call to `GET /api/employers`
+    // to show what it is about to enter.
+    let memberships = payroll_app::list_employers_for_operator(state.db(), &operator.id)
         .await
         .map_err(ApiError::internal)?
         .into_iter()
-        .filter(|membership| membership.status == MembershipStatus::Active)
-        .map(|membership| MembershipDto {
-            employer_id: membership.employer_id.to_string(),
-            role: membership.role.into(),
+        .map(|employer| MembershipDto {
+            employer_id: employer.id.to_string(),
+            name: employer.name,
+            role: employer.role.into(),
         })
         .collect();
 
