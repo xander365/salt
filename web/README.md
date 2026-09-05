@@ -20,7 +20,9 @@ production because Caddy serves both from one origin.
 
 - `npm run dev` — Vite dev server.
 - `npm run typecheck` — `tsc -b`, no emit.
-- `npm run lint` — `oxlint`.
+- `npm run lint` — `oxlint --deny-warnings`. Every finding fails the build:
+  oxlint reports most of its rules at warning severity and would otherwise
+  exit zero on a real mistake, so CI would pass on broken code.
 - `npm run build` — type-check, then the production bundle.
 
 Node version is pinned in `.nvmrc`.
