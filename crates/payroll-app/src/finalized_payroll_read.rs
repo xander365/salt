@@ -96,8 +96,8 @@ pub struct FinalizedPayrollDetail {
 
 /// Reads one `FinalizedPayroll` back for display, scoped to `employer_id` in
 /// SQL (ADR-0017). `payroll_calculation_json` is read and deserialized here
-/// so [`PayrollFigures::from_calculation`] can extract the nine figures —
-/// the deserialized value itself never leaves this function.
+/// so `PayrollFigures::from_calculation` (crate-private) can extract the nine
+/// figures — the deserialized value itself never leaves this function.
 ///
 /// `pay_date` has no column of its own on `finalized_payroll` (§9): it is
 /// the owning `PayrollRun`'s, joined in, exactly as frozen at finalization —
