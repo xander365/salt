@@ -21,13 +21,24 @@ label {
   margin-top: 0.75rem;
 }
 
-input {
+input:not([type='radio'], [type='checkbox']) {
   display: block;
   width: 100%;
   box-sizing: border-box;
   font: inherit;
   padding: 0.4rem;
   margin-top: 0.25rem;
+}
+
+fieldset {
+  margin-top: 0.75rem;
+}
+
+fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: fit-content;
 }
 
 button {
@@ -51,4 +62,8 @@ header {
 header h1 {
   font-size: 1.25rem;
   margin: 0;
+}
+
+section + section {
+  margin-top: 1.5rem;
 }

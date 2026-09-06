@@ -7,21 +7,32 @@
 /**
  * Parses an amount typed as whole currency units (e.g. "1500" or "1500.50")
  * into an exact integer number of cents. `null` for anything that is not a
- * non-negative amount with at most two decimal places — Salt's own `Money`
- * is never negative and never fractional at cents precision.
+ * non-negative amount with at most two decimal places whose cents fit in
+ * JavaScript's safe-integer range — Salt's own `Money` is never negative or
+ * fractional, and the browser refuses rather than rounds a larger value.
  */
 export function parseCentsInput(raw: string): number | null {
   const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(raw.trim());
   if (match === null) {
     return null;
   }
+
   const [, whole, fraction = ''] = match;
-  return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  const exactCents = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
+  if (exactCents > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null;
+  }
+  return Number(exactCents);
 }
 
 /** The inverse of {@link parseCentsInput}, for displaying a recorded amount. */
 export function formatCents(cents: number): string {
-  const whole = Math.trunc(cents / 100);
-  const remainder = String(cents % 100).padStart(2, '0');
+  if (!Number.isSafeInteger(cents) || cents < 0) {
+    throw new RangeError('cents must be a non-negative safe integer');
+  }
+
+  const exactCents = BigInt(cents);
+  const whole = exactCents / 100n;
+  const remainder = String(exactCents % 100n).padStart(2, '0');
   return `${whole}.${remainder}`;
 }

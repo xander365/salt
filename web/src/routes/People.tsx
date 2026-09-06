@@ -12,6 +12,7 @@
 import { type SubmitEvent, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
+import { requestIdOf } from '../api/refusal';
 import { useCreateEmployment, useEmployments } from '../employments/useEmployments';
 
 /**
@@ -56,14 +57,6 @@ function messageForRefusal(caught: unknown): string {
     default:
       return 'Something went wrong. Please try again.';
   }
-}
-
-function requestIdOf(details: unknown): string | null {
-  if (typeof details !== 'object' || details === null) {
-    return null;
-  }
-  const requestId = (details as { requestId?: unknown }).requestId;
-  return typeof requestId === 'string' && requestId !== '' ? requestId : null;
 }
 
 export function People() {

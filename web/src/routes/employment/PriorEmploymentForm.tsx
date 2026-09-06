@@ -67,7 +67,9 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
       const taxableRemunerationCents = parseCentsInput(taxableRemuneration);
       const payeCents = parseCentsInput(paye);
       if (taxableRemunerationCents === null || payeCents === null) {
-        setFieldError('Enter both the taxable remuneration and the PAYE already withheld.');
+        setFieldError(
+          'Enter both amounts as non-negative values with no more than two decimal places. Very large amounts are not supported.',
+        );
         return;
       }
       request = { taxYear: taxYearNumber, status, taxableRemunerationCents, payeCents };

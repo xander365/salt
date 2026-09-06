@@ -11,12 +11,42 @@
 // say about the others.
 
 import { Link, useParams } from 'react-router-dom';
+import { ApiError } from '../api/client';
+import { requestIdOf } from '../api/refusal';
 import { useEmployment } from '../employments/useEmployments';
 import { formatCents } from '../money';
 import { CompensationTermsForm } from './employment/CompensationTermsForm';
 import { OpeningBalanceForm } from './employment/OpeningBalanceForm';
 import { PriorEmploymentForm } from './employment/PriorEmploymentForm';
 import { UnsupportedDeductionStatusForm } from './employment/UnsupportedDeductionStatusForm';
+import { NotFound } from './NotFound';
+
+function employmentWasNotFound(caught: unknown): boolean {
+  return (
+    caught instanceof ApiError &&
+    ['not_found', 'employer_not_found', 'employment_not_found'].includes(caught.code)
+  );
+}
+
+function employmentLoadFailureMessage(caught: unknown): string {
+  if (caught instanceof ApiError && caught.code === 'internal_error') {
+    const requestId = requestIdOf(caught.details);
+    if (requestId !== null) {
+      return `We could not load this Employment. Try again, and quote reference ${requestId} if the problem continues.`;
+    }
+  }
+  return 'We could not load this Employment.';
+}
+
+function currentPayText(cents: number | null): string {
+  if (cents === null) {
+    return 'not yet recorded';
+  }
+  if (!Number.isSafeInteger(cents) || cents < 0) {
+    return 'unavailable because the amount cannot be displayed exactly';
+  }
+  return formatCents(cents);
+}
 
 export function Employment() {
   const { employmentId } = useParams();
@@ -26,17 +56,23 @@ export function Employment() {
 
   const employment = useEmployment(employmentId);
 
+  if (employment.isError && employmentWasNotFound(employment.error)) {
+    return <NotFound />;
+  }
+
   return (
     <main>
       <p>
-        <Link to="..">← People</Link>
+        <Link to=".." relative="path">
+          ← People
+        </Link>
       </p>
 
       {employment.isPending && <p>Loading…</p>}
 
       {employment.isError && (
         <p role="alert">
-          We could not load this employee.{' '}
+          {employmentLoadFailureMessage(employment.error)}{' '}
           <button type="button" onClick={() => void employment.refetch()}>
             Try again
           </button>
@@ -50,12 +86,7 @@ export function Employment() {
             Employed from {employment.data.startDate}
             {employment.data.endDate === null ? '' : ` to ${employment.data.endDate}`}.
           </p>
-          <p>
-            Current pay:{' '}
-            {employment.data.currentBasicPayCents === null
-              ? 'not yet recorded'
-              : formatCents(employment.data.currentBasicPayCents)}
-          </p>
+          <p>Current pay: {currentPayText(employment.data.currentBasicPayCents)}</p>
 
           <CompensationTermsForm employmentId={employmentId} />
           <PriorEmploymentForm employmentId={employmentId} />

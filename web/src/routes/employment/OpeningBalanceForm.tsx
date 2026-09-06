@@ -69,7 +69,9 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
     const priorTaxableRemunerationCents = parseCentsInput(priorTaxableRemuneration);
     const priorPayeCents = parseCentsInput(priorPaye);
     if (priorTaxableRemunerationCents === null || priorPayeCents === null) {
-      setFieldError('Enter both amounts, e.g. 0.00.');
+      setFieldError(
+        'Enter both amounts as non-negative values with no more than two decimal places, e.g. 0.00. Very large amounts are not supported.',
+      );
       return;
     }
     setFieldError(null);
@@ -84,7 +86,7 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
     try {
       await recordOpeningBalance.mutateAsync(request);
       setSaved(
-        `Recorded: prior taxable remuneration ${formatCents(priorTaxableRemunerationCents)}, prior PAYE ${formatCents(priorPayeCents)}, covering up to ${saltCoverageStart}.`,
+        `Recorded: Salt starts with the pay period ending ${saltCoverageStart}; earlier periods carry prior taxable remuneration ${formatCents(priorTaxableRemunerationCents)} and prior PAYE ${formatCents(priorPayeCents)}.`,
       );
     } catch (caught) {
       setError(messageForRefusal(caught));
@@ -95,8 +97,8 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
     <section>
       <h3>Opening balance</h3>
       <p>
-        Only needed when Salt takes over part-way through a tax year: what this employee was
-        already paid, and already had withheld, before Salt started.
+        Only needed when Salt takes over part-way through a tax year. Choose the first pay period
+        Salt will process; the amounts cover earlier periods in that tax year.
       </p>
       <form onSubmit={handleSubmit}>
         <div>
@@ -113,7 +115,7 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
           />
         </div>
         <div>
-          <label htmlFor={saltCoverageStartId}>Last pay period Salt does not cover</label>
+          <label htmlFor={saltCoverageStartId}>First Salt pay period (end date)</label>
           <input
             id={saltCoverageStartId}
             type="date"

@@ -60,7 +60,9 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
 
     const basicPayCents = parseCentsInput(basicPay);
     if (basicPayCents === null) {
-      setFieldError('Enter an amount, e.g. 15000.00.');
+      setFieldError(
+        'Enter a non-negative amount with no more than two decimal places, e.g. 15000.00. Very large amounts are not supported.',
+      );
       return;
     }
     setFieldError(null);
