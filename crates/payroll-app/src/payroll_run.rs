@@ -927,6 +927,7 @@ impl PayrollFigures {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayrollRunMember {
     pub employment_id: EmploymentId,
+    pub finalized_payroll_id: Option<FinalizedPayrollId>,
     pub full_name: String,
     pub earnings: Vec<Earning>,
     pub blockers: Vec<PayrollRunBlocker>,
@@ -985,13 +986,14 @@ pub async fn get_payroll_run_detail(
 
     type MemberRow = (
         String,
+        Option<String>,
         String,
         Option<serde_json::Value>,
         Option<serde_json::Value>,
     );
 
     let member_rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT employment.id, person.full_name, earnings.earning_jsons,
+        "SELECT employment.id, finalized_payroll.id::text, person.full_name, earnings.earning_jsons,
                 working_payroll_calculation.payroll_calculation_json
          FROM payroll_run_employment
          JOIN employment
@@ -1008,6 +1010,9 @@ pub async fn get_payroll_run_detail(
          LEFT JOIN working_payroll_calculation
            ON working_payroll_calculation.payroll_run_id = payroll_run_employment.payroll_run_id
           AND working_payroll_calculation.employment_id = payroll_run_employment.employment_id
+         LEFT JOIN finalized_payroll
+           ON finalized_payroll.payroll_run_id = payroll_run_employment.payroll_run_id
+          AND finalized_payroll.employment_id = payroll_run_employment.employment_id
          WHERE payroll_run_employment.payroll_run_id = $1::uuid
            AND payroll_run_employment.removed_at IS NULL
          ORDER BY employment.id",
@@ -1017,7 +1022,9 @@ pub async fn get_payroll_run_detail(
     .await?;
 
     let mut members = Vec::with_capacity(member_rows.len());
-    for (employment_id, full_name, earning_jsons, calculation_json) in member_rows {
+    for (employment_id, finalized_payroll_id, full_name, earning_jsons, calculation_json) in
+        member_rows
+    {
         let earnings = earning_jsons
             .map(|value| {
                 serde_json::from_value::<Vec<Earning>>(value)
@@ -1035,6 +1042,7 @@ pub async fn get_payroll_run_detail(
         let blockers = member_blockers(db, &employment_id, period).await?;
         members.push(PayrollRunMember {
             employment_id,
+            finalized_payroll_id: finalized_payroll_id.map(FinalizedPayrollId::new),
             full_name,
             earnings,
             blockers,

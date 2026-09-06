@@ -1612,8 +1612,8 @@ async fn recalculating_after_a_fact_is_withdrawn_clears_the_stale_figures() {
 /// The route's own happy path: a `Calculated` run's active member finalizes
 /// into immutable history, and the response carries the id an Operator needs
 /// to go and open what was just written — its own `employmentId` beside the
-/// new `finalizedPayrollId` — while a later refresh shows the run itself as
-/// `"finalized"`.
+/// new `finalizedPayrollId` — while a later refresh shows both the run as
+/// `"finalized"` and that member's immutable record.
 #[tokio::test]
 async fn finalizing_a_calculated_run_returns_each_members_finalized_payroll_id() {
     let (cookie, employer_id) = an_authorized_operator().await;
@@ -1654,6 +1654,10 @@ async fn finalizing_a_calculated_run_returns_each_members_finalized_payroll_id()
     )
     .await;
     assert_eq!(refreshed["status"], "finalized");
+    assert_eq!(
+        refreshed["members"][0]["finalizedPayrollId"],
+        json["finalized"][0]["finalizedPayrollId"]
+    );
 }
 
 #[tokio::test]

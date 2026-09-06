@@ -41,6 +41,7 @@ use crate::state::AppState;
 pub(crate) struct FinalizedPayrollDetailResponse {
     finalized_payroll_id: String,
     employment_id: String,
+    full_name: String,
     period: PayPeriodDto,
     pay_date: NaiveDate,
     figures: FiguresDto,
@@ -67,6 +68,7 @@ pub(crate) async fn get_finalized_payroll(
     Ok(Json(FinalizedPayrollDetailResponse {
         finalized_payroll_id: detail.id.to_string(),
         employment_id: detail.employment_id.to_string(),
+        full_name: detail.full_name,
         period: PayPeriodDto::from(detail.period),
         pay_date: detail.pay_date,
         figures: figures_to_dto(detail.figures),

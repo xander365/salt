@@ -387,6 +387,7 @@ async fn reading_a_finalized_payroll_returns_the_nine_figures_the_period_the_pay
 
     assert_eq!(body["finalizedPayrollId"], finalized_payroll_id);
     assert_eq!(body["employmentId"], employment_id);
+    assert_eq!(body["fullName"], "Ada Lovelace");
     assert_eq!(body["period"]["start"], "2026-01-01");
     assert_eq!(body["period"]["end"], "2026-01-31");
     assert_eq!(body["payDate"], "2026-02-05");

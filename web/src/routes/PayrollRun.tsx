@@ -153,6 +153,36 @@ function Member({
   );
 }
 
+function FinalizedLinks({
+  run,
+  employerId,
+  links,
+}: {
+  run: PayrollRunDetailResponse;
+  employerId: string;
+  links: { employmentId: string; finalizedPayrollId: string }[];
+}) {
+  return (
+    <div role="status">
+      <p>Finalized. Open each person’s finalized payroll:</p>
+      <ul>
+        {links.map((entry) => {
+          const member = run.members.find(
+            (candidate) => candidate.employmentId === entry.employmentId,
+          );
+          return (
+            <li key={entry.employmentId}>
+              <Link to={finalizedPayrollPath(employerId, entry.finalizedPayrollId)}>
+                {member?.fullName ?? entry.employmentId}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 /**
  * `POST .../payroll-runs/{r}/finalize` (issue #66): a plain confirmation
  * naming how many people the run covers — no password re-entry, no typed
@@ -176,19 +206,21 @@ function Member({
 function Finalize({
   run,
   employerId,
-  payrollRunId,
   onCalculateAgain,
   calculateIsPending,
+  finalize,
+  confirming,
+  setConfirming,
 }: {
   run: PayrollRunDetailResponse;
   employerId: string;
-  payrollRunId: string;
   onCalculateAgain: () => void;
   calculateIsPending: boolean;
+  finalize: ReturnType<typeof useFinalizePayrollRun>;
+  confirming: boolean;
+  setConfirming: (confirming: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const finalize = useFinalizePayrollRun(payrollRunId);
-  const [confirming, setConfirming] = useState(false);
   const [finalizedLinks, setFinalizedLinks] = useState<
     { employmentId: string; finalizedPayrollId: string }[] | null
   >(null);
@@ -219,26 +251,14 @@ function Finalize({
     }
   }
 
-  if (finalizedLinks !== null) {
-    return (
-      <div role="status">
-        <p>Finalized. Open each person’s finalized payroll:</p>
-        <ul>
-          {finalizedLinks.map((entry) => {
-            const member = run.members.find(
-              (candidate) => candidate.employmentId === entry.employmentId,
-            );
-            return (
-              <li key={entry.employmentId}>
-                <Link to={finalizedPayrollPath(employerId, entry.finalizedPayrollId)}>
-                  {member?.fullName ?? entry.employmentId}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-    );
+  const finalizedLinksFromRun = run.members.flatMap((member) =>
+    member.finalizedPayrollId === null
+      ? []
+      : [{ employmentId: member.employmentId, finalizedPayrollId: member.finalizedPayrollId }],
+  );
+  const links = finalizedLinks ?? finalizedLinksFromRun;
+  if (links.length > 0) {
+    return <FinalizedLinks run={run} employerId={employerId} links={links} />;
   }
 
   if (run.status !== 'calculated') {
@@ -255,16 +275,28 @@ function Finalize({
         <p>
           This creates immutable payroll history for {run.members.length}{' '}
           {run.members.length === 1 ? 'person' : 'people'}.{' '}
-          <button type="button" onClick={() => void handleFinalize()} disabled={finalize.isPending}>
+          <button
+            type="button"
+            onClick={() => void handleFinalize()}
+            disabled={finalize.isPending || calculateIsPending}
+          >
             {finalize.isPending ? 'Finalizing…' : 'Confirm finalize'}
           </button>{' '}
-          <button type="button" onClick={() => setConfirming(false)} disabled={finalize.isPending}>
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            disabled={finalize.isPending || calculateIsPending}
+          >
             Cancel
           </button>
         </p>
       ) : (
         <p>
-          <button type="button" onClick={() => setConfirming(true)}>
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            disabled={calculateIsPending || finalize.isPending}
+          >
             Finalize
           </button>
         </p>
@@ -293,12 +325,22 @@ export function PayrollRun() {
   const employerId = useEmployerId();
   const run = usePayrollRun(runId);
   const calculate = useCalculatePayrollRun(runId);
+  const finalize = useFinalizePayrollRun(runId);
+  const [confirmingFinalize, setConfirmingFinalize] = useState(false);
 
   if (run.isError && runWasNotFound(run.error)) {
     return <NotFound />;
   }
 
   async function handleCalculate() {
+    if (finalize.isPending) {
+      return;
+    }
+    // A calculation replaces the figures the Operator had confirmed. Close
+    // that confirmation and retire a prior mismatch before the new result can
+    // be finalized, so approval always follows a visible current calculation.
+    setConfirmingFinalize(false);
+    finalize.reset();
     try {
       await calculate.mutateAsync();
     } catch {
@@ -352,7 +394,7 @@ export function PayrollRun() {
               <button
                 type="button"
                 onClick={() => void handleCalculate()}
-                disabled={calculate.isPending}
+                disabled={calculate.isPending || finalize.isPending}
               >
                 {calculate.isPending ? 'Calculating…' : 'Calculate'}
               </button>
@@ -364,9 +406,11 @@ export function PayrollRun() {
           <Finalize
             run={run.data}
             employerId={employerId}
-            payrollRunId={runId}
             onCalculateAgain={() => void handleCalculate()}
             calculateIsPending={calculate.isPending}
+            finalize={finalize}
+            confirming={confirmingFinalize}
+            setConfirming={setConfirmingFinalize}
           />
 
           {run.data.members.length === 0 ? (

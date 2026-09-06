@@ -201,6 +201,7 @@ pub(crate) struct PayrollRunDetailResponse {
 #[serde(rename_all = "camelCase")]
 struct PayrollRunMemberDto {
     employment_id: String,
+    finalized_payroll_id: Option<String>,
     full_name: String,
     earnings: Vec<EarningLineDto>,
     blockers: Vec<BlockerDto>,
@@ -299,6 +300,7 @@ fn payroll_run_detail_to_response(
                     .map(|refusal| refusal_to_dto(&refusal));
                 PayrollRunMemberDto {
                     employment_id: member.employment_id.to_string(),
+                    finalized_payroll_id: member.finalized_payroll_id.map(|id| id.to_string()),
                     full_name: member.full_name,
                     earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
                     blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),

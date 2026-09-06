@@ -88,6 +88,7 @@ fn calculation_from_snapshot(
 pub struct FinalizedPayrollDetail {
     pub id: FinalizedPayrollId,
     pub employment_id: EmploymentId,
+    pub full_name: String,
     pub period: PayPeriod,
     pub pay_date: NaiveDate,
     pub figures: PayrollFigures,
@@ -112,6 +113,7 @@ pub async fn get_finalized_payroll_detail(
 
     type Row = (
         String,
+        String,
         NaiveDate,
         NaiveDate,
         NaiveDate,
@@ -121,12 +123,15 @@ pub async fn get_finalized_payroll_detail(
     );
 
     let row: Option<Row> = sqlx::query_as(
-        "SELECT finalized_payroll.employment_id, finalized_payroll.period_start,
+        "SELECT finalized_payroll.employment_id, person.full_name, finalized_payroll.period_start,
                 finalized_payroll.period_end, payroll_run.pay_date,
                 finalized_payroll.snapshot_schema_version,
                 finalized_payroll.payroll_calculation_json, finalized_payroll.salt_version
          FROM finalized_payroll
          JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
+         JOIN employment ON employment.id = finalized_payroll.employment_id
+         JOIN person ON person.id = employment.person_id
+                    AND person.employer_id = employment.employer_id
          WHERE finalized_payroll.id = $1::uuid AND finalized_payroll.employer_id = $2",
     )
     .bind(finalized_payroll_id.as_str())
@@ -136,6 +141,7 @@ pub async fn get_finalized_payroll_detail(
 
     let (
         employment_id,
+        full_name,
         period_start,
         period_end,
         pay_date,
@@ -150,6 +156,7 @@ pub async fn get_finalized_payroll_detail(
     Ok(FinalizedPayrollDetail {
         id: finalized_payroll_id,
         employment_id: EmploymentId::new(employment_id),
+        full_name,
         period: PayPeriod::new(period_start, period_end)
             .expect("finalized_payroll CHECK: period_end is never before period_start"),
         pay_date,

@@ -66,7 +66,8 @@ export function FinalizedPayroll() {
       {finalizedPayroll.isSuccess && (
         <>
           <h2>
-            {finalizedPayroll.data.period.start} to {finalizedPayroll.data.period.end}
+            {finalizedPayroll.data.fullName}: {finalizedPayroll.data.period.start} to{' '}
+            {finalizedPayroll.data.period.end}
           </h2>
           <p>Pay date: {finalizedPayroll.data.payDate}</p>
           <p>This payroll is finalized and cannot be changed.</p>

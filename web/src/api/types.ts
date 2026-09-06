@@ -204,6 +204,7 @@ export interface RefusalDto {
 
 export interface PayrollRunMemberDto {
   employmentId: string;
+  finalizedPayrollId: string | null;
   fullName: string;
   earnings: EarningLineDto[];
   blockers: PayrollRunBlockerDto[];
@@ -241,6 +242,7 @@ export interface FinalizePayrollRunResponse {
 export interface FinalizedPayrollDetailResponse {
   finalizedPayrollId: string;
   employmentId: string;
+  fullName: string;
   period: PayPeriodDto;
   payDate: string;
   figures: FiguresDto;
