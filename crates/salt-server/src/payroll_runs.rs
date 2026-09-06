@@ -227,56 +227,33 @@ fn blocker_to_dto(blocker: PayrollRunBlocker) -> BlockerDto {
 /// by a working run's own detail/calculate response and by
 /// [`crate::finalized_payroll`]'s finalized-payroll detail (issue #57), so
 /// the same nine names appear on the wire whether the run is `Calculated` or
-/// already `Finalized`. Decimal strings preserve every cents-exact integer
-/// across JSON's JavaScript number boundary (INV-001).
+/// already `Finalized`. Cents-exact integers on the wire, never a JSON float
+/// (INV-001).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FiguresDto {
-    basic_pay_cents: String,
-    taxable_allowances_cents: String,
-    gross_cents: String,
-    taxable_remuneration_cents: String,
-    paye_cents: String,
-    employee_ssc_cents: String,
-    employer_ssc_cents: String,
-    total_deductions_cents: String,
-    net_cents: String,
+    basic_pay_cents: i64,
+    taxable_allowances_cents: i64,
+    gross_cents: i64,
+    taxable_remuneration_cents: i64,
+    paye_cents: i64,
+    employee_ssc_cents: i64,
+    employer_ssc_cents: i64,
+    total_deductions_cents: i64,
+    net_cents: i64,
 }
 
 pub(crate) fn figures_to_dto(figures: PayrollFigures) -> FiguresDto {
     FiguresDto {
-        basic_pay_cents: figures.basic_pay.cents().to_string(),
-        taxable_allowances_cents: figures.taxable_allowances.cents().to_string(),
-        gross_cents: figures.gross.cents().to_string(),
-        taxable_remuneration_cents: figures.taxable_remuneration.cents().to_string(),
-        paye_cents: figures.paye.cents().to_string(),
-        employee_ssc_cents: figures.employee_social_security.cents().to_string(),
-        employer_ssc_cents: figures.employer_social_security.cents().to_string(),
-        total_deductions_cents: figures.total_deductions.cents().to_string(),
-        net_cents: figures.net_pay.cents().to_string(),
-    }
-}
-
-#[cfg(test)]
-mod figures_dto_tests {
-    use super::FiguresDto;
-
-    #[test]
-    fn cents_are_json_strings_so_a_browser_cannot_round_them() {
-        let value = serde_json::to_value(FiguresDto {
-            basic_pay_cents: "9007199254740993".to_owned(),
-            taxable_allowances_cents: "0".to_owned(),
-            gross_cents: "9007199254740993".to_owned(),
-            taxable_remuneration_cents: "9007199254740993".to_owned(),
-            paye_cents: "0".to_owned(),
-            employee_ssc_cents: "0".to_owned(),
-            employer_ssc_cents: "0".to_owned(),
-            total_deductions_cents: "0".to_owned(),
-            net_cents: "9007199254740993".to_owned(),
-        })
-        .expect("FiguresDto always serializes");
-
-        assert_eq!(value["basicPayCents"], "9007199254740993");
+        basic_pay_cents: figures.basic_pay.cents(),
+        taxable_allowances_cents: figures.taxable_allowances.cents(),
+        gross_cents: figures.gross.cents(),
+        taxable_remuneration_cents: figures.taxable_remuneration.cents(),
+        paye_cents: figures.paye.cents(),
+        employee_ssc_cents: figures.employee_social_security.cents(),
+        employer_ssc_cents: figures.employer_social_security.cents(),
+        total_deductions_cents: figures.total_deductions.cents(),
+        net_cents: figures.net_pay.cents(),
     }
 }
 

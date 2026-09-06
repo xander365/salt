@@ -25,15 +25,10 @@ export function parseCentsInput(raw: string): number | null {
   return Number(exactCents);
 }
 
-/** The inverse of {@link parseCentsInput}, for displaying a recorded amount.
- * Accepts `bigint` too because a server-side `Money` may exceed JavaScript's
- * safe-number range while still being exact cents. */
-export function formatCents(cents: number | bigint): string {
-  if (typeof cents === 'number' && (!Number.isSafeInteger(cents) || cents < 0)) {
-    throw new RangeError('numeric cents must be a non-negative safe integer');
-  }
-  if (typeof cents === 'bigint' && cents < 0n) {
-    throw new RangeError('cents must be non-negative');
+/** The inverse of {@link parseCentsInput}, for displaying a recorded amount. */
+export function formatCents(cents: number): string {
+  if (!Number.isSafeInteger(cents) || cents < 0) {
+    throw new RangeError('cents must be a non-negative safe integer');
   }
 
   const exactCents = BigInt(cents);

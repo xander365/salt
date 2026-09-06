@@ -65,9 +65,9 @@ function calculateFailureMessage(caught: unknown): string {
  * the one figure says what it cannot show and the rest of the payroll still
  * reads. Same answer `Employment.tsx`'s own `currentPayText` gives.
  */
-function centsText(cents: string): string {
+function centsText(cents: number): string {
   try {
-    return formatCents(BigInt(cents));
+    return formatCents(cents);
   } catch {
     return 'an amount that cannot be displayed exactly';
   }
@@ -158,8 +158,17 @@ function Member({
           this member's current calculation, however it got there; the
           second is only ever what the very last Calculate said, and is
           never on a plain reload. Each renders from its own field, and
-          neither is inferred from the other. */}
-      {member.figures !== null && <Figures figures={member.figures} />}
+          neither is inferred from the other.
+
+          A member with no `figures` says so plainly. After a plain reload
+          its `refusal` is gone even though the reason it refused is not,
+          and an empty `blockers` list beside no figures would otherwise
+          read as a member with nothing wrong at all (§0.31). */}
+      {member.figures === null ? (
+        <p>No figures yet. Calculate this run to see them.</p>
+      ) : (
+        <Figures figures={member.figures} />
+      )}
 
       {/* `role="alert"`, unlike a blocker: this is what the Calculate an
           Operator just ran said about this member, not standing content

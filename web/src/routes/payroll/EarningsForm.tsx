@@ -4,11 +4,13 @@
 // the one an Operator just typed — editing twice this way can never leave a
 // stale line behind (issue #65's own first acceptance criterion).
 //
-// A `basicPay` line is round-tripped read-only rather than dropped: it is
-// derived from CompensationTerms and this route refuses a request that
-// tries to set one (`crates/salt-server/src/payroll_runs.rs`'s own module
-// doc), so this form only ever edits `taxableAllowance` lines and sends any
-// other kind straight back unchanged.
+// The whole list this form sends is every `taxableAllowance` line it holds,
+// and that is the whole of what a member's Earnings can be: `basicPay` is
+// derived from CompensationTerms, `set_run_earnings` refuses a request
+// carrying one, and nothing therefore ever stores one for a member to read
+// back (`crates/payroll-app/src/payroll_run.rs`'s own `set_run_earnings`).
+// Echoing a `basicPay` line back into the `PUT` would not preserve it — it
+// would guarantee the save was refused.
 //
 // This form does no arithmetic, previews no PAYE and recomputes no net pay
 // when an allowance is typed (§0's Further Notes) — it sends amounts and
@@ -46,10 +48,10 @@ function earningsFailureMessage(caught: unknown): string {
   }
 }
 
-/** A read-only line's amount, guarded the same way every money display on
- * this screen is (`PayrollRun.tsx`'s own `earningAmountText`) — `Money` on
- * the wire is never negative or unsafe, but a display that trusted that
- * absolutely would blank the whole form the one time it was wrong. */
+/** An amount from the wire, guarded the same way every money display on
+ * this screen is (`PayrollRun.tsx`'s own `centsText`) — `Money` on the wire
+ * is never negative or unsafe, but a display that trusted that absolutely
+ * would blank the whole form the one time it was wrong. */
 function safeAmountText(cents: number): string {
   return Number.isSafeInteger(cents) && cents >= 0 ? formatCents(cents) : 'unavailable';
 }
@@ -70,10 +72,6 @@ export function EarningsForm({
 }) {
   const setEarnings = useSetRunEarnings(payrollRunId);
 
-  // The member's non-editable lines, carried through unchanged on every
-  // save — never re-derived from an input, since this form has none for
-  // them.
-  const [otherLines] = useState(() => earnings.filter((line) => line.kind !== 'taxableAllowance'));
   const [allowances, setAllowances] = useState(() =>
     earnings
       .filter((line) => line.kind === 'taxableAllowance')
@@ -130,10 +128,13 @@ export function EarningsForm({
     }
     setLineError(null);
 
-    const request: EarningLineDto[] = [
-      ...otherLines,
-      ...amountsCents.map((amountCents) => ({ kind: 'taxableAllowance' as const, amountCents })),
-    ];
+    // The whole list, every time (issue #65's own first acceptance
+    // criterion): `PUT` replaces what is stored, so a line an Operator
+    // removed is gone precisely because this body does not carry it.
+    const request: EarningLineDto[] = amountsCents.map((amountCents) => ({
+      kind: 'taxableAllowance' as const,
+      amountCents,
+    }));
 
     try {
       await setEarnings.mutateAsync({ employmentId, earnings: request });
@@ -145,14 +146,6 @@ export function EarningsForm({
 
   return (
     <form onSubmit={(event) => void handleSubmit(event)}>
-      {otherLines.length > 0 && (
-        <ul>
-          {otherLines.map((line, index) => (
-            <li key={`other-${index}`}>Basic pay: {safeAmountText(line.amountCents)}</li>
-          ))}
-        </ul>
-      )}
-
       {allowances.length === 0 ? (
         <p>No taxable allowances on this line.</p>
       ) : (
