@@ -6,21 +6,7 @@
 // whichever screen shows it.
 
 import type { FiguresDto } from '../../api/types';
-import { formatCents } from '../../money';
-
-/**
- * `formatCents` throws rather than show an amount it cannot render exactly
- * (INV-001, `money.ts`). Thrown from here that would blank the whole screen
- * over one figure, hiding every other one — so the one figure says what it
- * cannot show and the rest still reads.
- */
-function centsText(cents: number): string {
-  try {
-    return formatCents(cents);
-  } catch {
-    return 'an amount that cannot be displayed exactly';
-  }
-}
+import { centsText } from '../../money';
 
 /** The nine figures §0.29 names, in the order it names them. */
 const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [

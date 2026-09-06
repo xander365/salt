@@ -10,16 +10,18 @@
 // readiness of its own: an empty `blockers` list is the server's own answer
 // that a member is ready, and nothing else here decides that.
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import type {
+  EarningLineDto,
   PayrollRunBlockerDto,
   PayrollRunDetailResponse,
   PayrollRunMemberDto,
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
+import { centsText } from '../money';
 import {
   useCalculatePayrollRun,
   useFinalizePayrollRun,
@@ -32,7 +34,7 @@ import { EarningsForm } from './payroll/EarningsForm';
 import {
   alreadyFinalizedDetailsOf,
   finalizeFailureMessage,
-  isFinalizationMismatch,
+  offersCalculateAgain,
 } from './payroll/finalizeText';
 import { Figures } from './payroll/Figures';
 import { refusalSentence } from './payroll/refusalText';
@@ -84,24 +86,49 @@ function blockerFixPath(
   return section === null ? path : `${path}#${section}`;
 }
 
+/** A finalized run's Earnings, read back rather than edited. `PUT
+ * .../earnings` refuses once history is written (`payroll_run_already_finalized`),
+ * so offering the editor here would be a form whose every save is a refusal
+ * — the same reason Finalize and Calculate are both gone by this point. */
+function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
+  if (earnings.length === 0) {
+    return <p>No taxable allowances on this line.</p>;
+  }
+  return (
+    <ul>
+      {earnings.map((line, index) => (
+        // The wire order is the stored order and there is no id to key on,
+        // and this list is never reordered or edited — it is read-only.
+        <li key={index}>Taxable allowance {centsText(line.amountCents)}</li>
+      ))}
+    </ul>
+  );
+}
+
 function Member({
   member,
   employerId,
   payrollRunId,
+  runIsFinalized,
 }: {
   member: PayrollRunMemberDto;
   employerId: string;
   payrollRunId: string;
+  runIsFinalized: boolean;
 }) {
   return (
     <li>
       <h3>{member.fullName}</h3>
 
-      <EarningsForm
-        payrollRunId={payrollRunId}
-        employmentId={member.employmentId}
-        earnings={member.earnings}
-      />
+      {runIsFinalized ? (
+        <FinalizedEarnings earnings={member.earnings} />
+      ) : (
+        <EarningsForm
+          payrollRunId={payrollRunId}
+          employmentId={member.employmentId}
+          earnings={member.earnings}
+        />
+      )}
 
       {/* The two "present" blockers matter as much as the two "unknown"
           ones. An empty list says only that no standing fact is currently
@@ -153,17 +180,24 @@ function Member({
   );
 }
 
+/** `announce` only when this list is what the Operator's own Finalize just
+ * answered. On a plain load of an already-finalized run it is standing
+ * content that was on the screen before they read anything, and marking it a
+ * status would make a screen reader read it out on every visit — the same
+ * distinction `Member` keeps between a blocker and a refusal. */
 function FinalizedLinks({
   run,
   employerId,
   links,
+  announce,
 }: {
   run: PayrollRunDetailResponse;
   employerId: string;
   links: { employmentId: string; finalizedPayrollId: string }[];
+  announce: boolean;
 }) {
   return (
-    <div role="status">
+    <div role={announce ? 'status' : undefined}>
       <p>Finalized. Open each person’s finalized payroll:</p>
       <ul>
         {links.map((entry) => {
@@ -224,6 +258,31 @@ function Finalize({
   const [finalizedLinks, setFinalizedLinks] = useState<
     { employmentId: string; finalizedPayrollId: string }[] | null
   >(null);
+  // Set only when `payroll_run_already_finalized` carried neither a single
+  // `finalizedPayrollId` nor a list this screen could read. The run itself
+  // still knows — its own re-read (invalidated by `useFinalizePayrollRun`)
+  // carries each member's `finalizedPayrollId` — so this says the true thing
+  // while that lands, and never leaves the Operator looking at a Finalize
+  // button that silently did nothing.
+  const [alreadyFinalized, setAlreadyFinalized] = useState(false);
+
+  // A keyboard Operator opening or closing the confirmation would otherwise
+  // lose focus to the document body, because the button they just pressed is
+  // the one React unmounts (§0's story 51). Focus follows the decision
+  // instead: onto "Confirm finalize" when it appears, back onto "Finalize"
+  // when they cancel. Only ever after the Operator's own click — the
+  // `confirming` state changes for no other reason.
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const finalizeRef = useRef<HTMLButtonElement>(null);
+  const hasConfirmed = useRef(false);
+  useEffect(() => {
+    if (confirming) {
+      hasConfirmed.current = true;
+      confirmRef.current?.focus();
+    } else if (hasConfirmed.current) {
+      finalizeRef.current?.focus();
+    }
+  }, [confirming]);
 
   async function handleFinalize() {
     try {
@@ -244,8 +303,10 @@ function Finalize({
         setConfirming(false);
         if (finalizedPayrollId !== null) {
           navigate(finalizedPayrollPath(employerId, finalizedPayrollId));
-        } else {
+        } else if (finalizedPayrolls.length > 0) {
           setFinalizedLinks(finalizedPayrolls);
+        } else {
+          setAlreadyFinalized(true);
         }
       }
     }
@@ -258,7 +319,20 @@ function Finalize({
   );
   const links = finalizedLinks ?? finalizedLinksFromRun;
   if (links.length > 0) {
-    return <FinalizedLinks run={run} employerId={employerId} links={links} />;
+    return (
+      <FinalizedLinks
+        run={run}
+        employerId={employerId}
+        links={links}
+        announce={finalizedLinks !== null}
+      />
+    );
+  }
+
+  // Still never a red banner (§0.28): the run finalized, and the only thing
+  // missing is where to go and look at it.
+  if (alreadyFinalized) {
+    return <p role="status">This payroll run is already finalized.</p>;
   }
 
   if (run.status !== 'calculated') {
@@ -277,6 +351,7 @@ function Finalize({
           {run.members.length === 1 ? 'person' : 'people'}.{' '}
           <button
             type="button"
+            ref={confirmRef}
             onClick={() => void handleFinalize()}
             disabled={finalize.isPending || calculateIsPending}
           >
@@ -294,6 +369,7 @@ function Finalize({
         <p>
           <button
             type="button"
+            ref={finalizeRef}
             onClick={() => setConfirming(true)}
             disabled={calculateIsPending || finalize.isPending}
           >
@@ -305,7 +381,7 @@ function Finalize({
       {failureMessage !== null && (
         <p role="alert">
           {failureMessage}{' '}
-          {isFinalizationMismatch(finalize.error) && (
+          {offersCalculateAgain(finalize.error) && (
             <button type="button" onClick={onCalculateAgain} disabled={calculateIsPending}>
               Calculate again
             </button>
@@ -423,6 +499,7 @@ export function PayrollRun() {
                   member={member}
                   employerId={employerId}
                   payrollRunId={runId}
+                  runIsFinalized={run.data.status === 'finalized'}
                 />
               ))}
             </ul>

@@ -36,3 +36,17 @@ export function formatCents(cents: number): string {
   const remainder = String(exactCents % 100n).padStart(2, '0');
   return `${whole}.${remainder}`;
 }
+
+/**
+ * {@link formatCents} for a screen: it throws rather than show an amount it
+ * cannot render exactly (INV-001), and thrown from inside a component that
+ * would blank the whole screen over one figure, hiding every other one. The
+ * one figure says what it cannot show instead, and the rest still reads.
+ */
+export function centsText(cents: number): string {
+  try {
+    return formatCents(cents);
+  } catch {
+    return 'an amount that cannot be displayed exactly';
+  }
+}
