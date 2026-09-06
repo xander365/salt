@@ -73,8 +73,11 @@ export function FinalizedPayroll() {
           <p>Pay date: {finalizedPayroll.data.payDate}</p>
           <p>This payroll is finalized and cannot be changed.</p>
           <Figures figures={finalizedPayroll.data.figures} />
-          <Workings finalizedPayrollId={finalizedPayrollId} />
           <p>Salt version: {finalizedPayroll.data.saltVersion}</p>
+          {/* Last, and closed: the everyday facts above read exactly as they
+              did before issue #67, and the workings are there when asked
+              for (§0.29). */}
+          <Workings finalizedPayrollId={finalizedPayrollId} />
         </>
       )}
     </main>

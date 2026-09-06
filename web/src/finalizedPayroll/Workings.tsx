@@ -11,14 +11,45 @@
 //
 // Every value below is rendered exactly as the traces endpoint sent it — no
 // band, rate, threshold or subtotal is re-derived here (§0.29's own
-// instruction), and no raw snapshot JSON is shown.
+// instruction), and no raw snapshot JSON is shown. The one thing this file
+// translates is `clamp`, which is a wire *code* and not a figure: the same
+// rule the blocker sentences follow (§0.23), for the same reason — a code
+// is the contract, the words an Operator reads are ours.
 
 import { useState } from 'react';
 import { ApiError } from '../api/client';
-import type { BandContributionDto, PayeTraceDto, SscTraceDto } from '../api/types';
+import type { BandContributionDto, PayeTraceDto, SscClampDto, SscTraceDto } from '../api/types';
 import { requestIdOf } from '../api/refusal';
 import { centsText } from '../money';
 import { useFinalizedPayrollTraces } from './useFinalizedPayrollTraces';
+
+function workingsLoadFailureMessage(caught: unknown): string {
+  if (caught instanceof ApiError && caught.code === 'internal_error') {
+    const requestId = requestIdOf(caught.details);
+    if (requestId !== null) {
+      return `We could not load these workings. Try again, and quote reference ${requestId} if the problem continues.`;
+    }
+  }
+  return 'We could not load these workings.';
+}
+
+/**
+ * `SscClamp`'s three wire strings as a sentence. `default` returns the code
+ * itself rather than nothing: a fourth clamp added on the server must show
+ * up on the screen as something an Operator can quote, never as a blank.
+ */
+function clampText(clamp: SscClampDto): string {
+  switch (clamp) {
+    case 'none':
+      return 'None. Basic pay was charged as it stands.';
+    case 'floor':
+      return 'Floor. Basic pay was below the floor, so the floor was charged.';
+    case 'ceiling':
+      return 'Ceiling. Basic pay was above the ceiling, so the ceiling was charged.';
+    default:
+      return clamp;
+  }
+}
 
 function PayeWorkings({ trace }: { trace: PayeTraceDto }) {
   return (
@@ -42,46 +73,49 @@ function PayeWorkings({ trace }: { trace: PayeTraceDto }) {
           <dd>{centsText(trace.yearToDateTaxableRemunerationCents)}</dd>
         </div>
         <div>
-          <dt>Year-to-date tax owed</dt>
+          {/* Not cents-exact, and not rounded: the exact tax owed on the
+              year to date before the period's PAYE is taken from it. Shown
+              as the server's own decimal string, digit for digit. */}
+          <dt>Year-to-date tax owed (exact, unrounded)</dt>
           <dd>{trace.yearToDateTaxOwed}</dd>
         </div>
         <div>
-          <dt>Periods elapsed</dt>
+          {/* `PeriodsElapsed` is a position in the TaxYear, not a count of
+              periods worked — saying so here is what stops the number being
+              misread years later. */}
+          <dt>Period position in the tax year</dt>
           <dd>{trace.periodsElapsed}</dd>
         </div>
       </dl>
 
       <h4>Bands applied</h4>
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">Threshold</th>
-            <th scope="col">Rate</th>
-            <th scope="col">Tax</th>
-          </tr>
-        </thead>
-        <tbody>
-          {trace.bandsApplied.map((band: BandContributionDto, index: number) => (
-            <tr key={index}>
-              <td>{band.threshold}</td>
-              <td>{band.rate}</td>
-              <td>{band.tax}</td>
+      {trace.bandsApplied.length === 0 ? (
+        <p>No tax band was reached.</p>
+      ) : (
+        <table>
+          <caption>Each PAYE band the year-to-date taxable remuneration reached.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Threshold</th>
+              <th scope="col">Rate</th>
+              <th scope="col">Tax</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {trace.bandsApplied.map((band: BandContributionDto, index: number) => (
+              // The bands carry no id, and the server sends them in the
+              // order they were walked, so their position is their identity.
+              <tr key={index}>
+                <td>{band.threshold}</td>
+                <td>{band.rate}</td>
+                <td>{band.tax}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   );
-}
-
-function workingsLoadFailureMessage(caught: unknown): string {
-  if (caught instanceof ApiError && caught.code === 'internal_error') {
-    const requestId = requestIdOf(caught.details);
-    if (requestId !== null) {
-      return `We could not load these workings. Try again, and quote reference ${requestId} if the problem continues.`;
-    }
-  }
-  return 'We could not load these workings.';
 }
 
 function SscWorkings({ heading, trace }: { heading: string; trace: SscTraceDto }) {
@@ -98,8 +132,8 @@ function SscWorkings({ heading, trace }: { heading: string; trace: SscTraceDto }
           <dd>{centsText(trace.baseCents)}</dd>
         </div>
         <div>
-          <dt>Clamp</dt>
-          <dd>{trace.clamp}</dd>
+          <dt>Floor or ceiling applied</dt>
+          <dd>{clampText(trace.clamp)}</dd>
         </div>
         <div>
           <dt>Rate</dt>
@@ -126,7 +160,10 @@ export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string })
     <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>How PAYE and social security were worked out</summary>
 
-      {open && traces.isPending && <p>Loading…</p>}
+      {/* `role="status"` because this appears in answer to the Operator's
+          own click, long after the page settled: without it a screen reader
+          reaches an empty disclosure and is told nothing is coming. */}
+      {open && traces.isPending && <p role="status">Loading…</p>}
 
       {open && traces.isError && (
         <p role="alert">

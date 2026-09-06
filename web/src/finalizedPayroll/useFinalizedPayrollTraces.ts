@@ -2,6 +2,11 @@
 // #59 Spec 3 of 3, §0.29). Deliberately a separate call from
 // `useFinalizedPayroll`, gated by `enabled`, so opening a finalized payroll
 // never fetches the workings — only opening the disclosure does.
+//
+// A `FinalizedPayroll` never changes once written, and neither do its
+// traces, so `staleTime: Infinity` is a statement of fact and not a tuning
+// choice: closing and reopening the disclosure, or refocusing the window,
+// must not spend a request re-reading an answer that cannot have moved.
 
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../api/client';
@@ -22,5 +27,6 @@ export function useFinalizedPayrollTraces(finalizedPayrollId: string, enabled: b
         `/api/employers/${encodeURIComponent(employerId)}/finalized-payroll/${encodeURIComponent(finalizedPayrollId)}/traces`,
       ),
     enabled,
+    staleTime: Infinity,
   });
 }
