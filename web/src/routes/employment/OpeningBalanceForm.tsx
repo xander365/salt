@@ -3,13 +3,14 @@
 // because the first real customer needs it: without this form, their first
 // Calculate refuses with a blocker no other screen can clear.
 
-import { type FormEvent, useId, useState } from 'react';
+import { type SubmitEvent, useId, useState } from 'react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type { RecordOpeningBalanceRequest } from '../../api/types';
 import { useRecordOpeningBalance } from '../../employments/useEmploymentFacts';
 import { formatCents, parseCentsInput } from '../../money';
-import { currentTaxYearStartingYear } from '../../taxYear';
+import { currentTaxYearStartingYear, parseTaxYearInput } from '../../taxYear';
+import { type FieldError, fieldErrorProps } from './fieldError';
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -44,20 +45,33 @@ function messageForRefusal(caught: unknown): string {
   }
 }
 
+/** The fields this form validates for shape, and so the fields one of its
+ * own complaints can be about. */
+type Field = 'taxYear' | 'figures';
+
 export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
   const recordOpeningBalance = useRecordOpeningBalance(employmentId);
   const [taxYear, setTaxYear] = useState(() => String(currentTaxYearStartingYear()));
   const [saltCoverageStart, setSaltCoverageStart] = useState('');
   const [priorTaxableRemuneration, setPriorTaxableRemuneration] = useState('0.00');
   const [priorPaye, setPriorPaye] = useState('0.00');
-  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<FieldError<Field> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const taxYearId = useId();
   const saltCoverageStartId = useId();
   const errorId = useId();
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  // Clears the confirmation as well: it quotes the date and both amounts,
+  // so leaving it up beside changed fields would describe a balance nobody
+  // recorded.
+  function edited() {
+    setFieldError(null);
+    setError(null);
+    setSaved(null);
+  }
+
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (recordOpeningBalance.isPending) {
       return;
@@ -69,15 +83,26 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
     const priorTaxableRemunerationCents = parseCentsInput(priorTaxableRemuneration);
     const priorPayeCents = parseCentsInput(priorPaye);
     if (priorTaxableRemunerationCents === null || priorPayeCents === null) {
-      setFieldError(
-        'Enter both amounts as non-negative values with no more than two decimal places, e.g. 0.00. Very large amounts are not supported.',
-      );
+      setFieldError({
+        field: 'figures',
+        message:
+          'Enter both amounts as non-negative values with no more than two decimal places, e.g. 0.00. Very large amounts are not supported.',
+      });
+      return;
+    }
+
+    const taxYearNumber = parseTaxYearInput(taxYear);
+    if (taxYearNumber === null) {
+      setFieldError({
+        field: 'taxYear',
+        message: 'Enter the tax year as a four-digit year, e.g. 2026.',
+      });
       return;
     }
     setFieldError(null);
 
     const request: RecordOpeningBalanceRequest = {
-      taxYear: Number(taxYear),
+      taxYear: taxYearNumber,
       saltCoverageStart,
       priorTaxableRemunerationCents,
       priorPayeCents,
@@ -107,10 +132,14 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             id={taxYearId}
             type="number"
             required
+            min={1000}
+            max={9999}
+            step={1}
+            {...fieldErrorProps(fieldError, 'taxYear', errorId)}
             value={taxYear}
             onChange={(event) => {
               setTaxYear(event.target.value);
-              setError(null);
+              edited();
             }}
           />
         </div>
@@ -123,7 +152,7 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             value={saltCoverageStart}
             onChange={(event) => {
               setSaltCoverageStart(event.target.value);
-              setError(null);
+              edited();
             }}
           />
         </div>
@@ -134,11 +163,11 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             type="text"
             inputMode="decimal"
             required
+            {...fieldErrorProps(fieldError, 'figures', errorId)}
             value={priorTaxableRemuneration}
             onChange={(event) => {
               setPriorTaxableRemuneration(event.target.value);
-              setFieldError(null);
-              setError(null);
+              edited();
             }}
           />
         </div>
@@ -149,17 +178,17 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             type="text"
             inputMode="decimal"
             required
+            {...fieldErrorProps(fieldError, 'figures', errorId)}
             value={priorPaye}
             onChange={(event) => {
               setPriorPaye(event.target.value);
-              setFieldError(null);
-              setError(null);
+              edited();
             }}
           />
         </div>
         {(fieldError !== null || error !== null) && (
           <p id={errorId} role="alert">
-            {fieldError ?? error}
+            {fieldError?.message ?? error}
           </p>
         )}
         <button type="submit" disabled={recordOpeningBalance.isPending}>

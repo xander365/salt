@@ -4,12 +4,13 @@
 // which cannot happen the first time pay is recorded — the scenario this
 // screen exists for.
 
-import { type FormEvent, useId, useState } from 'react';
+import { type SubmitEvent, useId, useState } from 'react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type { RecordCompensationTermsRequest } from '../../api/types';
 import { useRecordCompensationTerms } from '../../employments/useEmploymentFacts';
 import { formatCents, parseCentsInput } from '../../money';
+import { type FieldError, fieldErrorProps } from './fieldError';
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -38,18 +39,30 @@ function messageForRefusal(caught: unknown): string {
   }
 }
 
+/** The one field this form validates for shape, named the same way its
+ * siblings name theirs. */
+type Field = 'basicPay';
+
 export function CompensationTermsForm({ employmentId }: { employmentId: string }) {
   const recordCompensationTerms = useRecordCompensationTerms(employmentId);
   const [effectiveFrom, setEffectiveFrom] = useState('');
   const [basicPay, setBasicPay] = useState('');
-  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<FieldError<Field> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const effectiveFromId = useId();
   const basicPayId = useId();
   const errorId = useId();
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  // Clears the confirmation as well: it quotes the amount and the date, so
+  // leaving it up beside changed fields would describe pay nobody saved.
+  function edited() {
+    setFieldError(null);
+    setError(null);
+    setSaved(null);
+  }
+
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (recordCompensationTerms.isPending) {
       return;
@@ -60,9 +73,11 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
 
     const basicPayCents = parseCentsInput(basicPay);
     if (basicPayCents === null) {
-      setFieldError(
-        'Enter a non-negative amount with no more than two decimal places, e.g. 15000.00. Very large amounts are not supported.',
-      );
+      setFieldError({
+        field: 'basicPay',
+        message:
+          'Enter a non-negative amount with no more than two decimal places, e.g. 15000.00. Very large amounts are not supported.',
+      });
       return;
     }
     setFieldError(null);
@@ -90,7 +105,7 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
             value={effectiveFrom}
             onChange={(event) => {
               setEffectiveFrom(event.target.value);
-              setError(null);
+              edited();
             }}
           />
         </div>
@@ -102,19 +117,17 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
             inputMode="decimal"
             placeholder="0.00"
             required
-            aria-invalid={fieldError !== null}
-            aria-describedby={fieldError === null ? undefined : errorId}
+            {...fieldErrorProps(fieldError, 'basicPay', errorId)}
             value={basicPay}
             onChange={(event) => {
               setBasicPay(event.target.value);
-              setFieldError(null);
-              setError(null);
+              edited();
             }}
           />
         </div>
         {(fieldError !== null || error !== null) && (
           <p id={errorId} role="alert">
-            {fieldError ?? error}
+            {fieldError?.message ?? error}
           </p>
         )}
         <button type="submit" disabled={recordCompensationTerms.isPending}>

@@ -4,15 +4,17 @@
 // The radio group starts with nothing checked, on purpose (this ticket's own
 // Deep Instructions): a declaration nobody has made yet must not look like a
 // recorded "no". "No prior employment" is a choice the Operator makes, not
-// this form's default.
+// this form's default. The line under the form says the same thing in words,
+// because an unchecked radio is an absence and an absence is easy to miss.
 
-import { type FormEvent, useId, useState } from 'react';
+import { type SubmitEvent, useId, useState } from 'react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type { DeclarePriorEmploymentRequest, PriorEmploymentStatus } from '../../api/types';
 import { useDeclarePriorEmployment } from '../../employments/useEmploymentFacts';
+import { type FieldError, fieldErrorProps } from './fieldError';
 import { formatCents, parseCentsInput } from '../../money';
-import { currentTaxYearStartingYear } from '../../taxYear';
+import { currentTaxYearStartingYear, parseTaxYearInput } from '../../taxYear';
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -30,19 +32,37 @@ function messageForRefusal(caught: unknown): string {
   }
 }
 
+/** The fields this form validates for shape, and so the fields one of its
+ * own complaints can be about. */
+type Field = 'taxYear' | 'status' | 'figures';
+
+/** Named once and used twice: `role="radiogroup"` replaces the native
+ * `fieldset` mapping that would otherwise take the group's name from its
+ * `legend`, so the question has to be stated as an `aria-label` too. */
+const STATUS_QUESTION = 'Did this employee have taxable employment earlier this tax year?';
+
 export function PriorEmploymentForm({ employmentId }: { employmentId: string }) {
   const declarePriorEmployment = useDeclarePriorEmployment(employmentId);
   const [taxYear, setTaxYear] = useState(() => String(currentTaxYearStartingYear()));
   const [status, setStatus] = useState<PriorEmploymentStatus | null>(null);
   const [taxableRemuneration, setTaxableRemuneration] = useState('');
   const [paye, setPaye] = useState('');
-  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<FieldError<Field> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const taxYearId = useId();
   const errorId = useId();
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  // Every field this form's confirmation quotes clears it: a sentence
+  // reading "no prior employment" beside a radio group now saying "yes"
+  // would describe a declaration nobody made.
+  function edited() {
+    setFieldError(null);
+    setError(null);
+    setSaved(null);
+  }
+
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (declarePriorEmployment.isPending) {
       return;
@@ -52,11 +72,22 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
     setSaved(null);
 
     if (status === null) {
-      setFieldError('Choose whether this employee had prior employment this tax year.');
+      setFieldError({
+        field: 'status',
+        message: 'Choose whether this employee had prior employment this tax year.',
+      });
       return;
     }
 
-    const taxYearNumber = Number(taxYear);
+    const taxYearNumber = parseTaxYearInput(taxYear);
+    if (taxYearNumber === null) {
+      setFieldError({
+        field: 'taxYear',
+        message: 'Enter the tax year as a four-digit year, e.g. 2026.',
+      });
+      return;
+    }
+
     let request: DeclarePriorEmploymentRequest;
     let confirmation: string;
 
@@ -67,9 +98,11 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
       const taxableRemunerationCents = parseCentsInput(taxableRemuneration);
       const payeCents = parseCentsInput(paye);
       if (taxableRemunerationCents === null || payeCents === null) {
-        setFieldError(
-          'Enter both amounts as non-negative values with no more than two decimal places. Very large amounts are not supported.',
-        );
+        setFieldError({
+          field: 'figures',
+          message:
+            'Enter both amounts as non-negative values with no more than two decimal places. Very large amounts are not supported.',
+        });
         return;
       }
       request = { taxYear: taxYearNumber, status, taxableRemunerationCents, payeCents };
@@ -95,16 +128,24 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
             id={taxYearId}
             type="number"
             required
+            min={1000}
+            max={9999}
+            step={1}
+            {...fieldErrorProps(fieldError, 'taxYear', errorId)}
             value={taxYear}
             onChange={(event) => {
               setTaxYear(event.target.value);
-              setError(null);
+              edited();
             }}
           />
         </div>
 
-        <fieldset>
-          <legend>Did this employee have taxable employment earlier this tax year?</legend>
+        <fieldset
+          role="radiogroup"
+          aria-label={STATUS_QUESTION}
+          {...fieldErrorProps(fieldError, 'status', errorId)}
+        >
+          <legend>{STATUS_QUESTION}</legend>
           <label>
             <input
               type="radio"
@@ -112,8 +153,7 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
               checked={status === 'confirmed_none'}
               onChange={() => {
                 setStatus('confirmed_none');
-                setFieldError(null);
-                setError(null);
+                edited();
               }}
             />
             No
@@ -125,8 +165,7 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
               checked={status === 'present'}
               onChange={() => {
                 setStatus('present');
-                setFieldError(null);
-                setError(null);
+                edited();
               }}
             />
             Yes
@@ -143,11 +182,11 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
                 inputMode="decimal"
                 placeholder="0.00"
                 required
+                {...fieldErrorProps(fieldError, 'figures', errorId)}
                 value={taxableRemuneration}
                 onChange={(event) => {
                   setTaxableRemuneration(event.target.value);
-                  setFieldError(null);
-                  setError(null);
+                  edited();
                 }}
               />
             </div>
@@ -159,11 +198,11 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
                 inputMode="decimal"
                 placeholder="0.00"
                 required
+                {...fieldErrorProps(fieldError, 'figures', errorId)}
                 value={paye}
                 onChange={(event) => {
                   setPaye(event.target.value);
-                  setFieldError(null);
-                  setError(null);
+                  edited();
                 }}
               />
             </div>
@@ -172,13 +211,26 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
 
         {(fieldError !== null || error !== null) && (
           <p id={errorId} role="alert">
-            {fieldError ?? error}
+            {fieldError?.message ?? error}
           </p>
         )}
         <button type="submit" disabled={declarePriorEmployment.isPending}>
           {declarePriorEmployment.isPending ? 'Saving…' : 'Save prior employment'}
         </button>
       </form>
+
+      {/* Nothing here reads the declaration back — no route does (§0.22),
+          and inventing one is out of this spec. So this states exactly what
+          it knows: that this screen has recorded nothing. It never says
+          "none", because a question nobody answered is not an answer. */}
+      {saved === null && (
+        <p>
+          Nothing has been declared from this screen. A tax year with no declaration counts as
+          unknown, not as “none”.
+        </p>
+      )}
+      {/* Mounted whether or not there is anything to say, so a screen reader
+          announces the confirmation as a change to a region already there. */}
       <p role="status">{saved ?? ''}</p>
     </section>
   );

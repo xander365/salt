@@ -1,9 +1,9 @@
 // `POST .../unsupported-deductions` (issue #63). Whether the employee has
 // deductions Salt does not calculate — the same unasked-vs-recorded-"none"
 // rule as `PriorEmploymentForm`: nothing is checked until the Operator
-// chooses.
+// chooses, and the line under the form says so in words.
 
-import { type FormEvent, useId, useState } from 'react';
+import { type SubmitEvent, useId, useState } from 'react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type {
@@ -12,6 +12,7 @@ import type {
   UnsupportedDeductionStatusValue,
 } from '../../api/types';
 import { useDeclareUnsupportedDeductionStatus } from '../../employments/useEmploymentFacts';
+import { type FieldError, fieldErrorProps } from './fieldError';
 
 const KINDS: { code: UnsupportedDeductionKindCode; label: string }[] = [
   { code: 'approved_pension_fund', label: 'Approved pension fund contribution' },
@@ -19,6 +20,12 @@ const KINDS: { code: UnsupportedDeductionKindCode; label: string }[] = [
   { code: 'retirement_annuity_fund', label: 'Retirement annuity fund contribution' },
   { code: 'education_policy', label: 'Education policy premium' },
 ];
+
+/** The chosen kinds in `KINDS`' own order, so two Operators who tick the
+ * same boxes read the same sentence back. */
+function chosenKindLabels(kinds: Set<UnsupportedDeductionKindCode>): string[] {
+  return KINDS.filter((kind) => kinds.has(kind.code)).map((kind) => kind.label.toLowerCase());
+}
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -47,18 +54,36 @@ function messageForRefusal(caught: unknown): string {
   }
 }
 
+/** The fields this form validates for shape, and so the fields one of its
+ * own complaints can be about. */
+type Field = 'status' | 'kinds' | 'reason';
+
+/** Named once and used twice, for the same reason as
+ * `PriorEmploymentForm`'s: `role="radiogroup"` displaces the `legend` as the
+ * group's accessible name. */
+const STATUS_QUESTION = 'Does this employee have any deductions Salt does not support?';
+
 export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId: string }) {
   const declareStatus = useDeclareUnsupportedDeductionStatus(employmentId);
   const [effectiveFrom, setEffectiveFrom] = useState('');
   const [status, setStatus] = useState<UnsupportedDeductionStatusValue | null>(null);
   const [kinds, setKinds] = useState<Set<UnsupportedDeductionKindCode>>(new Set());
   const [reason, setReason] = useState('');
-  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<FieldError<Field> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const effectiveFromId = useId();
   const reasonId = useId();
   const errorId = useId();
+
+  // Clears the confirmation too: it quotes the date, the status and the
+  // kinds, so leaving it up beside changed fields would describe a
+  // declaration nobody made.
+  function edited() {
+    setFieldError(null);
+    setError(null);
+    setSaved(null);
+  }
 
   function toggleKind(code: UnsupportedDeductionKindCode) {
     setKinds((current) => {
@@ -70,11 +95,10 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
       }
       return next;
     });
-    setFieldError(null);
-    setError(null);
+    edited();
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (declareStatus.isPending) {
       return;
@@ -84,15 +108,26 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
     setSaved(null);
 
     if (status === null) {
-      setFieldError('Choose whether this employee has any unsupported deductions.');
+      setFieldError({
+        field: 'status',
+        message: 'Choose whether this employee has any unsupported deductions.',
+      });
       return;
     }
     if (status === 'present' && kinds.size === 0) {
-      setFieldError('Choose at least one kind of deduction.');
+      setFieldError({ field: 'kinds', message: 'Choose at least one kind of deduction.' });
+      return;
+    }
+    // Shape only. The server refuses a blank reason unconditionally, and
+    // saying so here saves a round trip; it is never a substitute for that
+    // refusal.
+    if (reason.trim() === '') {
+      setFieldError({ field: 'reason', message: 'Enter a reason.' });
       return;
     }
     setFieldError(null);
 
+    const chosen = chosenKindLabels(kinds);
     const request: DeclareUnsupportedDeductionStatusRequest = {
       effectiveFrom,
       status,
@@ -105,7 +140,7 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
       setSaved(
         status === 'confirmed_none'
           ? `Recorded: no unsupported deductions from ${effectiveFrom}.`
-          : `Recorded: unsupported deductions from ${effectiveFrom} (${[...kinds].length} kind${kinds.size === 1 ? '' : 's'}).`,
+          : `Recorded: unsupported deductions from ${effectiveFrom} — ${chosen.join(', ')}.`,
       );
     } catch (caught) {
       setError(messageForRefusal(caught));
@@ -125,13 +160,17 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
             value={effectiveFrom}
             onChange={(event) => {
               setEffectiveFrom(event.target.value);
-              setError(null);
+              edited();
             }}
           />
         </div>
 
-        <fieldset>
-          <legend>Does this employee have any deductions Salt does not support?</legend>
+        <fieldset
+          role="radiogroup"
+          aria-label={STATUS_QUESTION}
+          {...fieldErrorProps(fieldError, 'status', errorId)}
+        >
+          <legend>{STATUS_QUESTION}</legend>
           <label>
             <input
               type="radio"
@@ -140,8 +179,7 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
               onChange={() => {
                 setStatus('confirmed_none');
                 setKinds(new Set());
-                setFieldError(null);
-                setError(null);
+                edited();
               }}
             />
             No
@@ -153,8 +191,7 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
               checked={status === 'present'}
               onChange={() => {
                 setStatus('present');
-                setFieldError(null);
-                setError(null);
+                edited();
               }}
             />
             Yes
@@ -162,7 +199,7 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
         </fieldset>
 
         {status === 'present' && (
-          <fieldset>
+          <fieldset {...fieldErrorProps(fieldError, 'kinds', errorId)}>
             <legend>Which kinds?</legend>
             {KINDS.map((kind) => (
               <label key={kind.code}>
@@ -183,23 +220,34 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
             id={reasonId}
             type="text"
             required
+            {...fieldErrorProps(fieldError, 'reason', errorId)}
             value={reason}
             onChange={(event) => {
               setReason(event.target.value);
-              setError(null);
+              edited();
             }}
           />
         </div>
 
         {(fieldError !== null || error !== null) && (
           <p id={errorId} role="alert">
-            {fieldError ?? error}
+            {fieldError?.message ?? error}
           </p>
         )}
         <button type="submit" disabled={declareStatus.isPending}>
           {declareStatus.isPending ? 'Saving…' : 'Save unsupported deductions'}
         </button>
       </form>
+
+      {/* Same reason as `PriorEmploymentForm`'s: no route reads a
+          declaration back, so this states only what this screen has done,
+          and never calls an unanswered question a "no". */}
+      {saved === null && (
+        <p>
+          Nothing has been declared from this screen. A date with no declaration counts as unknown,
+          not as “none”.
+        </p>
+      )}
       <p role="status">{saved ?? ''}</p>
     </section>
   );
