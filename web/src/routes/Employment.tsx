@@ -19,6 +19,7 @@ import { CompensationTermsForm } from './employment/CompensationTermsForm';
 import { OpeningBalanceForm } from './employment/OpeningBalanceForm';
 import { PriorEmploymentForm } from './employment/PriorEmploymentForm';
 import { UnsupportedDeductionStatusForm } from './employment/UnsupportedDeductionStatusForm';
+import { useScrollToSection } from './employment/useScrollToSection';
 import { NotFound } from './NotFound';
 
 function employmentWasNotFound(caught: unknown): boolean {
@@ -55,6 +56,11 @@ export function Employment() {
   }
 
   const employment = useEmployment(employmentId);
+
+  // A payroll run's blocker links here at `#prior-employment` and the three
+  // beside it. The sections exist only once the screen below has drawn
+  // them, so the scroll waits for that (issue #64).
+  useScrollToSection(employment.isSuccess);
 
   if (employment.isError && employmentWasNotFound(employment.error)) {
     return <NotFound />;

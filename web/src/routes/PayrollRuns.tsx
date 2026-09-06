@@ -13,14 +13,41 @@ import { requestIdOf } from '../api/refusal';
 import type { CreatePayrollRunRequest, PayrollRunStatus } from '../api/types';
 import { useCreatePayrollRun, usePayrollRuns } from '../payrollRuns/usePayrollRuns';
 
+/** `pay_period_not_generated_by_the_pay_schedule` carries the period this
+ * Employer's schedule does generate around the one that was asked for. A
+ * refusal that names it is one an Operator can act on; the same reason
+ * `unsupported_deductions_present` names its kinds. Read from `details`,
+ * never parsed out of `message` (§0.23). */
+function schedulesPeriodOf(details: unknown): { start: string; end: string } | null {
+  if (typeof details !== 'object' || details === null) {
+    return null;
+  }
+  const { schedulesPeriodStart: start, schedulesPeriodEnd: end } = details as {
+    schedulesPeriodStart?: unknown;
+    schedulesPeriodEnd?: unknown;
+  };
+  return typeof start === 'string' && typeof end === 'string' ? { start, end } : null;
+}
+
 function messageForRefusal(caught: unknown): string {
   if (!(caught instanceof ApiError)) {
     return 'Something went wrong. Please try again.';
   }
 
   switch (caught.code) {
-    case 'pay_period_not_generated_by_the_pay_schedule':
-      return 'That period does not match this employer’s pay schedule.';
+    case 'pay_period_not_generated_by_the_pay_schedule': {
+      const schedulesPeriod = schedulesPeriodOf(caught.details);
+      return schedulesPeriod === null
+        ? 'That period does not match this employer’s pay schedule.'
+        : `That period does not match this employer’s pay schedule. The schedule’s period around that end date runs ${schedulesPeriod.start} to ${schedulesPeriod.end}.`;
+    }
+
+    // The Employer's pay schedule was moved after a period of this tax year
+    // was already finalized, so no further period of that year can be run
+    // (§4.2). Nothing on any screen this spec builds can undo that, so the
+    // sentence says who has to.
+    case 'pay_schedule_moved_within_tax_year':
+      return 'This employer’s pay schedule changed part-way through the tax year, so no further run can be created for it. Ask whoever administers this employer to put the schedule back.';
 
     // The Employer went out of this Operator's reach between loading the
     // screen and submitting it — the same story `People.tsx`'s own

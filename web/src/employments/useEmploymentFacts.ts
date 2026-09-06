@@ -5,6 +5,7 @@
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../api/client';
+import { payrollRunsQueryKey } from '../payrollRuns/usePayrollRuns';
 import type {
   DeclarePriorEmploymentRequest,
   DeclareUnsupportedDeductionStatusRequest,
@@ -14,6 +15,28 @@ import type {
   RecordedResponse,
 } from '../api/types';
 import { employmentQueryKey, useEmployerId } from './useEmployments';
+
+/**
+ * Every standing fact recorded here is one a payroll run's `blockers` are
+ * derived from, on the server, on every read (§0.31). So the moment one is
+ * recorded, any run detail this browser is still holding is known to be out
+ * of date — not stale in the ordinary sense, but wrong in the one way this
+ * screen must never be: telling an Operator to go and record a fact they
+ * have just recorded (issue #64's own acceptance criteria). Nothing here
+ * caches a blocker; this only throws away a whole run response that is no
+ * longer true.
+ */
+function useFactRecorded() {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return (employmentId: string) => {
+    void queryClient.invalidateQueries({
+      queryKey: employmentQueryKey(employerId, employmentId),
+    });
+    void queryClient.invalidateQueries({ queryKey: payrollRunsQueryKey(employerId) });
+  };
+}
 
 function employmentFactsUrl(employerId: string, employmentId: string, route: string): string {
   return `/api/employers/${encodeURIComponent(employerId)}/employments/${encodeURIComponent(employmentId)}/${route}`;
@@ -25,7 +48,7 @@ function employmentFactsUrl(employerId: string, employmentId: string, route: str
  * already-run pay is a correction screen this ticket does not build). */
 export function useRecordCompensationTerms(employmentId: string) {
   const employerId = useEmployerId();
-  const queryClient = useQueryClient();
+  const factRecorded = useFactRecorded();
 
   return useMutation({
     mutationFn: (request: RecordCompensationTermsRequest) =>
@@ -33,13 +56,13 @@ export function useRecordCompensationTerms(employmentId: string) {
         employmentFactsUrl(employerId, employmentId, 'compensation-terms'),
         { method: 'POST', body: JSON.stringify(request) },
       ),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: employmentQueryKey(employerId, employmentId) }),
+    onSuccess: () => factRecorded(employmentId),
   });
 }
 
 export function useDeclarePriorEmployment(employmentId: string) {
   const employerId = useEmployerId();
+  const factRecorded = useFactRecorded();
 
   return useMutation({
     mutationFn: (request: DeclarePriorEmploymentRequest) =>
@@ -47,6 +70,7 @@ export function useDeclarePriorEmployment(employmentId: string) {
         method: 'POST',
         body: JSON.stringify(request),
       }),
+    onSuccess: () => factRecorded(employmentId),
   });
 }
 
@@ -55,6 +79,7 @@ export function useDeclarePriorEmployment(employmentId: string) {
  * server refuses a blank one unconditionally, divergence or not. */
 export function useDeclareUnsupportedDeductionStatus(employmentId: string) {
   const employerId = useEmployerId();
+  const factRecorded = useFactRecorded();
 
   return useMutation({
     mutationFn: (request: DeclareUnsupportedDeductionStatusRequest) =>
@@ -62,11 +87,13 @@ export function useDeclareUnsupportedDeductionStatus(employmentId: string) {
         employmentFactsUrl(employerId, employmentId, 'unsupported-deductions'),
         { method: 'POST', body: JSON.stringify(request) },
       ),
+    onSuccess: () => factRecorded(employmentId),
   });
 }
 
 export function useRecordOpeningBalance(employmentId: string) {
   const employerId = useEmployerId();
+  const factRecorded = useFactRecorded();
 
   return useMutation({
     mutationFn: (request: RecordOpeningBalanceRequest) =>
@@ -74,5 +101,6 @@ export function useRecordOpeningBalance(employmentId: string) {
         method: 'POST',
         body: JSON.stringify(request),
       }),
+    onSuccess: () => factRecorded(employmentId),
   });
 }

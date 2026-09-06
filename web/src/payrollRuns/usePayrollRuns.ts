@@ -12,7 +12,11 @@ import type {
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 
-function payrollRunsQueryKey(employerId: string) {
+/** Every payroll-run query for one Employer — the list and each run's own
+ * detail alike, since a detail key extends this one. Invalidating here is
+ * how a change made elsewhere says "what a run screen is holding is now
+ * out of date". */
+export function payrollRunsQueryKey(employerId: string) {
   return ['employers', employerId, 'payrollRuns'] as const;
 }
 

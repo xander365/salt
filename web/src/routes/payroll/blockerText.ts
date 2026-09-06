@@ -63,8 +63,13 @@ export function blockerSentence(blocker: PayrollRunBlockerDto): string {
   }
 }
 
-/** The Employment screen fragment (`#compensation-terms`, etc.) a blocker's
- * fix lives at. */
-export function blockerSection(blocker: PayrollRunBlockerDto): string {
-  return SECTION_FOR_CODE[blocker.code] ?? '';
+/**
+ * The Employment screen fragment (`#compensation-terms`, etc.) a blocker's
+ * fix lives at, or `null` for a code this module does not know — a link to
+ * a bare `#` would scroll nowhere and mean nothing, so an unknown blocker
+ * links to the Employment screen itself and lets the Operator read its four
+ * forms, which is still the screen that clears it.
+ */
+export function blockerSection(blocker: PayrollRunBlockerDto): string | null {
+  return SECTION_FOR_CODE[blocker.code] ?? null;
 }

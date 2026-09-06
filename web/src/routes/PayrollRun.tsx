@@ -13,7 +13,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
-import type { EarningKind, PayrollRunMemberDto } from '../api/types';
+import type { EarningKind, PayrollRunBlockerDto, PayrollRunMemberDto } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 import { formatCents } from '../money';
 import { usePayrollRun } from '../payrollRuns/usePayrollRuns';
@@ -42,10 +42,35 @@ function earningKindLabel(kind: EarningKind): string {
   return kind === 'basicPay' ? 'Basic pay' : 'Taxable allowance';
 }
 
+/**
+ * `formatCents` throws rather than show an amount it cannot render exactly
+ * (INV-001, `money.ts`). Thrown from here that would blank the whole run
+ * over one line, hiding every other member and every other blocker — so the
+ * one line says what it cannot show and the rest of the payroll still
+ * reads. Same answer `Employment.tsx`'s own `currentPayText` gives.
+ */
+function earningAmountText(cents: number): string {
+  return Number.isSafeInteger(cents) && cents >= 0
+    ? formatCents(cents)
+    : 'an amount that cannot be displayed exactly';
+}
+
+/** The Employment screen a blocker's fix lives on, at the section that
+ * holds the form when this blocker names one. */
+function blockerFixPath(
+  employerId: string,
+  member: PayrollRunMemberDto,
+  blocker: PayrollRunBlockerDto,
+): string {
+  const path = employmentPath(employerId, member.employmentId);
+  const section = blockerSection(blocker);
+  return section === null ? path : `${path}#${section}`;
+}
+
 function Member({ member, employerId }: { member: PayrollRunMemberDto; employerId: string }) {
   return (
     <li>
-      <h4>{member.fullName}</h4>
+      <h3>{member.fullName}</h3>
 
       {member.earnings.length === 0 ? (
         <p>No earnings recorded.</p>
@@ -56,7 +81,7 @@ function Member({ member, employerId }: { member: PayrollRunMemberDto; employerI
             // replaced as a whole list (`PUT .../earnings`), never addressed
             // one at a time, so its position is the only stable key here.
             <li key={index}>
-              {earningKindLabel(earning.kind)}: {formatCents(earning.amountCents)}
+              {earningKindLabel(earning.kind)}: {earningAmountText(earning.amountCents)}
             </li>
           ))}
         </ul>
@@ -70,12 +95,14 @@ function Member({ member, employerId }: { member: PayrollRunMemberDto; employerI
         <p>Ready to pay.</p>
       ) : (
         <ul>
+          {/* Not `role="alert"`: a blocker is standing content that is
+              already on the screen when it loads, not something that just
+              happened. Marking each one assertive would make a screen
+              reader interrupt itself once per blocker on every load. */}
           {member.blockers.map((blocker) => (
-            <li key={blocker.code} role="alert">
+            <li key={blocker.code}>
               {blockerSentence(blocker)}{' '}
-              <Link
-                to={`${employmentPath(employerId, member.employmentId)}#${blockerSection(blocker)}`}
-              >
+              <Link to={blockerFixPath(employerId, member, blocker)}>
                 Fix on the Employment screen
               </Link>
             </li>
@@ -108,6 +135,12 @@ export function PayrollRun() {
       </p>
 
       {run.isPending && <p>Loading…</p>}
+
+      {/* An Operator arriving back from clearing a blocker sees this run's
+          last response first, while the re-read that decides whether the
+          blocker is really gone is still in flight. Saying so is the honest
+          version of that moment; showing an old blocker in silence is not. */}
+      {run.isSuccess && run.isFetching && <p>Refreshing…</p>}
 
       {run.isError && (
         <p role="alert">
