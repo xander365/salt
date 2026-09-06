@@ -7,8 +7,10 @@ import { apiFetch } from '../api/client';
 import type {
   CreatePayrollRunRequest,
   CreatePayrollRunResponse,
+  EarningLineDto,
   PayrollRunDetailResponse,
   PayrollRunsResponse,
+  RecordedResponse,
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 
@@ -69,5 +71,63 @@ export function useCreatePayrollRun() {
         { method: 'POST', body: JSON.stringify(request) },
       ),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: payrollRunsQueryKey(employerId) }),
+  });
+}
+
+/**
+ * `PUT .../payroll-runs/{r}/members/{em}/earnings` (issue #65): replaces one
+ * member's whole Earnings list, matching `set_run_earnings`'s own contract —
+ * the caller sends every line every time, never a delta.
+ *
+ * Invalidates the run detail on success rather than patching it locally.
+ * That refetch is a plain `GET`, which always answers `refusal: null` for
+ * every member (§0.31) — so editing one member's earnings honestly retires
+ * whatever the last Calculate said about every member, not just this one.
+ * Nothing here remembers a `refusal` past the response that carried it.
+ */
+export function useSetRunEarnings(payrollRunId: string) {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      employmentId,
+      earnings,
+    }: {
+      employmentId: string;
+      earnings: EarningLineDto[];
+    }) =>
+      apiFetch<RecordedResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/members/${encodeURIComponent(employmentId)}/earnings`,
+        { method: 'PUT', body: JSON.stringify({ earnings }) },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) }),
+  });
+}
+
+/**
+ * `POST .../payroll-runs/{r}/calculate` (issue #55/#65). Calculate is not an
+ * error (§0.25): a `200` here may still carry a refused member, and that is
+ * this hook's ordinary success path, not a thrown `ApiError`.
+ *
+ * Writes the response straight into the run detail's own cache entry rather
+ * than invalidating it — the response already *is* that same detail, with
+ * one thing a later plain `GET` could never carry: each refused member's
+ * fresh `refusal` (§0.31). Refetching instead of writing it directly would
+ * throw that away the instant it arrived.
+ */
+export function useCalculatePayrollRun(payrollRunId: string) {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<PayrollRunDetailResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/calculate`,
+        { method: 'POST' },
+      ),
+    onSuccess: (data) =>
+      queryClient.setQueryData(payrollRunQueryKey(employerId, payrollRunId), data),
   });
 }
