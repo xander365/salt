@@ -11,6 +11,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import { useFinalizedPayroll } from '../finalizedPayroll/useFinalizedPayroll';
+import { Workings } from '../finalizedPayroll/Workings';
 import { useEmployerId } from '../employments/useEmployments';
 import { NotFound } from './NotFound';
 import { employerPath } from './paths';
@@ -72,6 +73,7 @@ export function FinalizedPayroll() {
           <p>Pay date: {finalizedPayroll.data.payDate}</p>
           <p>This payroll is finalized and cannot be changed.</p>
           <Figures figures={finalizedPayroll.data.figures} />
+          <Workings finalizedPayrollId={finalizedPayrollId} />
           <p>Salt version: {finalizedPayroll.data.saltVersion}</p>
         </>
       )}

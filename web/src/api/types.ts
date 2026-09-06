@@ -248,3 +248,42 @@ export interface FinalizedPayrollDetailResponse {
   figures: FiguresDto;
   saltVersion: string;
 }
+
+// `GET /api/employers/{e}/finalized-payroll/{f}/traces`
+// (`crates/salt-server/src/finalized_payroll.rs`, issue #67, §0.29): the
+// PAYE and social security workings behind one finalized payroll's figures.
+// `threshold`, `rate`, `tax` and `yearToDateTaxOwed` are decimal strings,
+// never JSON floats, and are not cents — render them exactly as sent.
+
+export interface BandContributionDto {
+  threshold: string;
+  rate: string;
+  tax: string;
+}
+
+export interface PayeTraceDto {
+  priorTaxableRemunerationCents: number;
+  priorPayeCents: number;
+  thisPeriodTaxableRemunerationCents: number;
+  yearToDateTaxableRemunerationCents: number;
+  yearToDateTaxOwed: string;
+  bandsApplied: BandContributionDto[];
+  periodsElapsed: number;
+}
+
+export type SscClampDto = 'none' | 'floor' | 'ceiling';
+
+export interface SscTraceDto {
+  basicPayCents: number;
+  baseCents: number;
+  clamp: SscClampDto;
+  rate: string;
+  floorCents: number;
+  ceilingCents: number;
+}
+
+export interface FinalizedPayrollTracesResponse {
+  paye: PayeTraceDto;
+  employeeSsc: SscTraceDto;
+  employerSsc: SscTraceDto;
+}
