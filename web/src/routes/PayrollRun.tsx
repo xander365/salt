@@ -65,10 +65,12 @@ function calculateFailureMessage(caught: unknown): string {
  * the one figure says what it cannot show and the rest of the payroll still
  * reads. Same answer `Employment.tsx`'s own `currentPayText` gives.
  */
-function centsText(cents: number): string {
-  return Number.isSafeInteger(cents) && cents >= 0
-    ? formatCents(cents)
-    : 'an amount that cannot be displayed exactly';
+function centsText(cents: string): string {
+  try {
+    return formatCents(BigInt(cents));
+  } catch {
+    return 'an amount that cannot be displayed exactly';
+  }
 }
 
 /** The nine figures §0.29 names, in the order it names them. */
@@ -129,11 +131,11 @@ function Member({
       />
 
       {/* The two "present" blockers matter as much as the two "unknown"
-          ones, and an empty list is the only thing that reads as ready
-          (issue #64's own Deep Instructions) — so this renders every entry
-          `blockers` carries and nothing is inferred from their absence. */}
+          ones. An empty list says only that no standing fact is currently
+          blocking calculation — a fresh calculation may still refuse for a
+          calculation-time reason. */}
       {member.blockers.length === 0 ? (
-        <p>Ready to pay.</p>
+        <p>No standing blockers.</p>
       ) : (
         <ul>
           {/* Not `role="alert"`: a blocker is standing content that is

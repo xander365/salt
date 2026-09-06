@@ -181,17 +181,18 @@ export interface PayrollRunBlockerDto {
 }
 
 /** The nine figures §0.29 names for a member's current calculation, cents-exact
- * (INV-001). `null` until the run has been calculated at least once. */
+ * decimal strings (INV-001). JSON numbers cannot represent every server-side
+ * cents value exactly. `null` until the run has been calculated at least once. */
 export interface FiguresDto {
-  basicPayCents: number;
-  taxableAllowancesCents: number;
-  grossCents: number;
-  taxableRemunerationCents: number;
-  payeCents: number;
-  employeeSscCents: number;
-  employerSscCents: number;
-  totalDeductionsCents: number;
-  netCents: number;
+  basicPayCents: string;
+  taxableAllowancesCents: string;
+  grossCents: string;
+  taxableRemunerationCents: string;
+  payeCents: string;
+  employeeSscCents: string;
+  employerSscCents: string;
+  totalDeductionsCents: string;
+  netCents: string;
 }
 
 /** What Calculate's own most recent call said about one member. Never
