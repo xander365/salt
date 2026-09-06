@@ -14,7 +14,9 @@
 // instruction), and no raw snapshot JSON is shown.
 
 import { useState } from 'react';
+import { ApiError } from '../api/client';
 import type { BandContributionDto, PayeTraceDto, SscTraceDto } from '../api/types';
+import { requestIdOf } from '../api/refusal';
 import { centsText } from '../money';
 import { useFinalizedPayrollTraces } from './useFinalizedPayrollTraces';
 
@@ -72,6 +74,16 @@ function PayeWorkings({ trace }: { trace: PayeTraceDto }) {
   );
 }
 
+function workingsLoadFailureMessage(caught: unknown): string {
+  if (caught instanceof ApiError && caught.code === 'internal_error') {
+    const requestId = requestIdOf(caught.details);
+    if (requestId !== null) {
+      return `We could not load these workings. Try again, and quote reference ${requestId} if the problem continues.`;
+    }
+  }
+  return 'We could not load these workings.';
+}
+
 function SscWorkings({ heading, trace }: { heading: string; trace: SscTraceDto }) {
   return (
     <section aria-label={`${heading} workings`}>
@@ -118,7 +130,7 @@ export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string })
 
       {open && traces.isError && (
         <p role="alert">
-          We could not load these workings.{' '}
+          {workingsLoadFailureMessage(traces.error)}{' '}
           <button type="button" onClick={() => void traces.refetch()}>
             Try again
           </button>
