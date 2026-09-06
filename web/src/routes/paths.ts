@@ -6,3 +6,13 @@
 export function employerPath(employerId: string): string {
   return `/app/employers/${encodeURIComponent(employerId)}`;
 }
+
+/**
+ * `/app/employers/:employerId/people/:employmentId`, built rather than
+ * rendered as a relative `Link` (`People.tsx`'s own way of linking to it):
+ * a payroll run's blocker links here from a route tree that does not share
+ * this one as an ancestor, so there is no relative path to resolve against.
+ */
+export function employmentPath(employerId: string, employmentId: string): string {
+  return `${employerPath(employerId)}/people/${encodeURIComponent(employmentId)}`;
+}

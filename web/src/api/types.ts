@@ -103,10 +103,7 @@ export type UnsupportedDeductionStatusValue = 'confirmed_none' | 'present';
  * (`crates/payroll/src/unsupported_deduction.rs`), by their stable wire code
  * (`crates/salt-server/src/payroll_error.rs`). */
 export type UnsupportedDeductionKindCode =
-  | 'approved_pension_fund'
-  | 'provident_fund'
-  | 'retirement_annuity_fund'
-  | 'education_policy';
+  'approved_pension_fund' | 'provident_fund' | 'retirement_annuity_fund' | 'education_policy';
 
 /** `POST .../unsupported-deductions`. Unlike compensation terms, `reason` is
  * never optional here — the server refuses a blank one unconditionally. */
@@ -128,3 +125,96 @@ export interface RecordOpeningBalanceRequest {
 
 /** The body of a route that records a fact and has nothing to report back. */
 export type RecordedResponse = Record<string, never>;
+
+// `crates/salt-server/src/payroll_runs.rs` (issue #64, parent #59 Spec 3 of
+// 3, §0.22/§0.29/§0.31): an Employer's payroll runs, the members each one
+// proposes to pay, and why a member cannot be paid yet.
+
+export type PayrollRunStatus = 'draft' | 'calculated' | 'finalized';
+
+/** `POST .../payroll-runs`. Ordinary runs only — there is no Correction-run
+ * creation route (§0.22). */
+export interface CreatePayrollRunRequest {
+  period: PayPeriodDto;
+  payDate: string;
+}
+
+export interface CreatePayrollRunResponse {
+  payrollRunId: string;
+}
+
+export interface PayrollRunSummaryDto {
+  payrollRunId: string;
+  period: PayPeriodDto;
+  payDate: string;
+  status: PayrollRunStatus;
+}
+
+export interface PayrollRunsResponse {
+  payrollRuns: PayrollRunSummaryDto[];
+}
+
+export type EarningKind = 'basicPay' | 'taxableAllowance';
+
+export interface EarningLineDto {
+  kind: EarningKind;
+  amountCents: number;
+}
+
+/**
+ * The five blocker codes (§0.31) and no others — the run detail's own
+ * contract. A blocker carries no `message` at all, only `code` and
+ * `details`: the sentence an Operator reads is a lookup keyed by `code`,
+ * never a rendering of a server string that may be reworded (§0.23, issue
+ * #64's own Deep Instructions).
+ */
+export type PayrollRunBlockerCode =
+  | 'prior_employment_unknown'
+  | 'prior_employment_treatment_unconfirmed'
+  | 'unsupported_deduction_status_unknown'
+  | 'unsupported_deductions_present'
+  | 'no_compensation_terms_in_force';
+
+export interface PayrollRunBlockerDto {
+  code: PayrollRunBlockerCode;
+  details: unknown;
+}
+
+/** The nine figures §0.29 names for a member's current calculation, cents-exact
+ * (INV-001). `null` until the run has been calculated at least once. */
+export interface FiguresDto {
+  basicPayCents: number;
+  taxableAllowancesCents: number;
+  grossCents: number;
+  taxableRemunerationCents: number;
+  payeCents: number;
+  employeeSscCents: number;
+  employerSscCents: number;
+  totalDeductionsCents: number;
+  netCents: number;
+}
+
+/** What Calculate's own most recent call said about one member. Never
+ * persisted, so a plain `GET` always carries `null` here, even for a member
+ * still blocked (§0.31). */
+export interface RefusalDto {
+  code: string;
+  details: unknown;
+}
+
+export interface PayrollRunMemberDto {
+  employmentId: string;
+  fullName: string;
+  earnings: EarningLineDto[];
+  blockers: PayrollRunBlockerDto[];
+  figures: FiguresDto | null;
+  refusal: RefusalDto | null;
+}
+
+export interface PayrollRunDetailResponse {
+  payrollRunId: string;
+  period: PayPeriodDto;
+  payDate: string;
+  status: PayrollRunStatus;
+  members: PayrollRunMemberDto[];
+}

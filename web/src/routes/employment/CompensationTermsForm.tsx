@@ -93,7 +93,10 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
   }
 
   return (
-    <section>
+    // Named so a payroll run's `no_compensation_terms_in_force` blocker can
+    // link straight here (issue #64's own Deep Instructions: a link is the
+    // highest-value detail a blocker sentence carries).
+    <section id="compensation-terms">
       <h3>Pay</h3>
       <form onSubmit={handleSubmit}>
         <div>

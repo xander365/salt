@@ -13,13 +13,7 @@ import type {
 } from '../../api/types';
 import { useDeclareUnsupportedDeductionStatus } from '../../employments/useEmploymentFacts';
 import { type FieldError, fieldErrorProps } from './fieldError';
-
-const KINDS: { code: UnsupportedDeductionKindCode; label: string }[] = [
-  { code: 'approved_pension_fund', label: 'Approved pension fund contribution' },
-  { code: 'provident_fund', label: 'Provident fund contribution' },
-  { code: 'retirement_annuity_fund', label: 'Retirement annuity fund contribution' },
-  { code: 'education_policy', label: 'Education policy premium' },
-];
+import { KINDS } from './unsupportedDeductionKinds';
 
 /** The chosen kinds in `KINDS`' own order, so two Operators who tick the
  * same boxes read the same sentence back. */
@@ -148,7 +142,10 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
   }
 
   return (
-    <section>
+    // Named so a payroll run's `unsupported_deduction_status_unknown` and
+    // `unsupported_deductions_present` blockers can link straight here
+    // (issue #64's own Deep Instructions).
+    <section id="unsupported-deductions">
       <h3>Unsupported deductions</h3>
       <form onSubmit={handleSubmit}>
         <div>

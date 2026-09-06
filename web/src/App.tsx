@@ -5,6 +5,8 @@ import { EmployerHome } from './routes/EmployerHome';
 import { EmployerShell } from './routes/EmployerShell';
 import { LoginPage } from './routes/LoginPage';
 import { NotFound } from './routes/NotFound';
+import { PayrollRun } from './routes/PayrollRun';
+import { PayrollRuns } from './routes/PayrollRuns';
 import { People } from './routes/People';
 import { RequireSession } from './routes/RequireSession';
 import { UnauthorizedRedirect } from './session/UnauthorizedRedirect';
@@ -27,6 +29,8 @@ export function App() {
             <Route index element={<EmployerHome />} />
             <Route path="people" element={<People />} />
             <Route path="people/:employmentId" element={<Employment />} />
+            <Route path="payroll" element={<PayrollRuns />} />
+            <Route path="payroll/:runId" element={<PayrollRun />} />
           </Route>
         </Route>
 
