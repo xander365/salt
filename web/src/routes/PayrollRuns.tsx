@@ -44,6 +44,16 @@ function messageForRefusal(caught: unknown): string {
   }
 }
 
+function payrollRunsLoadFailureMessage(caught: unknown): string {
+  if (caught instanceof ApiError && caught.code === 'internal_error') {
+    const requestId = requestIdOf(caught.details);
+    if (requestId !== null) {
+      return `We could not load the payroll runs. Try again, and quote reference ${requestId} if the problem continues.`;
+    }
+  }
+  return 'We could not load the payroll runs.';
+}
+
 function statusLabel(status: PayrollRunStatus): string {
   switch (status) {
     case 'draft':
@@ -103,7 +113,7 @@ export function PayrollRuns() {
 
       {payrollRuns.isError && (
         <p role="alert">
-          We could not load the payroll runs.{' '}
+          {payrollRunsLoadFailureMessage(payrollRuns.error)}{' '}
           <button type="button" onClick={() => void payrollRuns.refetch()}>
             Try again
           </button>
