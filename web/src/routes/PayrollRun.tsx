@@ -10,17 +10,31 @@
 // readiness of its own: an empty `blockers` list is the server's own answer
 // that a member is ready, and nothing else here decides that.
 
-import { Link, useParams } from 'react-router-dom';
+import { useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
-import type { FiguresDto, PayrollRunBlockerDto, PayrollRunMemberDto } from '../api/types';
+import type {
+  PayrollRunBlockerDto,
+  PayrollRunDetailResponse,
+  PayrollRunMemberDto,
+} from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
-import { formatCents } from '../money';
-import { useCalculatePayrollRun, usePayrollRun } from '../payrollRuns/usePayrollRuns';
+import {
+  useCalculatePayrollRun,
+  useFinalizePayrollRun,
+  usePayrollRun,
+} from '../payrollRuns/usePayrollRuns';
 import { NotFound } from './NotFound';
-import { employmentPath } from './paths';
+import { employmentPath, finalizedPayrollPath } from './paths';
 import { blockerSection, blockerSentence } from './payroll/blockerText';
 import { EarningsForm } from './payroll/EarningsForm';
+import {
+  alreadyFinalizedDetailsOf,
+  finalizeFailureMessage,
+  isFinalizationMismatch,
+} from './payroll/finalizeText';
+import { Figures } from './payroll/Figures';
 import { refusalSentence } from './payroll/refusalText';
 
 function runWasNotFound(caught: unknown): boolean {
@@ -56,47 +70,6 @@ function calculateFailureMessage(caught: unknown): string {
     default:
       return 'We could not calculate this payroll run. Please try again.';
   }
-}
-
-/**
- * `formatCents` throws rather than show an amount it cannot render exactly
- * (INV-001, `money.ts`). Thrown from here that would blank the whole run
- * over one figure, hiding every other member and every other blocker — so
- * the one figure says what it cannot show and the rest of the payroll still
- * reads. Same answer `Employment.tsx`'s own `currentPayText` gives.
- */
-function centsText(cents: number): string {
-  try {
-    return formatCents(cents);
-  } catch {
-    return 'an amount that cannot be displayed exactly';
-  }
-}
-
-/** The nine figures §0.29 names, in the order it names them. */
-const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
-  { key: 'basicPayCents', label: 'Basic Pay' },
-  { key: 'taxableAllowancesCents', label: 'Taxable Allowances' },
-  { key: 'grossCents', label: 'Gross' },
-  { key: 'taxableRemunerationCents', label: 'Taxable Remuneration' },
-  { key: 'payeCents', label: 'PAYE' },
-  { key: 'employeeSscCents', label: 'Employee SSC' },
-  { key: 'employerSscCents', label: 'Employer SSC' },
-  { key: 'totalDeductionsCents', label: 'Total Deductions' },
-  { key: 'netCents', label: 'Net' },
-];
-
-function Figures({ figures }: { figures: FiguresDto }) {
-  return (
-    <dl>
-      {FIGURE_FIELDS.map(({ key, label }) => (
-        <div key={key}>
-          <dt>{label}</dt>
-          <dd>{centsText(figures[key])}</dd>
-        </div>
-      ))}
-    </dl>
-  );
 }
 
 /** The Employment screen a blocker's fix lives on, at the section that
@@ -180,6 +153,137 @@ function Member({
   );
 }
 
+/**
+ * `POST .../payroll-runs/{r}/finalize` (issue #66): a plain confirmation
+ * naming how many people the run covers — no password re-entry, no typed
+ * word, no second approver (issue #66's own acceptance criteria) — then the
+ * one atomic act that turns a Calculated run into immutable history.
+ *
+ * Offered only while `run.status === 'calculated'` (§0's Deep Instructions:
+ * the browser reads readiness off the server's own status, never decides it
+ * itself) — except while `finalizedLinks` is set, which outlives that status
+ * changing underneath it once the success or the already-finalized response
+ * has already been read.
+ *
+ * A successful call with exactly one finalized member navigates straight to
+ * it: the tracer-bullet case, and the only case §0.28's own retry shortcut
+ * ever names directly. More than one member has no single "the" finalized
+ * payroll to land on — `crates/salt-server/src/payroll_error.rs`'s own
+ * comment calls this "the case with one answer" — so this screen stays put
+ * and lists a link to each member's own finalized payroll instead of
+ * guessing which one to show.
+ */
+function Finalize({
+  run,
+  employerId,
+  payrollRunId,
+  onCalculateAgain,
+  calculateIsPending,
+}: {
+  run: PayrollRunDetailResponse;
+  employerId: string;
+  payrollRunId: string;
+  onCalculateAgain: () => void;
+  calculateIsPending: boolean;
+}) {
+  const navigate = useNavigate();
+  const finalize = useFinalizePayrollRun(payrollRunId);
+  const [confirming, setConfirming] = useState(false);
+  const [finalizedLinks, setFinalizedLinks] = useState<
+    { employmentId: string; finalizedPayrollId: string }[] | null
+  >(null);
+
+  async function handleFinalize() {
+    try {
+      const result = await finalize.mutateAsync();
+      setConfirming(false);
+      if (result.finalized.length === 1) {
+        navigate(finalizedPayrollPath(employerId, result.finalized[0].finalizedPayrollId));
+      } else {
+        setFinalizedLinks(result.finalized);
+      }
+    } catch (caught) {
+      // §0.28: a retried finalize that actually landed reads back this code
+      // and this screen navigates to what already succeeded — never a red
+      // banner for a request that worked. Every other refusal is read from
+      // `finalize.isError`/`finalize.error` below.
+      if (caught instanceof ApiError && caught.code === 'payroll_run_already_finalized') {
+        const { finalizedPayrollId, finalizedPayrolls } = alreadyFinalizedDetailsOf(caught.details);
+        setConfirming(false);
+        if (finalizedPayrollId !== null) {
+          navigate(finalizedPayrollPath(employerId, finalizedPayrollId));
+        } else {
+          setFinalizedLinks(finalizedPayrolls);
+        }
+      }
+    }
+  }
+
+  if (finalizedLinks !== null) {
+    return (
+      <div role="status">
+        <p>Finalized. Open each person’s finalized payroll:</p>
+        <ul>
+          {finalizedLinks.map((entry) => {
+            const member = run.members.find(
+              (candidate) => candidate.employmentId === entry.employmentId,
+            );
+            return (
+              <li key={entry.employmentId}>
+                <Link to={finalizedPayrollPath(employerId, entry.finalizedPayrollId)}>
+                  {member?.fullName ?? entry.employmentId}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    );
+  }
+
+  if (run.status !== 'calculated') {
+    return null;
+  }
+
+  const failureMessage = finalize.isError
+    ? finalizeFailureMessage(finalize.error, run.members)
+    : null;
+
+  return (
+    <div>
+      {confirming ? (
+        <p>
+          This creates immutable payroll history for {run.members.length}{' '}
+          {run.members.length === 1 ? 'person' : 'people'}.{' '}
+          <button type="button" onClick={() => void handleFinalize()} disabled={finalize.isPending}>
+            {finalize.isPending ? 'Finalizing…' : 'Confirm finalize'}
+          </button>{' '}
+          <button type="button" onClick={() => setConfirming(false)} disabled={finalize.isPending}>
+            Cancel
+          </button>
+        </p>
+      ) : (
+        <p>
+          <button type="button" onClick={() => setConfirming(true)}>
+            Finalize
+          </button>
+        </p>
+      )}
+
+      {failureMessage !== null && (
+        <p role="alert">
+          {failureMessage}{' '}
+          {isFinalizationMismatch(finalize.error) && (
+            <button type="button" onClick={onCalculateAgain} disabled={calculateIsPending}>
+              Calculate again
+            </button>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function PayrollRun() {
   const { runId } = useParams();
   if (runId === undefined) {
@@ -256,6 +360,14 @@ export function PayrollRun() {
           )}
 
           {calculate.isError && <p role="alert">{calculateFailureMessage(calculate.error)}</p>}
+
+          <Finalize
+            run={run.data}
+            employerId={employerId}
+            payrollRunId={runId}
+            onCalculateAgain={() => void handleCalculate()}
+            calculateIsPending={calculate.isPending}
+          />
 
           {run.data.members.length === 0 ? (
             <p>No one is proposed to be paid on this run.</p>

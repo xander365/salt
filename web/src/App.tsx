@@ -3,6 +3,7 @@ import { AppLanding } from './routes/AppLanding';
 import { Employment } from './routes/Employment';
 import { EmployerHome } from './routes/EmployerHome';
 import { EmployerShell } from './routes/EmployerShell';
+import { FinalizedPayroll } from './routes/FinalizedPayroll';
 import { LoginPage } from './routes/LoginPage';
 import { NotFound } from './routes/NotFound';
 import { PayrollRun } from './routes/PayrollRun';
@@ -31,6 +32,7 @@ export function App() {
             <Route path="people/:employmentId" element={<Employment />} />
             <Route path="payroll" element={<PayrollRuns />} />
             <Route path="payroll/:runId" element={<PayrollRun />} />
+            <Route path="finalized/:finalizedPayrollId" element={<FinalizedPayroll />} />
           </Route>
         </Route>
 

@@ -218,3 +218,31 @@ export interface PayrollRunDetailResponse {
   status: PayrollRunStatus;
   members: PayrollRunMemberDto[];
 }
+
+// `crates/salt-server/src/payroll_runs.rs`'s `finalize_payroll_run` (issue
+// #66, §0.22/§0.26/§0.28): the one atomic act that turns a Calculated run
+// into immutable history. One entry per member the run just finalized.
+
+export interface FinalizedMemberDto {
+  employmentId: string;
+  finalizedPayrollId: string;
+}
+
+export interface FinalizePayrollRunResponse {
+  finalized: FinalizedMemberDto[];
+}
+
+// `GET /api/employers/{e}/finalized-payroll/{f}`
+// (`crates/salt-server/src/finalized_payroll.rs`, issue #57/#66, §0.29): one
+// immutable finalized payroll — the same nine figures a working run's own
+// detail carries, plus the period, the pay date and the SaltVersion that
+// produced them. Never the raw frozen snapshot (§0.29).
+
+export interface FinalizedPayrollDetailResponse {
+  finalizedPayrollId: string;
+  employmentId: string;
+  period: PayPeriodDto;
+  payDate: string;
+  figures: FiguresDto;
+  saltVersion: string;
+}

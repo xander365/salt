@@ -8,6 +8,7 @@ import type {
   CreatePayrollRunRequest,
   CreatePayrollRunResponse,
   EarningLineDto,
+  FinalizePayrollRunResponse,
   PayrollRunDetailResponse,
   PayrollRunsResponse,
   RecordedResponse,
@@ -129,5 +130,32 @@ export function useCalculatePayrollRun(payrollRunId: string) {
       ),
     onSuccess: (data) =>
       queryClient.setQueryData(payrollRunQueryKey(employerId, payrollRunId), data),
+  });
+}
+
+/**
+ * `POST .../payroll-runs/{r}/finalize` (issue #66): the one atomic act that
+ * turns a Calculated run into immutable history. Unlike calculate, a
+ * successful response is never written straight into the run detail's own
+ * cache entry — the caller navigates away to the finalized payroll it just
+ * produced (§0.28), so there is nothing left on this screen for that entry
+ * to serve. Both queries are invalidated instead, so a run this screen is
+ * returned to (the back button, a second tab) reads `status: "finalized"`
+ * rather than a stale `"calculated"`.
+ */
+export function useFinalizePayrollRun(payrollRunId: string) {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<FinalizePayrollRunResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/finalize`,
+        { method: 'POST' },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) });
+      queryClient.invalidateQueries({ queryKey: payrollRunsQueryKey(employerId) });
+    },
   });
 }

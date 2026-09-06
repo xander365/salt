@@ -16,3 +16,14 @@ export function employerPath(employerId: string): string {
 export function employmentPath(employerId: string, employmentId: string): string {
   return `${employerPath(employerId)}/people/${encodeURIComponent(employmentId)}`;
 }
+
+/**
+ * `/app/employers/:employerId/finalized/:finalizedPayrollId`, built rather
+ * than rendered as a relative `Link` for the same reason
+ * {@link employmentPath} is: `PayrollRun.tsx` navigates here on Finalize
+ * success (§0.28), a jump between two route subtrees with no relative path
+ * to resolve against.
+ */
+export function finalizedPayrollPath(employerId: string, finalizedPayrollId: string): string {
+  return `${employerPath(employerId)}/finalized/${encodeURIComponent(finalizedPayrollId)}`;
+}
