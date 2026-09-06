@@ -9,6 +9,7 @@ import { apiFetch } from '../api/client';
 import type {
   CreateEmploymentRequest,
   CreateEmploymentResponse,
+  EmploymentDetailResponse,
   EmploymentsResponse,
 } from '../api/types';
 
@@ -16,11 +17,15 @@ function employmentsQueryKey(employerId: string) {
   return ['employers', employerId, 'employments'] as const;
 }
 
+export function employmentQueryKey(employerId: string, employmentId: string) {
+  return ['employers', employerId, 'employments', employmentId] as const;
+}
+
 // Every caller here lives beneath `/app/employers/:employerId`, so the param
 // is always present — this just gives that guarantee a single, typed name
 // instead of every call site re-reading `useParams()` and re-deciding what a
 // missing value would mean.
-function useEmployerId(): string {
+export function useEmployerId(): string {
   const { employerId } = useParams();
   if (employerId === undefined) {
     throw new Error('useEmployerId must be used inside an Employer-scoped route');
@@ -36,6 +41,20 @@ export function useEmployments() {
     queryFn: () =>
       apiFetch<EmploymentsResponse>(
         `/api/employers/${encodeURIComponent(employerId)}/employments`,
+      ),
+  });
+}
+
+// `GET /api/employers/{e}/employments/{em}` (issue #63): the Employment's
+// dates, its Person's `fullName` and its current pay.
+export function useEmployment(employmentId: string) {
+  const employerId = useEmployerId();
+
+  return useQuery({
+    queryKey: employmentQueryKey(employerId, employmentId),
+    queryFn: () =>
+      apiFetch<EmploymentDetailResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/employments/${encodeURIComponent(employmentId)}`,
       ),
   });
 }

@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AppLanding } from './routes/AppLanding';
+import { Employment } from './routes/Employment';
 import { EmployerHome } from './routes/EmployerHome';
 import { EmployerShell } from './routes/EmployerShell';
 import { LoginPage } from './routes/LoginPage';
@@ -25,6 +26,7 @@ export function App() {
           <Route path="/app/employers/:employerId" element={<EmployerShell />}>
             <Route index element={<EmployerHome />} />
             <Route path="people" element={<People />} />
+            <Route path="people/:employmentId" element={<Employment />} />
           </Route>
         </Route>
 

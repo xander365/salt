@@ -10,6 +10,7 @@
 // grown locally — the server's list is the truth.
 
 import { type SubmitEvent, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { useCreateEmployment, useEmployments } from '../employments/useEmployments';
 
@@ -120,7 +121,13 @@ export function People() {
         ) : (
           <ul>
             {employments.data.employments.map((employment) => (
-              <li key={employment.employmentId}>{employment.fullName}</li>
+              <li key={employment.employmentId}>
+                {/* Relative, not `employmentPath` rebuilt from `:employerId`:
+                    this screen already renders beneath
+                    `/app/employers/:employerId/people` (issue #62's own
+                    Deep Instructions, followed here). */}
+                <Link to={employment.employmentId}>{employment.fullName}</Link>
+              </li>
             ))}
           </ul>
         ))}
