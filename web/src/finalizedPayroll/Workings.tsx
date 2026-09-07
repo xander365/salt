@@ -118,7 +118,10 @@ function PayeWorkings({ trace }: { trace: PayeTraceDto }) {
               <th scope="col" className="py-1.5 font-medium">
                 Rate
               </th>
-              <th scope="col" className="py-1.5 font-medium">
+              {/* Right-aligned over the `.money` cells beneath it
+                  (DESIGN.md's table convention): a monetary column's
+                  heading sits over its own figures, not away from them. */}
+              <th scope="col" className="py-1.5 text-right font-medium">
                 Tax
               </th>
             </tr>

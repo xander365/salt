@@ -269,6 +269,11 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await expect(
     page.getByText('Earnings changed since these figures were calculated.'),
   ).toBeVisible();
+  // The warning *replaces* the figures rather than sitting above them
+  // (§0's story 75: "say so and hide the old figures") — every one of the
+  // nine predates the edit that was just saved, so none of them is on the
+  // screen to be read.
+  await expect(page.getByRole('definition')).toHaveCount(0);
   await page.getByRole('button', { name: 'Calculate' }).click();
   await expect(page.getByText('Earnings changed since these figures were calculated.')).toHaveCount(
     0,

@@ -35,7 +35,7 @@ All of it lives as CSS custom properties in `web/src/index.css`, under `:root`, 
 | `--success` | `oklch(0.48 0.13 152)` | finalized / confirmed states |
 | `--ring` | `--primary` at 50% alpha | focus ring |
 
-An earlier draft used Tailwind's "slate" neutrals (a blue-tinted gray) and it read as pervasively blue in the built app — screenshotted and rejected during this ticket. True neutrals plus one accent is what "restrained" (the settled brief's own word) actually looks like; do not reintroduce a tinted neutral scale.
+An earlier draft used Tailwind's "slate" neutrals (a blue-tinted gray) and it read as pervasively blue in the built app — screenshotted and rejected during this ticket. True neutrals plus one accent is what "restrained" (the settled brief's own word) actually looks like; do not reintroduce a tinted neutral scale. `web/components.json` therefore names `"baseColor": "neutral"`, so the next `npx shadcn@latest add <name>` cannot quietly bring slate back with it.
 
 **Radius**: `--radius: 0.5rem`, with `--radius-sm/md/lg/xl` derived from it in `@theme inline`.
 
@@ -59,11 +59,13 @@ Seven, under `web/src/components/states/`, used instead of a screen improvising 
 | `EmptyState` | dashed card, icon + sentence | People with no employees, PayrollRuns with none, PayrollRun with no members, no-Employer AppLanding |
 | `ValidationError` | icon + red text, `role="alert"`, keeps the `id` a field's `aria-describedby` points at | every form's field-level complaint |
 | `BlockedItem` | amber card, icon + sentence + link to the fix | a payroll run member's standing blockers |
-| `StaleBanner` | muted card, clock icon | a run mid-refetch, and a member whose earnings were saved after its figures were last calculated |
+| `StaleBanner` | muted card, clock icon | a run mid-refetch, and a member whose earnings were saved after its figures were last calculated — where it **replaces** the figures rather than sitting above them |
 | `FinalizedBanner` | green card, lock icon | "This payroll is finalized and cannot be changed." |
 | `FailedRequestState` | icon + message + a real retry button that repeats the same request | every load/mutation failure that offers a retry |
 
 No error, blocked, or stale state is colour alone — each pairs its colour with an icon and text.
+
+A stale state hides what it describes. Figures calculated before an edit the Operator has since saved are not shown beneath the warning; the warning stands in their place until Calculate runs again. A number still on the screen is a number still available to act on, and every one of these predates the edit.
 
 ## Forms
 
@@ -81,6 +83,8 @@ No error, blocked, or stale state is colour alone — each pairs its colour with
 ## Navigation and worksheet
 
 - Persistent People / Payroll nav (`EmployerShell`), active item styled with `--primary`, `aria-current` implicit via `react-router-dom`'s `NavLink`.
+- **Focus is visible on everything focusable.** shadcn's own `Button` and `Input` carry a `focus-visible:ring-*` of their own; a plain anchor, a `<summary>`, a native radio or checkbox and anything given a `tabindex` do not, so `index.css`'s base layer draws them one solid 2px `--primary` outline at `2px` offset. A link inside running text also carries `text-primary` **and** an underline — colour alone would not say it is a link.
+- **A link is never styled by colour alone.** Tailwind's preflight strips an anchor's colour and underline, so every link states its own affordance.
 - A back-link inside a screen (e.g. Employment's "← People") is given a distinct `aria-label` ("Back to People") from the persistent nav item beside it — two links reading "People" on one screen is an ambiguity a screen reader's link list would surface, even where nothing else collides with it.
 - The payroll worksheet (`PayrollRun.tsx`'s `Member`) reserves an **Hours** row (`Hours: —`) between the earnings editor and the blockers list. Hourly pay is out of this milestone; the slot exists so filling it later is not a relayout.
 

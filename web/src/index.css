@@ -95,6 +95,24 @@
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
   }
+
+  /* Keyboard focus is visible everywhere (issue #88's own acceptance
+     criterion). shadcn's own `Button` and `Input` carry a
+     `focus-visible:ring-*` of their own; a plain anchor, a `<summary>`, a
+     native radio or checkbox and anything given a `tabindex` do not — and
+     the rule above, which sets `outline-color` on every element, is the
+     first thing that weakens a browser's own default ring. One solid ring
+     at full strength instead, drawn from the same accent token, so no
+     focusable thing is ever silent. `outline` already follows an element's
+     own `border-radius`, so nothing here restates one. */
+  a:focus-visible,
+  summary:focus-visible,
+  input[type='radio']:focus-visible,
+  input[type='checkbox']:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
 }
 
 @layer utilities {

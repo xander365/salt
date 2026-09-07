@@ -51,7 +51,7 @@ function messageForRefusal(caught: unknown): string {
       const schedulesPeriod = schedulesPeriodOf(caught.details);
       return schedulesPeriod === null
         ? 'That period does not match this employer’s pay schedule.'
-        : `That period does not match this employer’s pay schedule. The schedule’s period around that end date runs ${schedulesPeriod.start} to ${schedulesPeriod.end}.`;
+        : `That period does not match this employer’s pay schedule. The schedule’s period around that end date runs ${humanDateRange(schedulesPeriod.start, schedulesPeriod.end)}.`;
     }
 
     // The Employer's pay schedule was moved after a period of this tax year

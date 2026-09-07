@@ -182,13 +182,6 @@ function Member({
         </ul>
       )}
 
-      {figuresAreStale && member.figures !== null && (
-        <StaleBanner>
-          Earnings changed since these figures were calculated. Calculate again to see the updated
-          amounts.
-        </StaleBanner>
-      )}
-
       {/* `figures` and `refusal` are different things and both may be
           present (§0.31, issue #65's own Deep Instructions): the first is
           this member's current calculation, however it got there; the
@@ -199,11 +192,23 @@ function Member({
           A member with no `figures` says so plainly. After a plain reload
           its `refusal` is gone even though the reason it refused is not,
           and an empty `blockers` list beside no figures would otherwise
-          read as a member with nothing wrong at all (§0.31). */}
+          read as a member with nothing wrong at all (§0.31).
+
+          Stale figures are *replaced* by the warning, never shown beneath
+          it (§0's story 75: "say so and hide the old figures"). Earnings
+          saved since the last Calculate mean every figure here predates the
+          edit, and a number an Operator can still read is a number they can
+          still act on — so the only honest thing on screen is the sentence
+          saying they are gone until Calculate runs again. */}
       {member.figures === null ? (
         <p className="text-sm text-muted-foreground">
           No figures yet. Calculate this run to see them.
         </p>
+      ) : figuresAreStale ? (
+        <StaleBanner>
+          Earnings changed since these figures were calculated. The figures are hidden until you
+          calculate again.
+        </StaleBanner>
       ) : (
         <Figures figures={member.figures} />
       )}
