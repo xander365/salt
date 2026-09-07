@@ -10,8 +10,8 @@
 // readiness of its own: an empty `blockers` list is the server's own answer
 // that a member is ready, and nothing else here decides that.
 
-import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, CircleCheck } from 'lucide-react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, CircleAlert, CircleCheck } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
@@ -82,6 +82,15 @@ function calculateFailureMessage(caught: unknown): string {
   }
 }
 
+function PayrollAlert({ children }: { children: ReactNode }) {
+  return (
+    <p role="alert" className="flex items-start gap-1.5 text-sm text-destructive">
+      <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+      <span>{children}</span>
+    </p>
+  );
+}
+
 /** The Employment screen a blocker's fix lives on, at the section that
  * holds the form when this blocker names one. */
 function blockerFixPath(
@@ -120,28 +129,16 @@ function Member({
   employerId,
   payrollRunId,
   runIsFinalized,
+  figuresAreStale,
+  onEarningsChanged,
 }: {
   member: PayrollRunMemberDto;
   employerId: string;
   payrollRunId: string;
   runIsFinalized: boolean;
+  figuresAreStale: boolean;
+  onEarningsChanged: () => void;
 }) {
-  // The figures below were true of the last Calculate. Saving earnings never
-  // recomputes them (§0's Further Notes: this screen does no arithmetic of
-  // its own) — so the moment earnings are saved, whatever is still on screen
-  // is honestly stale until the next Calculate replaces it (issue #88's
-  // stale state). Retired the instant a fresh calculation actually lands, by
-  // identity of the `figures` object a new `usePayrollRun`/
-  // `useCalculatePayrollRun` response carries — adjusted during render
-  // rather than in an effect, so this never costs a second render the way
-  // resetting it from a `useEffect` would.
-  const [renderedFigures, setRenderedFigures] = useState(member.figures);
-  const [earningsSavedSince, setEarningsSavedSince] = useState(false);
-  if (renderedFigures !== member.figures) {
-    setRenderedFigures(member.figures);
-    setEarningsSavedSince(false);
-  }
-
   return (
     <li className="flex flex-col gap-4 rounded-xl border bg-card p-6 text-card-foreground shadow-sm">
       <h3 className="text-lg font-semibold">{member.fullName}</h3>
@@ -153,7 +150,7 @@ function Member({
           payrollRunId={payrollRunId}
           employmentId={member.employmentId}
           earnings={member.earnings}
-          onSaved={() => setEarningsSavedSince(true)}
+          onChanged={onEarningsChanged}
         />
       )}
 
@@ -185,7 +182,7 @@ function Member({
         </ul>
       )}
 
-      {earningsSavedSince && member.figures !== null && (
+      {figuresAreStale && member.figures !== null && (
         <StaleBanner>
           Earnings changed since these figures were calculated. Calculate again to see the updated
           amounts.
@@ -215,9 +212,7 @@ function Member({
           Operator just ran said about this member, not standing content
           already on the screen when it loaded. */}
       {member.refusal !== null && (
-        <p role="alert" className="text-sm text-destructive">
-          Could not calculate: {refusalSentence(member.refusal)}
-        </p>
+        <PayrollAlert>Could not calculate: {refusalSentence(member.refusal)}</PayrollAlert>
       )}
     </li>
   );
@@ -441,9 +436,7 @@ function Finalize({
           a button that repeats the wrong request, since Finalize itself
           (above) is what an Operator retries for those. */}
       {failureMessage !== null && !offersCalculateAgain(finalize.error) && (
-        <p role="alert" className="text-sm text-destructive">
-          {failureMessage}
-        </p>
+        <PayrollAlert>{failureMessage}</PayrollAlert>
       )}
     </div>
   );
@@ -460,6 +453,9 @@ export function PayrollRun() {
   const calculate = useCalculatePayrollRun(runId);
   const finalize = useFinalizePayrollRun(runId);
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
+  // Key staleness by run as well as Employment so navigating directly from
+  // one run to another cannot carry a warning onto the new worksheet.
+  const [staleCalculationKeys, setStaleCalculationKeys] = useState<Set<string>>(() => new Set());
 
   if (run.isError && runWasNotFound(run.error)) {
     return <NotFound />;
@@ -476,6 +472,7 @@ export function PayrollRun() {
     finalize.reset();
     try {
       await calculate.mutateAsync();
+      setStaleCalculationKeys(new Set());
     } catch {
       // `calculate.isError` and `calculate.error` already carry this for
       // the render below — nothing further to do here.
@@ -542,9 +539,7 @@ export function PayrollRun() {
           )}
 
           {calculate.isError && (
-            <p role="alert" className="text-sm text-destructive">
-              {calculateFailureMessage(calculate.error)}
-            </p>
+            <PayrollAlert>{calculateFailureMessage(calculate.error)}</PayrollAlert>
           )}
 
           <Finalize
@@ -568,6 +563,14 @@ export function PayrollRun() {
                   employerId={employerId}
                   payrollRunId={runId}
                   runIsFinalized={run.data.status === 'finalized'}
+                  figuresAreStale={staleCalculationKeys.has(`${runId}:${member.employmentId}`)}
+                  onEarningsChanged={() =>
+                    setStaleCalculationKeys((current) => {
+                      const next = new Set(current);
+                      next.add(`${runId}:${member.employmentId}`);
+                      return next;
+                    })
+                  }
                 />
               ))}
             </ul>

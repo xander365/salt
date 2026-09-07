@@ -16,8 +16,9 @@
 // when an allowance is typed (§0's Further Notes) — it sends amounts and
 // shows whatever the next Calculate or reload says. Its own success also
 // flags this member's currently-shown `Figures` stale (`PayrollRun.tsx`'s
-// own `onSaved`, issue #88): they were true of the last Calculate, and this
-// form just changed what the next one will see.
+// own `onChanged`, issue #88): they were true of the last Calculate, and
+// this form just changed what the next one will see. Saving the same lines
+// again is not a change and therefore does not raise a false stale warning.
 
 import { type SubmitEvent, useId, useState } from 'react';
 import { Plus, X } from 'lucide-react';
@@ -76,12 +77,12 @@ export function EarningsForm({
   payrollRunId,
   employmentId,
   earnings,
-  onSaved,
+  onChanged,
 }: {
   payrollRunId: string;
   employmentId: string;
   earnings: EarningLineDto[];
-  onSaved?: () => void;
+  onChanged?: () => void;
 }) {
   const setEarnings = useSetRunEarnings(payrollRunId);
 
@@ -148,11 +149,19 @@ export function EarningsForm({
       kind: 'taxableAllowance' as const,
       amountCents,
     }));
+    const changed =
+      request.length !== earnings.length ||
+      request.some(
+        (line, index) =>
+          line.kind !== earnings[index]?.kind || line.amountCents !== earnings[index]?.amountCents,
+      );
 
     try {
       await setEarnings.mutateAsync({ employmentId, earnings: request });
       setSaved(true);
-      onSaved?.();
+      if (changed) {
+        onChanged?.();
+      }
     } catch (caught) {
       setError(earningsFailureMessage(caught));
     }

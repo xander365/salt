@@ -118,7 +118,7 @@ export function People() {
 
       {employments.isSuccess &&
         (employments.data.employments.length === 0 ? (
-          <EmptyState>No one is employed here yet. Add the first employee below.</EmptyState>
+          <EmptyState>No one is employed here yet. Add the first person below.</EmptyState>
         ) : (
           <ul className="flex flex-col divide-y rounded-lg border">
             {employments.data.employments.map((employment) => (
@@ -142,7 +142,7 @@ export function People() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <UserPlus className="size-4" aria-hidden="true" />
-            Add an employee
+            Add a person
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -173,7 +173,7 @@ export function People() {
             </div>
             {error !== null && <ValidationError id="fullNameError">{error}</ValidationError>}
             <Button type="submit" disabled={createEmployment.isPending} className="sm:self-start">
-              {createEmployment.isPending ? 'Adding…' : 'Add employee'}
+              {createEmployment.isPending ? 'Adding…' : 'Add person'}
             </Button>
           </form>
 

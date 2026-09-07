@@ -14,7 +14,7 @@ export function EmployerHome() {
     <main className="flex flex-col gap-2">
       <p className="text-sm text-muted-foreground">Signed in as {session.operator.displayName}.</p>
       <p className="text-muted-foreground">
-        Use People to add employees and record what they are paid, or Payroll to run, calculate and
+        Use People to add people and record what they are paid, or Payroll to run, calculate and
         finalize a pay period.
       </p>
     </main>

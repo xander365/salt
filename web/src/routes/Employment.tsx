@@ -15,8 +15,8 @@ import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import { useEmployment } from '../employments/useEmployments';
-import { moneyDisplayText } from '../money';
 import { humanDate } from '../format';
+import { Money } from '../components/Money';
 import { CompensationTermsForm } from './employment/CompensationTermsForm';
 import { OpeningBalanceForm } from './employment/OpeningBalanceForm';
 import { PriorEmploymentForm } from './employment/PriorEmploymentForm';
@@ -43,14 +43,14 @@ function employmentLoadFailureMessage(caught: unknown): string {
   return 'We could not load this Employment.';
 }
 
-function currentPayText(cents: number | null): string {
+function CurrentPay({ cents }: { cents: number | null }) {
   if (cents === null) {
-    return 'not yet recorded';
+    return <>not yet recorded</>;
   }
   if (!Number.isSafeInteger(cents) || cents < 0) {
-    return 'unavailable because the amount cannot be displayed exactly';
+    return <>unavailable because the amount cannot be displayed exactly</>;
   }
-  return moneyDisplayText(cents);
+  return <Money cents={cents} />;
 }
 
 export function Employment() {
@@ -104,8 +104,13 @@ export function Employment() {
             <p className="text-sm text-muted-foreground">
               Employed from {humanDate(employment.data.startDate)}
               {employment.data.endDate === null ? '' : ` to ${humanDate(employment.data.endDate)}`}.
-              Current pay: {currentPayText(employment.data.currentBasicPayCents)}
             </p>
+            <dl className="mt-1 grid w-fit grid-cols-[auto_auto] gap-x-2 text-sm">
+              <dt className="text-muted-foreground">Current pay</dt>
+              <dd className="money">
+                <CurrentPay cents={employment.data.currentBasicPayCents} />
+              </dd>
+            </dl>
           </div>
 
           <div className="flex flex-col gap-6">

@@ -5,6 +5,7 @@
 // second call to make here.
 
 import { Building2 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate } from 'react-router-dom';
 import { useAuthorizedSession } from '../session/AuthorizedSession';
 import { SignOutButton } from '../session/SignOutButton';
@@ -14,6 +15,11 @@ import { employerPath } from './paths';
 
 export function AppLanding() {
   const { memberships } = useAuthorizedSession();
+  const queryClient = useQueryClient();
+
+  function clearEmployerCache() {
+    queryClient.removeQueries({ queryKey: ['employers'] });
+  }
 
   if (memberships.length === 1) {
     return <Navigate to={employerPath(memberships[0].employerId)} replace />;
@@ -32,7 +38,7 @@ export function AppLanding() {
         <ul className="flex flex-col gap-3">
           {memberships.map((membership) => (
             <li key={membership.employerId}>
-              <Link to={employerPath(membership.employerId)}>
+              <Link to={employerPath(membership.employerId)} onClick={clearEmployerCache}>
                 <Card className="transition-colors hover:border-primary">
                   <CardHeader className="flex-row items-center gap-3 space-y-0">
                     <Building2 className="size-5 text-primary" aria-hidden="true" />

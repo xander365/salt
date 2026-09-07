@@ -25,7 +25,7 @@ export function SignOutButton() {
   }
 
   return (
-    <span className="flex items-center gap-2">
+    <div className="flex items-center gap-2">
       {failed && <ValidationError>We could not sign you out. Please try again.</ValidationError>}
       <Button
         type="button"
@@ -36,6 +36,6 @@ export function SignOutButton() {
       >
         {isPending ? 'Signing out…' : 'Sign out'}
       </Button>
-    </span>
+    </div>
   );
 }

@@ -72,6 +72,12 @@ No error, blocked, or stale state is colour alone — each pairs its colour with
 - A save confirmation is a `role="status"` sentence beneath the form, not a toast — it has to survive being read back by the browser journey and by a screen reader without timing out.
 - A failed submission never clears what was typed. The field values stay in state; only a retry (resubmitting the same values) or an edit clears the error.
 
+## Tables, dialogs, and copy
+
+- Tables use semantic `<table>` markup with a concise caption for assistive technology, column headings with `scope="col"`, hairline row separators, and right-aligned tabular numerals for monetary columns. Dense financial workings may tighten vertical spacing, but must remain readable at narrow widths without hiding columns.
+- Prefer an inline confirmation beside the initiating action when the decision is short and belongs to the current task, as Finalize does. Use a modal dialog only when interruption and protected focus are necessary; a dialog must have a visible title, an explicit consequence, an initial focus target, Cancel, and focus restoration to its trigger.
+- Copy uses `CONTEXT.md`'s domain terms, names the action on controls, and states both the problem and the available recovery in errors. Dates and money follow the display-versus-input distinctions above; decorative or congratulatory copy never displaces the current task.
+
 ## Navigation and worksheet
 
 - Persistent People / Payroll nav (`EmployerShell`), active item styled with `--primary`, `aria-current` implicit via `react-router-dom`'s `NavLink`.

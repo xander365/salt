@@ -144,10 +144,10 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // One membership: land in the single Employer, never a switcher screen.
   await expect(page.getByRole('heading', { level: 1, name: operator.employerName })).toBeVisible();
 
-  // Add an employee by full name.
+  // Add a person by full name.
   await page.getByRole('link', { name: 'People' }).click();
   await page.getByLabel('Full name').fill('Ada Lovelace');
-  await page.getByRole('button', { name: 'Add employee' }).click();
+  await page.getByRole('button', { name: 'Add person' }).click();
   await expect(page.getByRole('status')).toHaveText('Added Ada Lovelace.');
   await page.getByRole('link', { name: 'Ada Lovelace' }).click();
   await expect(page.getByRole('heading', { level: 2, name: 'Ada Lovelace' })).toBeVisible();
@@ -246,6 +246,34 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   expect(figures.payeCents).toBeGreaterThanOrEqual(0);
   expect(figures.totalDeductionsCents).toBe(figures.payeCents + figures.employeeSscCents);
   expect(figures.netCents).toBe(figures.grossCents - figures.totalDeductionsCents);
+
+  // Saving an unchanged earnings list is not a change and must not describe
+  // the figures as stale.
+  await Promise.all([
+    page.waitForResponse(
+      (response) => response.request().method() === 'PUT' && response.url().endsWith('/earnings'),
+    ),
+    page.getByRole('button', { name: 'Save earnings' }).click(),
+  ]);
+  await expect(page.getByText('Earnings changed since these figures were calculated.')).toHaveCount(
+    0,
+  );
+
+  // Change the line shape without changing its total. This specifically
+  // proves Calculate clears the stale state from its own success rather
+  // than relying on an equal Figures object receiving a new identity.
+  await page.getByRole('textbox', { name: 'Taxable allowance', exact: true }).fill('100.00');
+  await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
+  await page.getByRole('textbox', { name: 'Taxable allowance', exact: true }).nth(1).fill('100.00');
+  await page.getByRole('button', { name: 'Save earnings' }).click();
+  await expect(
+    page.getByText('Earnings changed since these figures were calculated.'),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Calculate' }).click();
+  await expect(page.getByText('Earnings changed since these figures were calculated.')).toHaveCount(
+    0,
+  );
+  expect(await readFigures(page)).toEqual(figures);
 
   // Finalize through the confirmation. The confirmation is the deliberate
   // step (§0.26): it has to be on the screen, and it has to say how many
