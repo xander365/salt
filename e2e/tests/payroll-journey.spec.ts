@@ -118,6 +118,10 @@ async function readFigures(page: Page): Promise<Figures> {
   await expect(definitions).toHaveCount(FIGURE_FIELDS.length);
   const figures = {} as Figures;
   for (const { field, name } of FIGURE_FIELDS) {
+    // By the name a person reads beside the amount, never by position in the
+    // list. The name is on the group and not on the `definition` itself
+    // because ARIA 1.2 prohibits naming a `definition` — see
+    // `web/src/routes/payroll/Figures.tsx`.
     const figure = page.getByRole('group', { name, exact: true });
     await expect(figure).toBeVisible();
     const definition = figure.getByRole('definition');
@@ -242,8 +246,14 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   expect(figures.totalDeductionsCents).toBe(figures.payeCents + figures.employeeSscCents);
   expect(figures.netCents).toBe(figures.grossCents - figures.totalDeductionsCents);
 
-  // Finalize through the confirmation.
-  await page.getByRole('button', { name: 'Finalize' }).click();
+  // Finalize through the confirmation. The confirmation is the deliberate
+  // step (§0.26): it has to be on the screen, and it has to say how many
+  // people becoming history covers, before the second click is a decision
+  // rather than a ritual.
+  await page.getByRole('button', { name: 'Finalize', exact: true }).click();
+  await expect(
+    page.getByText('This creates immutable payroll history for 1 person.'),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Confirm finalize' }).click();
 
   // See the finalized payroll: the one member this run finalized navigates
@@ -251,6 +261,9 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await expect(page.getByText('This payroll is finalized and cannot be changed.')).toBeVisible();
   expect(await readFigures(page)).toEqual(figures);
   const finalizedUrl = page.url();
+  // The screen changed because the URL did — a finalized payroll of its
+  // own, never the run screen redrawing itself.
+  expect(finalizedUrl).toMatch(/\/app\/employers\/[^/]+\/finalized\/[^/]+$/);
 
   // Reload and see the same finalized payroll. Load-bearing (issue #68's
   // own Deep Instructions): this proves the figures came from the server

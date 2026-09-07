@@ -39,3 +39,36 @@ DATABASE_URL="postgres:///salt_server_test?host=/var/run/postgresql&user=alex" c
 ```
 
 Re-run the `sqlx migrate run` command above after any migration is added to `crates/payroll-app/migrations`.
+
+### Browser journey suite
+
+`e2e/` holds one Playwright test (issue #68): the whole payroll journey, in
+a real browser, against a built `salt-server`, the built `web/` bundle and a
+real PostgreSQL. It is outside both the Cargo workspace and `web/`.
+
+`payroll_app::bootstrap` refuses once any Operator exists, so this suite
+needs a database with none — never the shared `salt_server_test` one, and a
+fresh one every run:
+
+```sh
+dropdb -h /var/run/postgresql -U alex --if-exists salt_e2e
+createdb -h /var/run/postgresql -U alex salt_e2e
+sqlx migrate run --source crates/payroll-app/migrations \
+    --database-url "postgres:///salt_e2e?host=/var/run/postgresql&user=alex"
+```
+
+Then build what the browser drives — the test starts these two servers
+itself, but builds neither — and run it:
+
+```sh
+cargo build --locked -p salt-server
+npm --prefix web ci && npm --prefix web run build
+npm --prefix e2e ci
+(cd e2e && npx playwright install chromium)
+DATABASE_URL="postgres:///salt_e2e?host=/var/run/postgresql&user=alex" \
+    npm --prefix e2e test
+```
+
+Re-run the `createdb`/`migrate` pair before each run, and rebuild after any
+change to `salt-server` or `web/` — the suite drives the built artefacts, not
+the sources.

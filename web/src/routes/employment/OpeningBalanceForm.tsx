@@ -61,6 +61,7 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
   const taxYearId = useId();
   const saltCoverageStartId = useId();
   const errorId = useId();
+  const headingId = useId();
 
   // Clears the confirmation as well: it quotes the date and both amounts,
   // so leaving it up beside changed fields would describe a balance nobody
@@ -119,8 +120,8 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
   }
 
   return (
-    <section>
-      <h3>Opening balance</h3>
+    <section aria-labelledby={headingId}>
+      <h3 id={headingId}>Opening balance</h3>
       <p>
         Only needed when Salt takes over part-way through a tax year. Choose the first pay period
         Salt will process; the amounts cover earlier periods in that tax year.

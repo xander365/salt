@@ -23,15 +23,24 @@ const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
 ];
 
 export function Figures({ figures }: { figures: FiguresDto }) {
-  const labelIdPrefix = useId();
+  // One prefix per rendered `Figures`, so two of them on one screen — a run
+  // with two calculated members — still give every figure a term of its own
+  // to point at.
+  const termIdPrefix = useId();
 
   return (
     <dl>
       {FIGURE_FIELDS.map(({ key, label }) => {
-        const labelId = `${labelIdPrefix}-${key}`;
+        const termId = `${termIdPrefix}-${key}`;
         return (
-          <div key={key} role="group" aria-labelledby={labelId}>
-            <dt id={labelId}>{label}</dt>
+          // The wrapping `group` is what carries the accessible name, and it
+          // has to: ARIA 1.2 prohibits naming a `term` or a `definition`, so
+          // a `dd` can never announce which figure it is on its own. Naming
+          // the pair instead is what lets a person — or the browser journey
+          // test standing in for one — reach "PAYE" by the word beside it
+          // rather than by counting rows.
+          <div key={key} role="group" aria-labelledby={termId}>
+            <dt id={termId}>{label}</dt>
             <dd>{centsText(figures[key])}</dd>
           </div>
         );

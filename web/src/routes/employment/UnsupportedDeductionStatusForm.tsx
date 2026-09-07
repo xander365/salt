@@ -69,6 +69,7 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
   const effectiveFromId = useId();
   const reasonId = useId();
   const errorId = useId();
+  const headingId = useId();
 
   // Clears the confirmation too: it quotes the date, the status and the
   // kinds, so leaving it up beside changed fields would describe a
@@ -145,11 +146,8 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
     // Named so a payroll run's `unsupported_deduction_status_unknown` and
     // `unsupported_deductions_present` blockers can link straight here
     // (issue #64's own Deep Instructions).
-    <section
-      id="unsupported-deductions"
-      aria-labelledby={`${effectiveFromId}-section-heading`}
-    >
-      <h3 id={`${effectiveFromId}-section-heading`}>Unsupported deductions</h3>
+    <section id="unsupported-deductions" aria-labelledby={headingId}>
+      <h3 id={headingId}>Unsupported deductions</h3>
       <form onSubmit={handleSubmit}>
         <div>
           <label htmlFor={effectiveFromId}>Effective from</label>

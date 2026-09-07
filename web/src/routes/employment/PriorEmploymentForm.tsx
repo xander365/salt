@@ -52,6 +52,7 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
   const [saved, setSaved] = useState<string | null>(null);
   const taxYearId = useId();
   const errorId = useId();
+  const headingId = useId();
 
   // Every field this form's confirmation quotes clears it: a sentence
   // reading "no prior employment" beside a radio group now saying "yes"
@@ -122,8 +123,8 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
     // Named so a payroll run's `prior_employment_unknown` and
     // `prior_employment_treatment_unconfirmed` blockers can link straight
     // here (issue #64's own Deep Instructions).
-    <section id="prior-employment" aria-labelledby={`${taxYearId}-section-heading`}>
-      <h3 id={`${taxYearId}-section-heading`}>Prior employment</h3>
+    <section id="prior-employment" aria-labelledby={headingId}>
+      <h3 id={headingId}>Prior employment</h3>
       <form onSubmit={handleSubmit}>
         <div>
           <label htmlFor={taxYearId}>Tax year starting</label>

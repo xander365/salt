@@ -297,3 +297,16 @@ jobs:
       - name: Run the browser payroll journey test
         working-directory: e2e
         run: npm test
+
+      - name: Upload the failing run's trace
+        # `playwright.config.ts` retains a trace only when the journey
+        # fails, and a failed browser journey is the one failure in this
+        # workflow that cannot be read from the log alone. `if: failure()`
+        # so a green run uploads nothing.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-journey-trace
+          path: e2e/test-results
+          retention-days: 7
+          if-no-files-found: ignore

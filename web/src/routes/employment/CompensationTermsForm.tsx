@@ -53,6 +53,7 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
   const effectiveFromId = useId();
   const basicPayId = useId();
   const errorId = useId();
+  const headingId = useId();
 
   // Clears the confirmation as well: it quotes the amount and the date, so
   // leaving it up beside changed fields would describe pay nobody saved.
@@ -96,8 +97,8 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
     // Named so a payroll run's `no_compensation_terms_in_force` blocker can
     // link straight here (issue #64's own Deep Instructions: a link is the
     // highest-value detail a blocker sentence carries).
-    <section id="compensation-terms" aria-labelledby={`${effectiveFromId}-section-heading`}>
-      <h3 id={`${effectiveFromId}-section-heading`}>Pay</h3>
+    <section id="compensation-terms" aria-labelledby={headingId}>
+      <h3 id={headingId}>Pay</h3>
       <form onSubmit={handleSubmit}>
         <div>
           <label htmlFor={effectiveFromId}>Effective from</label>
