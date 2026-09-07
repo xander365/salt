@@ -14,6 +14,10 @@ import type {
 import { useDeclareUnsupportedDeductionStatus } from '../../employments/useEmploymentFacts';
 import { type FieldError, fieldErrorProps } from './fieldError';
 import { KINDS } from './unsupportedDeductionKinds';
+import { Button } from '../../components/ui/button';
+import { Input } from '../../components/ui/input';
+import { Label } from '../../components/ui/label';
+import { ValidationError } from '../../components/states/ValidationError';
 
 /** The chosen kinds in `KINDS`' own order, so two Operators who tick the
  * same boxes read the same sentence back. */
@@ -146,12 +150,18 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
     // Named so a payroll run's `unsupported_deduction_status_unknown` and
     // `unsupported_deductions_present` blockers can link straight here
     // (issue #64's own Deep Instructions).
-    <section id="unsupported-deductions" aria-labelledby={headingId}>
-      <h3 id={headingId}>Unsupported deductions</h3>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor={effectiveFromId}>Effective from</label>
-          <input
+    <section
+      id="unsupported-deductions"
+      aria-labelledby={headingId}
+      className="rounded-xl border bg-card p-6 text-card-foreground shadow-sm"
+    >
+      <h3 id={headingId} className="mb-4 text-base font-semibold">
+        Unsupported deductions
+      </h3>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:max-w-sm">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={effectiveFromId}>Effective from</Label>
+          <Input
             id={effectiveFromId}
             type="date"
             required
@@ -167,12 +177,14 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
           role="radiogroup"
           aria-label={STATUS_QUESTION}
           {...fieldErrorProps(fieldError, 'status', errorId)}
+          className="flex flex-col gap-2"
         >
-          <legend>{STATUS_QUESTION}</legend>
-          <label>
+          <legend className="mb-1 text-sm font-medium">{STATUS_QUESTION}</legend>
+          <label className="flex w-fit items-center gap-2 text-sm">
             <input
               type="radio"
               name={`unsupported-deduction-status-${employmentId}`}
+              className="size-4 accent-primary"
               checked={status === 'confirmed_none'}
               onChange={() => {
                 setStatus('confirmed_none');
@@ -182,10 +194,11 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
             />
             No
           </label>
-          <label>
+          <label className="flex w-fit items-center gap-2 text-sm">
             <input
               type="radio"
               name={`unsupported-deduction-status-${employmentId}`}
+              className="size-4 accent-primary"
               checked={status === 'present'}
               onChange={() => {
                 setStatus('present');
@@ -197,12 +210,16 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
         </fieldset>
 
         {status === 'present' && (
-          <fieldset {...fieldErrorProps(fieldError, 'kinds', errorId)}>
-            <legend>Which kinds?</legend>
+          <fieldset
+            {...fieldErrorProps(fieldError, 'kinds', errorId)}
+            className="flex flex-col gap-2"
+          >
+            <legend className="mb-1 text-sm font-medium">Which kinds?</legend>
             {KINDS.map((kind) => (
-              <label key={kind.code}>
+              <label key={kind.code} className="flex w-fit items-center gap-2 text-sm">
                 <input
                   type="checkbox"
+                  className="size-4 accent-primary"
                   checked={kinds.has(kind.code)}
                   onChange={() => toggleKind(kind.code)}
                 />
@@ -212,9 +229,9 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
           </fieldset>
         )}
 
-        <div>
-          <label htmlFor={reasonId}>Reason</label>
-          <input
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={reasonId}>Reason</Label>
+          <Input
             id={reasonId}
             type="text"
             required
@@ -228,25 +245,25 @@ export function UnsupportedDeductionStatusForm({ employmentId }: { employmentId:
         </div>
 
         {(fieldError !== null || error !== null) && (
-          <p id={errorId} role="alert">
-            {fieldError?.message ?? error}
-          </p>
+          <ValidationError id={errorId}>{fieldError?.message ?? error}</ValidationError>
         )}
-        <button type="submit" disabled={declareStatus.isPending}>
+        <Button type="submit" disabled={declareStatus.isPending} className="self-start">
           {declareStatus.isPending ? 'Saving…' : 'Save unsupported deductions'}
-        </button>
+        </Button>
       </form>
 
       {/* Same reason as `PriorEmploymentForm`'s: no route reads a
           declaration back, so this states only what this screen has done,
           and never calls an unanswered question a "no". */}
       {saved === null && (
-        <p>
+        <p className="mt-3 text-sm text-muted-foreground">
           Nothing has been declared from this screen. A date with no declaration counts as unknown,
           not as “none”.
         </p>
       )}
-      <p role="status">{saved ?? ''}</p>
+      <p role="status" className="mt-3 text-sm text-success">
+        {saved ?? ''}
+      </p>
     </section>
   );
 }

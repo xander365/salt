@@ -8,6 +8,10 @@ import { type SubmitEvent, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { useLogin } from '../session/useSession';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
+import { ValidationError } from '../components/states/ValidationError';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
@@ -33,12 +37,12 @@ export function LoginPage() {
   }
 
   return (
-    <main>
-      <h1>Sign in</h1>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor="email">Email</label>
-          <input
+    <main className="mx-auto flex min-h-dvh max-w-sm flex-col justify-center px-6 py-16">
+      <h1 className="mb-6 text-xl font-semibold tracking-tight">Sign in</h1>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="email">Email</Label>
+          <Input
             id="email"
             name="email"
             type="email"
@@ -48,9 +52,9 @@ export function LoginPage() {
             onChange={(event) => setEmail(event.target.value)}
           />
         </div>
-        <div>
-          <label htmlFor="password">Password</label>
-          <input
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="password">Password</Label>
+          <Input
             id="password"
             name="password"
             type="password"
@@ -60,10 +64,10 @@ export function LoginPage() {
             onChange={(event) => setPassword(event.target.value)}
           />
         </div>
-        {error !== null && <p role="alert">{error}</p>}
-        <button type="submit" disabled={login.isPending}>
+        {error !== null && <ValidationError>{error}</ValidationError>}
+        <Button type="submit" disabled={login.isPending} className="mt-2">
           {login.isPending ? 'Signing in…' : 'Sign in'}
-        </button>
+        </Button>
       </form>
     </main>
   );

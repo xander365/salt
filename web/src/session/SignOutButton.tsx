@@ -4,6 +4,8 @@
 
 import { useState } from 'react';
 import { useSignOut } from './useSession';
+import { Button } from '../components/ui/button';
+import { ValidationError } from '../components/states/ValidationError';
 
 export function SignOutButton() {
   const { isPending, signOut } = useSignOut();
@@ -23,11 +25,17 @@ export function SignOutButton() {
   }
 
   return (
-    <>
-      {failed && <p role="alert">We could not sign you out. Please try again.</p>}
-      <button type="button" onClick={() => void handleSignOut()} disabled={isPending}>
+    <span className="flex items-center gap-2">
+      {failed && <ValidationError>We could not sign you out. Please try again.</ValidationError>}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => void handleSignOut()}
+        disabled={isPending}
+      >
         {isPending ? 'Signing out…' : 'Sign out'}
-      </button>
-    </>
+      </Button>
+    </span>
   );
 }

@@ -50,3 +50,29 @@ export function centsText(cents: number): string {
     return 'an amount that cannot be displayed exactly';
   }
 }
+
+/**
+ * DESIGN.md's one money-display convention: `N$` and a thousands separator,
+ * for every place an amount is shown as data (a table, a worksheet, a
+ * figure) rather than echoed back from what an Operator just typed. Pair
+ * with the `.money` utility class (`index.css`) for right-aligned tabular
+ * numerals.
+ *
+ * Never used to build the value an editable input holds — {@link
+ * formatCents} stays the round trip with {@link parseCentsInput} for that,
+ * because `parseCentsInput` cannot read a comma or a currency symbol back.
+ */
+export function formatMoneyDisplay(cents: number): string {
+  const [whole, fraction] = formatCents(cents).split('.');
+  return `N$${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${fraction}`;
+}
+
+/** {@link formatMoneyDisplay}, guarded the same way {@link centsText} guards
+ * {@link formatCents}. */
+export function moneyDisplayText(cents: number): string {
+  try {
+    return formatMoneyDisplay(cents);
+  } catch {
+    return 'an amount that cannot be displayed exactly';
+  }
+}

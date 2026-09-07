@@ -1,21 +1,27 @@
 // `/app/employers/:employerId/finalized/:finalizedPayrollId` (issue #66,
-// parent #59 Spec 3 of 3, §0.29). One immutable finalized payroll: the nine
-// figures, the period, the pay date and the SaltVersion that produced them.
+// parent #59 Spec 3 of 3, §0.29; rebuilt for issue #88). One immutable
+// finalized payroll: the nine figures, the period, the pay date and the
+// SaltVersion that produced them.
 //
 // There is no lifecycle to read here and nothing this screen could offer to
 // change (§2.5: finalization is the approval, and there is no `Reviewed`
 // state). Signing out and back in, or reloading, reads the same figures
 // every time, because a `FinalizedPayroll` never changes once written.
 
+import { ArrowLeft } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import { useFinalizedPayroll } from '../finalizedPayroll/useFinalizedPayroll';
 import { Workings } from '../finalizedPayroll/Workings';
 import { useEmployerId } from '../employments/useEmployments';
+import { humanDate, humanDateRange } from '../format';
 import { NotFound } from './NotFound';
 import { employerPath } from './paths';
 import { Figures } from './payroll/Figures';
+import { LoadingState } from '../components/states/LoadingState';
+import { FailedRequestState } from '../components/states/FailedRequestState';
+import { FinalizedBanner } from '../components/states/FinalizedBanner';
 
 function finalizedPayrollWasNotFound(caught: unknown): boolean {
   return (
@@ -48,32 +54,44 @@ export function FinalizedPayroll() {
   }
 
   return (
-    <main>
-      <p>
-        <Link to={`${employerPath(employerId)}/payroll`}>← Payroll</Link>
-      </p>
+    <main className="flex flex-col gap-6">
+      {/* Named distinctly from the persistent "Payroll" nav link beside it,
+          the same reason `PayrollRun.tsx`'s own back link is. */}
+      <Link
+        to={`${employerPath(employerId)}/payroll`}
+        aria-label="Back to Payroll"
+        className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      >
+        <ArrowLeft className="size-4" aria-hidden="true" />
+        Payroll
+      </Link>
 
-      {finalizedPayroll.isPending && <p>Loading…</p>}
+      {finalizedPayroll.isPending && <LoadingState label="Loading finalized payroll…" />}
 
       {finalizedPayroll.isError && (
-        <p role="alert">
-          {loadFailureMessage(finalizedPayroll.error)}{' '}
-          <button type="button" onClick={() => void finalizedPayroll.refetch()}>
-            Try again
-          </button>
-        </p>
+        <FailedRequestState
+          message={loadFailureMessage(finalizedPayroll.error)}
+          onRetry={() => void finalizedPayroll.refetch()}
+          retrying={finalizedPayroll.isFetching}
+        />
       )}
 
       {finalizedPayroll.isSuccess && (
         <>
-          <h2>
-            {finalizedPayroll.data.fullName}: {finalizedPayroll.data.period.start} to{' '}
-            {finalizedPayroll.data.period.end}
-          </h2>
-          <p>Pay date: {finalizedPayroll.data.payDate}</p>
-          <p>This payroll is finalized and cannot be changed.</p>
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight">
+              {finalizedPayroll.data.fullName}:{' '}
+              {humanDateRange(finalizedPayroll.data.period.start, finalizedPayroll.data.period.end)}
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Pay date: {humanDate(finalizedPayroll.data.payDate)}
+            </p>
+          </div>
+          <FinalizedBanner>This payroll is finalized and cannot be changed.</FinalizedBanner>
           <Figures figures={finalizedPayroll.data.figures} />
-          <p>Salt version: {finalizedPayroll.data.saltVersion}</p>
+          <p className="text-sm text-muted-foreground">
+            Salt version: {finalizedPayroll.data.saltVersion}
+          </p>
           {/* Last, and closed: the everyday facts above read exactly as they
               did before issue #67, and the workings are there when asked
               for (§0.29). */}

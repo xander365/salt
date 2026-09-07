@@ -15,6 +15,10 @@ import { useDeclarePriorEmployment } from '../../employments/useEmploymentFacts'
 import { type FieldError, fieldErrorProps } from './fieldError';
 import { formatCents, parseCentsInput } from '../../money';
 import { currentTaxYearStartingYear, parseTaxYearInput } from '../../taxYear';
+import { Button } from '../../components/ui/button';
+import { Input } from '../../components/ui/input';
+import { Label } from '../../components/ui/label';
+import { ValidationError } from '../../components/states/ValidationError';
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -123,12 +127,18 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
     // Named so a payroll run's `prior_employment_unknown` and
     // `prior_employment_treatment_unconfirmed` blockers can link straight
     // here (issue #64's own Deep Instructions).
-    <section id="prior-employment" aria-labelledby={headingId}>
-      <h3 id={headingId}>Prior employment</h3>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor={taxYearId}>Tax year starting</label>
-          <input
+    <section
+      id="prior-employment"
+      aria-labelledby={headingId}
+      className="rounded-xl border bg-card p-6 text-card-foreground shadow-sm"
+    >
+      <h3 id={headingId} className="mb-4 text-base font-semibold">
+        Prior employment
+      </h3>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:max-w-sm">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={taxYearId}>Tax year starting</Label>
+          <Input
             id={taxYearId}
             type="number"
             required
@@ -148,12 +158,14 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
           role="radiogroup"
           aria-label={STATUS_QUESTION}
           {...fieldErrorProps(fieldError, 'status', errorId)}
+          className="flex flex-col gap-2"
         >
-          <legend>{STATUS_QUESTION}</legend>
-          <label>
+          <legend className="mb-1 text-sm font-medium">{STATUS_QUESTION}</legend>
+          <label className="flex w-fit items-center gap-2 text-sm">
             <input
               type="radio"
               name={`prior-employment-status-${employmentId}`}
+              className="size-4 accent-primary"
               checked={status === 'confirmed_none'}
               onChange={() => {
                 setStatus('confirmed_none');
@@ -162,10 +174,11 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
             />
             No
           </label>
-          <label>
+          <label className="flex w-fit items-center gap-2 text-sm">
             <input
               type="radio"
               name={`prior-employment-status-${employmentId}`}
+              className="size-4 accent-primary"
               checked={status === 'present'}
               onChange={() => {
                 setStatus('present');
@@ -178,9 +191,9 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
 
         {status === 'present' && (
           <>
-            <div>
-              <label htmlFor={`${taxYearId}-taxable`}>Taxable remuneration so far</label>
-              <input
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor={`${taxYearId}-taxable`}>Taxable remuneration so far</Label>
+              <Input
                 id={`${taxYearId}-taxable`}
                 type="text"
                 inputMode="decimal"
@@ -194,9 +207,9 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
                 }}
               />
             </div>
-            <div>
-              <label htmlFor={`${taxYearId}-paye`}>PAYE already withheld</label>
-              <input
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor={`${taxYearId}-paye`}>PAYE already withheld</Label>
+              <Input
                 id={`${taxYearId}-paye`}
                 type="text"
                 inputMode="decimal"
@@ -214,13 +227,11 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
         )}
 
         {(fieldError !== null || error !== null) && (
-          <p id={errorId} role="alert">
-            {fieldError?.message ?? error}
-          </p>
+          <ValidationError id={errorId}>{fieldError?.message ?? error}</ValidationError>
         )}
-        <button type="submit" disabled={declarePriorEmployment.isPending}>
+        <Button type="submit" disabled={declarePriorEmployment.isPending} className="self-start">
           {declarePriorEmployment.isPending ? 'Saving…' : 'Save prior employment'}
-        </button>
+        </Button>
       </form>
 
       {/* Nothing here reads the declaration back — no route does (§0.22),
@@ -228,14 +239,16 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
           it knows: that this screen has recorded nothing. It never says
           "none", because a question nobody answered is not an answer. */}
       {saved === null && (
-        <p>
+        <p className="mt-3 text-sm text-muted-foreground">
           Nothing has been declared from this screen. A tax year with no declaration counts as
           unknown, not as “none”.
         </p>
       )}
       {/* Mounted whether or not there is anything to say, so a screen reader
           announces the confirmation as a change to a region already there. */}
-      <p role="status">{saved ?? ''}</p>
+      <p role="status" className="mt-3 text-sm text-success">
+        {saved ?? ''}
+      </p>
     </section>
   );
 }

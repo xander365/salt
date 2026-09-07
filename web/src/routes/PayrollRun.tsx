@@ -1,7 +1,7 @@
 // `/app/employers/:employerId/payroll/:runId` (issue #64, parent #59 Spec 3
-// of 3, §0.29/§0.31). Every member one payroll run proposes to pay, by name,
-// with their current Earning lines and why they cannot be paid yet, if at
-// all.
+// of 3, §0.29/§0.31; rebuilt for issue #88). Every member one payroll run
+// proposes to pay, by name, with their current Earning lines and why they
+// cannot be paid yet, if at all.
 //
 // `blockers` is read straight off this screen's own `GET` (`usePayrollRun`)
 // on every render, including a reload — never cached separately, so a fact
@@ -11,6 +11,7 @@
 // that a member is ready, and nothing else here decides that.
 
 import { useEffect, useRef, useState } from 'react';
+import { ArrowLeft, CircleCheck } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
@@ -21,7 +22,8 @@ import type {
   PayrollRunMemberDto,
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
-import { centsText } from '../money';
+import { humanDate, humanDateRange } from '../format';
+import { Money } from '../components/Money';
 import {
   useCalculatePayrollRun,
   useFinalizePayrollRun,
@@ -38,6 +40,12 @@ import {
 } from './payroll/finalizeText';
 import { Figures } from './payroll/Figures';
 import { refusalSentence } from './payroll/refusalText';
+import { Button } from '../components/ui/button';
+import { LoadingState } from '../components/states/LoadingState';
+import { EmptyState } from '../components/states/EmptyState';
+import { FailedRequestState } from '../components/states/FailedRequestState';
+import { BlockedItem } from '../components/states/BlockedItem';
+import { StaleBanner } from '../components/states/StaleBanner';
 
 function runWasNotFound(caught: unknown): boolean {
   return (
@@ -92,14 +100,16 @@ function blockerFixPath(
  * — the same reason Finalize and Calculate are both gone by this point. */
 function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
   if (earnings.length === 0) {
-    return <p>No taxable allowances on this line.</p>;
+    return <p className="text-sm text-muted-foreground">No taxable allowances on this line.</p>;
   }
   return (
-    <ul>
+    <ul className="text-sm">
       {earnings.map((line, index) => (
         // The wire order is the stored order and there is no id to key on,
         // and this list is never reordered or edited — it is read-only.
-        <li key={index}>Taxable allowance {centsText(line.amountCents)}</li>
+        <li key={index}>
+          Taxable allowance <Money cents={line.amountCents} />
+        </li>
       ))}
     </ul>
   );
@@ -116,9 +126,25 @@ function Member({
   payrollRunId: string;
   runIsFinalized: boolean;
 }) {
+  // The figures below were true of the last Calculate. Saving earnings never
+  // recomputes them (§0's Further Notes: this screen does no arithmetic of
+  // its own) — so the moment earnings are saved, whatever is still on screen
+  // is honestly stale until the next Calculate replaces it (issue #88's
+  // stale state). Retired the instant a fresh calculation actually lands, by
+  // identity of the `figures` object a new `usePayrollRun`/
+  // `useCalculatePayrollRun` response carries — adjusted during render
+  // rather than in an effect, so this never costs a second render the way
+  // resetting it from a `useEffect` would.
+  const [renderedFigures, setRenderedFigures] = useState(member.figures);
+  const [earningsSavedSince, setEarningsSavedSince] = useState(false);
+  if (renderedFigures !== member.figures) {
+    setRenderedFigures(member.figures);
+    setEarningsSavedSince(false);
+  }
+
   return (
-    <li>
-      <h3>{member.fullName}</h3>
+    <li className="flex flex-col gap-4 rounded-xl border bg-card p-6 text-card-foreground shadow-sm">
+      <h3 className="text-lg font-semibold">{member.fullName}</h3>
 
       {runIsFinalized ? (
         <FinalizedEarnings earnings={member.earnings} />
@@ -127,30 +153,43 @@ function Member({
           payrollRunId={payrollRunId}
           employmentId={member.employmentId}
           earnings={member.earnings}
+          onSaved={() => setEarningsSavedSince(true)}
         />
       )}
+
+      {/* The hours column slot (issue #88's own Deep Instructions): hourly
+          pay is out of this milestone, but the worksheet already reserves
+          the place for it, so the later change is a fill rather than a
+          redesign. */}
+      <div className="text-sm text-muted-foreground">
+        <span className="font-medium text-foreground">Hours:</span> —
+      </div>
 
       {/* The two "present" blockers matter as much as the two "unknown"
           ones. An empty list says only that no standing fact is currently
           blocking calculation — a fresh calculation may still refuse for a
           calculation-time reason. */}
       {member.blockers.length === 0 ? (
-        <p>No standing blockers.</p>
+        <p className="text-sm text-muted-foreground">No standing blockers.</p>
       ) : (
-        <ul>
+        <ul className="flex flex-col gap-2">
           {/* Not `role="alert"`: a blocker is standing content that is
               already on the screen when it loads, not something that just
               happened. Marking each one assertive would make a screen
               reader interrupt itself once per blocker on every load. */}
           {member.blockers.map((blocker) => (
-            <li key={blocker.code}>
-              {blockerSentence(blocker)}{' '}
-              <Link to={blockerFixPath(employerId, member, blocker)}>
-                Fix on the Employment screen
-              </Link>
-            </li>
+            <BlockedItem key={blocker.code} to={blockerFixPath(employerId, member, blocker)}>
+              {blockerSentence(blocker)}
+            </BlockedItem>
           ))}
         </ul>
+      )}
+
+      {earningsSavedSince && member.figures !== null && (
+        <StaleBanner>
+          Earnings changed since these figures were calculated. Calculate again to see the updated
+          amounts.
+        </StaleBanner>
       )}
 
       {/* `figures` and `refusal` are different things and both may be
@@ -165,7 +204,9 @@ function Member({
           and an empty `blockers` list beside no figures would otherwise
           read as a member with nothing wrong at all (§0.31). */}
       {member.figures === null ? (
-        <p>No figures yet. Calculate this run to see them.</p>
+        <p className="text-sm text-muted-foreground">
+          No figures yet. Calculate this run to see them.
+        </p>
       ) : (
         <Figures figures={member.figures} />
       )}
@@ -174,7 +215,9 @@ function Member({
           Operator just ran said about this member, not standing content
           already on the screen when it loaded. */}
       {member.refusal !== null && (
-        <p role="alert">Could not calculate: {refusalSentence(member.refusal)}</p>
+        <p role="alert" className="text-sm text-destructive">
+          Could not calculate: {refusalSentence(member.refusal)}
+        </p>
       )}
     </li>
   );
@@ -197,16 +240,22 @@ function FinalizedLinks({
   announce: boolean;
 }) {
   return (
-    <div role={announce ? 'status' : undefined}>
-      <p>Finalized. Open each person’s finalized payroll:</p>
-      <ul>
+    <div role={announce ? 'status' : undefined} className="flex flex-col gap-2">
+      <p className="flex items-center gap-2 text-sm font-medium text-success">
+        <CircleCheck className="size-4" aria-hidden="true" />
+        Finalized. Open each person’s finalized payroll:
+      </p>
+      <ul className="flex flex-col gap-1">
         {links.map((entry) => {
           const member = run.members.find(
             (candidate) => candidate.employmentId === entry.employmentId,
           );
           return (
             <li key={entry.employmentId}>
-              <Link to={finalizedPayrollPath(employerId, entry.finalizedPayrollId)}>
+              <Link
+                to={finalizedPayrollPath(employerId, entry.finalizedPayrollId)}
+                className="text-sm font-medium text-primary hover:underline"
+              >
                 {member?.fullName ?? entry.employmentId}
               </Link>
             </li>
@@ -344,48 +393,56 @@ function Finalize({
     : null;
 
   return (
-    <div>
+    <div className="flex flex-col gap-2">
       {confirming ? (
-        <p>
+        <p className="flex flex-wrap items-center gap-2 text-sm">
           This creates immutable payroll history for {run.members.length}{' '}
-          {run.members.length === 1 ? 'person' : 'people'}.{' '}
-          <button
+          {run.members.length === 1 ? 'person' : 'people'}.
+          <Button
             type="button"
             ref={confirmRef}
             onClick={() => void handleFinalize()}
             disabled={finalize.isPending || calculateIsPending}
           >
             {finalize.isPending ? 'Finalizing…' : 'Confirm finalize'}
-          </button>{' '}
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
             onClick={() => setConfirming(false)}
             disabled={finalize.isPending || calculateIsPending}
           >
             Cancel
-          </button>
+          </Button>
         </p>
       ) : (
         <p>
-          <button
+          <Button
             type="button"
             ref={finalizeRef}
             onClick={() => setConfirming(true)}
             disabled={calculateIsPending || finalize.isPending}
           >
             Finalize
-          </button>
+          </Button>
         </p>
       )}
 
-      {failureMessage !== null && (
-        <p role="alert">
-          {failureMessage}{' '}
-          {offersCalculateAgain(finalize.error) && (
-            <button type="button" onClick={onCalculateAgain} disabled={calculateIsPending}>
-              Calculate again
-            </button>
-          )}
+      {failureMessage !== null && offersCalculateAgain(finalize.error) && (
+        <FailedRequestState
+          message={failureMessage}
+          onRetry={onCalculateAgain}
+          retrying={calculateIsPending}
+          retryLabel="Calculate again"
+        />
+      )}
+      {/* No retry action for a finalize failure that is not one of the
+          "calculate again" codes (§0.26/§0.28) — offering one here would be
+          a button that repeats the wrong request, since Finalize itself
+          (above) is what an Operator retries for those. */}
+      {failureMessage !== null && !offersCalculateAgain(finalize.error) && (
+        <p role="alert" className="text-sm text-destructive">
+          {failureMessage}
         </p>
       )}
     </div>
@@ -426,37 +483,44 @@ export function PayrollRun() {
   }
 
   return (
-    <main>
-      <p>
-        <Link to=".." relative="path">
-          ← Payroll
-        </Link>
-      </p>
+    <main className="flex flex-col gap-6">
+      {/* Named distinctly from the persistent "Payroll" nav link beside it
+          (both are on screen at once) — the same reason `Employment.tsx`'s
+          own back link is. */}
+      <Link
+        to=".."
+        relative="path"
+        aria-label="Back to Payroll"
+        className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      >
+        <ArrowLeft className="size-4" aria-hidden="true" />
+        Payroll
+      </Link>
 
-      {run.isPending && <p>Loading…</p>}
+      {run.isPending && <LoadingState label="Loading payroll run…" />}
 
       {/* An Operator arriving back from clearing a blocker sees this run's
           last response first, while the re-read that decides whether the
           blocker is really gone is still in flight. Saying so is the honest
           version of that moment; showing an old blocker in silence is not. */}
-      {run.isSuccess && run.isFetching && <p>Refreshing…</p>}
+      {run.isSuccess && run.isFetching && <StaleBanner>Refreshing…</StaleBanner>}
 
       {run.isError && (
-        <p role="alert">
-          {loadFailureMessage(run.error)}{' '}
-          <button type="button" onClick={() => void run.refetch()}>
-            Try again
-          </button>
-        </p>
+        <FailedRequestState
+          message={loadFailureMessage(run.error)}
+          onRetry={() => void run.refetch()}
+          retrying={run.isFetching}
+        />
       )}
 
       {run.isSuccess && (
         <>
-          <h2>
-            {run.data.period.start} to {run.data.period.end}
-          </h2>
-          <p>Pay date: {run.data.payDate}</p>
-          <p>Status: {run.data.status}</p>
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight">
+              {humanDateRange(run.data.period.start, run.data.period.end)}
+            </h2>
+            <p className="text-sm text-muted-foreground">Pay date: {humanDate(run.data.payDate)}</p>
+          </div>
 
           {/* Finalize belongs to issue #66, and is offered there only when
               `status` itself says so (§0's Deep Instructions: the browser
@@ -466,18 +530,22 @@ export function PayrollRun() {
               own Calculate call would refuse that itself if ever clicked
               from a stale screen. */}
           {run.data.status !== 'finalized' && (
-            <p>
-              <button
+            <div>
+              <Button
                 type="button"
                 onClick={() => void handleCalculate()}
                 disabled={calculate.isPending || finalize.isPending}
               >
                 {calculate.isPending ? 'Calculating…' : 'Calculate'}
-              </button>
-            </p>
+              </Button>
+            </div>
           )}
 
-          {calculate.isError && <p role="alert">{calculateFailureMessage(calculate.error)}</p>}
+          {calculate.isError && (
+            <p role="alert" className="text-sm text-destructive">
+              {calculateFailureMessage(calculate.error)}
+            </p>
+          )}
 
           <Finalize
             run={run.data}
@@ -490,9 +558,9 @@ export function PayrollRun() {
           />
 
           {run.data.members.length === 0 ? (
-            <p>No one is proposed to be paid on this run.</p>
+            <EmptyState>No one is proposed to be paid on this run.</EmptyState>
           ) : (
-            <ul>
+            <ul className="flex flex-col gap-4">
               {run.data.members.map((member) => (
                 <Member
                   key={member.employmentId}

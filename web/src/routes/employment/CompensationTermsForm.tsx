@@ -11,6 +11,10 @@ import type { RecordCompensationTermsRequest } from '../../api/types';
 import { useRecordCompensationTerms } from '../../employments/useEmploymentFacts';
 import { formatCents, parseCentsInput } from '../../money';
 import { type FieldError, fieldErrorProps } from './fieldError';
+import { Button } from '../../components/ui/button';
+import { Input } from '../../components/ui/input';
+import { Label } from '../../components/ui/label';
+import { ValidationError } from '../../components/states/ValidationError';
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -107,12 +111,18 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
     // Named so a payroll run's `no_compensation_terms_in_force` blocker can
     // link straight here (issue #64's own Deep Instructions: a link is the
     // highest-value detail a blocker sentence carries).
-    <section id="compensation-terms" aria-labelledby={headingId}>
-      <h3 id={headingId}>Pay</h3>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor={effectiveFromId}>Effective from</label>
-          <input
+    <section
+      id="compensation-terms"
+      aria-labelledby={headingId}
+      className="rounded-xl border bg-card p-6 text-card-foreground shadow-sm"
+    >
+      <h3 id={headingId} className="mb-4 text-base font-semibold">
+        Pay
+      </h3>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:max-w-sm">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={effectiveFromId}>Effective from</Label>
+          <Input
             id={effectiveFromId}
             type="date"
             required
@@ -123,9 +133,9 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
             }}
           />
         </div>
-        <div>
-          <label htmlFor={basicPayId}>Basic pay</label>
-          <input
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={basicPayId}>Basic pay</Label>
+          <Input
             id={basicPayId}
             type="text"
             inputMode="decimal"
@@ -140,15 +150,15 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
           />
         </div>
         {(fieldError !== null || error !== null) && (
-          <p id={errorId} role="alert">
-            {fieldError?.message ?? error}
-          </p>
+          <ValidationError id={errorId}>{fieldError?.message ?? error}</ValidationError>
         )}
-        <button type="submit" disabled={recordCompensationTerms.isPending}>
+        <Button type="submit" disabled={recordCompensationTerms.isPending} className="self-start">
           {recordCompensationTerms.isPending ? 'Saving…' : 'Save pay'}
-        </button>
+        </Button>
       </form>
-      <p role="status">{saved ?? ''}</p>
+      <p role="status" className="mt-3 text-sm text-success">
+        {saved ?? ''}
+      </p>
     </section>
   );
 }

@@ -1,6 +1,7 @@
 // `/app/employers/:employerId/payroll` (issue #64, parent #59 Spec 3 of 3,
-// §0.29). Every payroll run this Employer has, with its period, pay date and
-// status, and a form that creates the next Ordinary one.
+// §0.29; rebuilt for issue #88). Every payroll run this Employer has, with
+// its period, pay date and status, and a form that creates the next
+// Ordinary one.
 //
 // The list is what `GET /api/employers/{e}/payroll-runs` returns, re-read
 // after a successful create (`useCreatePayrollRun` invalidates it) rather
@@ -8,10 +9,21 @@
 
 import { type SubmitEvent, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { CalendarPlus } from 'lucide-react';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import type { CreatePayrollRunRequest, PayrollRunStatus } from '../api/types';
 import { useCreatePayrollRun, usePayrollRuns } from '../payrollRuns/usePayrollRuns';
+import { humanDate, humanDateRange } from '../format';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
+import { Badge } from '../components/ui/badge';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { LoadingState } from '../components/states/LoadingState';
+import { EmptyState } from '../components/states/EmptyState';
+import { FailedRequestState } from '../components/states/FailedRequestState';
+import { ValidationError } from '../components/states/ValidationError';
 
 /** `pay_period_not_generated_by_the_pay_schedule` carries the period this
  * Employer's schedule does generate around the one that was asked for. A
@@ -92,6 +104,17 @@ function statusLabel(status: PayrollRunStatus): string {
   }
 }
 
+function statusVariant(status: PayrollRunStatus): 'outline' | 'secondary' | 'default' {
+  switch (status) {
+    case 'draft':
+      return 'outline';
+    case 'calculated':
+      return 'secondary';
+    case 'finalized':
+      return 'default';
+  }
+}
+
 export function PayrollRuns() {
   const payrollRuns = usePayrollRuns();
   const createPayrollRun = useCreatePayrollRun();
@@ -133,82 +156,98 @@ export function PayrollRuns() {
   }
 
   return (
-    <main>
-      <h2>Payroll</h2>
+    <main className="flex flex-col gap-6">
+      <h2 className="text-2xl font-semibold tracking-tight">Payroll</h2>
 
-      {payrollRuns.isPending && <p>Loading…</p>}
+      {payrollRuns.isPending && <LoadingState label="Loading payroll runs…" />}
 
       {payrollRuns.isError && (
-        <p role="alert">
-          {payrollRunsLoadFailureMessage(payrollRuns.error)}{' '}
-          <button type="button" onClick={() => void payrollRuns.refetch()}>
-            Try again
-          </button>
-        </p>
+        <FailedRequestState
+          message={payrollRunsLoadFailureMessage(payrollRuns.error)}
+          onRetry={() => void payrollRuns.refetch()}
+          retrying={payrollRuns.isFetching}
+        />
       )}
 
       {payrollRuns.isSuccess &&
         (payrollRuns.data.payrollRuns.length === 0 ? (
-          <p>No payroll runs yet.</p>
+          <EmptyState>No payroll runs yet. Create the first one below.</EmptyState>
         ) : (
-          <ul>
+          <ul className="flex flex-col divide-y rounded-lg border">
             {payrollRuns.data.payrollRuns.map((run) => (
               <li key={run.payrollRunId}>
-                <Link to={run.payrollRunId}>
-                  {run.period.start} to {run.period.end}, paid {run.payDate}
-                </Link>{' '}
-                — {statusLabel(run.status)}
+                <Link
+                  to={run.payrollRunId}
+                  className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm hover:bg-accent hover:text-accent-foreground"
+                >
+                  <span className="font-medium">
+                    {humanDateRange(run.period.start, run.period.end)}, paid{' '}
+                    {humanDate(run.payDate)}
+                  </span>
+                  <Badge variant={statusVariant(run.status)}>{statusLabel(run.status)}</Badge>
+                </Link>
               </li>
             ))}
           </ul>
         ))}
 
-      <h3>Create an ordinary run</h3>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor={periodStartId}>Period start</label>
-          <input
-            id={periodStartId}
-            type="date"
-            required
-            value={periodStart}
-            onChange={(event) => {
-              setPeriodStart(event.target.value);
-              edited();
-            }}
-          />
-        </div>
-        <div>
-          <label htmlFor={periodEndId}>Period end</label>
-          <input
-            id={periodEndId}
-            type="date"
-            required
-            value={periodEnd}
-            onChange={(event) => {
-              setPeriodEnd(event.target.value);
-              edited();
-            }}
-          />
-        </div>
-        <div>
-          <label htmlFor={payDateId}>Pay date</label>
-          <input
-            id={payDateId}
-            type="date"
-            required
-            value={payDate}
-            onChange={(event) => {
-              setPayDate(event.target.value);
-              edited();
-            }}
-          />
-        </div>
-        {error !== null && <p role="alert">{error}</p>}
-        <button type="submit" disabled={createPayrollRun.isPending}>
-          {createPayrollRun.isPending ? 'Creating…' : 'Create run'}
-        </button>
-      </form>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <CalendarPlus className="size-4" aria-hidden="true" />
+            Create an ordinary run
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:max-w-md">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor={periodStartId}>Period start</Label>
+                <Input
+                  id={periodStartId}
+                  type="date"
+                  required
+                  value={periodStart}
+                  onChange={(event) => {
+                    setPeriodStart(event.target.value);
+                    edited();
+                  }}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor={periodEndId}>Period end</Label>
+                <Input
+                  id={periodEndId}
+                  type="date"
+                  required
+                  value={periodEnd}
+                  onChange={(event) => {
+                    setPeriodEnd(event.target.value);
+                    edited();
+                  }}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor={payDateId}>Pay date</Label>
+                <Input
+                  id={payDateId}
+                  type="date"
+                  required
+                  value={payDate}
+                  onChange={(event) => {
+                    setPayDate(event.target.value);
+                    edited();
+                  }}
+                />
+              </div>
+            </div>
+            {error !== null && <ValidationError>{error}</ValidationError>}
+            <Button type="submit" disabled={createPayrollRun.isPending} className="sm:self-start">
+              {createPayrollRun.isPending ? 'Creating…' : 'Create run'}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
     </main>
   );
 }

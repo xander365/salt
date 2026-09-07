@@ -16,12 +16,18 @@ import { ApiError } from '../api/client';
 import { AuthorizedSessionProvider } from '../session/AuthorizedSession';
 import { LOGIN_PATH } from '../session/UnauthorizedRedirect';
 import { useSession } from '../session/useSession';
+import { LoadingState } from '../components/states/LoadingState';
+import { FailedRequestState } from '../components/states/FailedRequestState';
 
 export function RequireSession() {
   const session = useSession();
 
   if (session.isPending) {
-    return <p>Loading…</p>;
+    return (
+      <main className="flex min-h-dvh items-center justify-center">
+        <LoadingState />
+      </main>
+    );
   }
 
   if (session.isError) {
@@ -34,11 +40,12 @@ export function RequireSession() {
     }
 
     return (
-      <main>
-        <p role="alert">We could not check your session. Please try again.</p>
-        <button type="button" onClick={() => void session.refetch()}>
-          Try again
-        </button>
+      <main className="flex min-h-dvh items-center justify-center px-6">
+        <FailedRequestState
+          message="We could not check your session. Please try again."
+          onRetry={() => void session.refetch()}
+          retrying={session.isFetching}
+        />
       </main>
     );
   }

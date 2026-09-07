@@ -11,6 +11,10 @@ import { useRecordOpeningBalance } from '../../employments/useEmploymentFacts';
 import { formatCents, parseCentsInput } from '../../money';
 import { currentTaxYearStartingYear, parseTaxYearInput } from '../../taxYear';
 import { type FieldError, fieldErrorProps } from './fieldError';
+import { Button } from '../../components/ui/button';
+import { Input } from '../../components/ui/input';
+import { Label } from '../../components/ui/label';
+import { ValidationError } from '../../components/states/ValidationError';
 
 function messageForRefusal(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -120,16 +124,21 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
   }
 
   return (
-    <section aria-labelledby={headingId}>
-      <h3 id={headingId}>Opening balance</h3>
-      <p>
+    <section
+      aria-labelledby={headingId}
+      className="rounded-xl border bg-card p-6 text-card-foreground shadow-sm"
+    >
+      <h3 id={headingId} className="mb-1 text-base font-semibold">
+        Opening balance
+      </h3>
+      <p className="mb-4 text-sm text-muted-foreground">
         Only needed when Salt takes over part-way through a tax year. Choose the first pay period
         Salt will process; the amounts cover earlier periods in that tax year.
       </p>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor={taxYearId}>Tax year starting</label>
-          <input
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:max-w-sm">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={taxYearId}>Tax year starting</Label>
+          <Input
             id={taxYearId}
             type="number"
             required
@@ -144,9 +153,9 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             }}
           />
         </div>
-        <div>
-          <label htmlFor={saltCoverageStartId}>First Salt pay period (end date)</label>
-          <input
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={saltCoverageStartId}>First Salt pay period (end date)</Label>
+          <Input
             id={saltCoverageStartId}
             type="date"
             required
@@ -157,9 +166,9 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             }}
           />
         </div>
-        <div>
-          <label htmlFor={`${taxYearId}-taxable`}>Prior taxable remuneration</label>
-          <input
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={`${taxYearId}-taxable`}>Prior taxable remuneration</Label>
+          <Input
             id={`${taxYearId}-taxable`}
             type="text"
             inputMode="decimal"
@@ -172,9 +181,9 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
             }}
           />
         </div>
-        <div>
-          <label htmlFor={`${taxYearId}-paye`}>Prior PAYE withheld</label>
-          <input
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={`${taxYearId}-paye`}>Prior PAYE withheld</Label>
+          <Input
             id={`${taxYearId}-paye`}
             type="text"
             inputMode="decimal"
@@ -188,15 +197,15 @@ export function OpeningBalanceForm({ employmentId }: { employmentId: string }) {
           />
         </div>
         {(fieldError !== null || error !== null) && (
-          <p id={errorId} role="alert">
-            {fieldError?.message ?? error}
-          </p>
+          <ValidationError id={errorId}>{fieldError?.message ?? error}</ValidationError>
         )}
-        <button type="submit" disabled={recordOpeningBalance.isPending}>
+        <Button type="submit" disabled={recordOpeningBalance.isPending} className="self-start">
           {recordOpeningBalance.isPending ? 'Saving…' : 'Save opening balance'}
-        </button>
+        </Button>
       </form>
-      <p role="status">{saved ?? ''}</p>
+      <p role="status" className="mt-3 text-sm text-success">
+        {saved ?? ''}
+      </p>
     </section>
   );
 }

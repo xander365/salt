@@ -14,14 +14,22 @@
 //
 // This form does no arithmetic, previews no PAYE and recomputes no net pay
 // when an allowance is typed (§0's Further Notes) — it sends amounts and
-// shows whatever the next Calculate or reload says.
+// shows whatever the next Calculate or reload says. Its own success also
+// flags this member's currently-shown `Figures` stale (`PayrollRun.tsx`'s
+// own `onSaved`, issue #88): they were true of the last Calculate, and this
+// form just changed what the next one will see.
 
 import { type SubmitEvent, useId, useState } from 'react';
+import { Plus, X } from 'lucide-react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type { EarningLineDto } from '../../api/types';
 import { formatCents, parseCentsInput } from '../../money';
 import { useSetRunEarnings } from '../../payrollRuns/usePayrollRuns';
+import { Button } from '../../components/ui/button';
+import { Input } from '../../components/ui/input';
+import { Label } from '../../components/ui/label';
+import { ValidationError } from '../../components/states/ValidationError';
 
 function earningsFailureMessage(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -51,7 +59,10 @@ function earningsFailureMessage(caught: unknown): string {
 /** An amount from the wire, guarded the same way every money display on
  * this screen is (`PayrollRun.tsx`'s own `centsText`) — `Money` on the wire
  * is never negative or unsafe, but a display that trusted that absolutely
- * would blank the whole form the one time it was wrong. */
+ * would blank the whole form the one time it was wrong. Kept as the plain
+ * decimal `formatCents` gives, never `moneyDisplayText`'s `N$1,234.56`: this
+ * fills an *editable* input, and `parseCentsInput` cannot read a comma or a
+ * currency symbol back out of it. */
 function safeAmountText(cents: number): string {
   return Number.isSafeInteger(cents) && cents >= 0 ? formatCents(cents) : 'unavailable';
 }
@@ -65,10 +76,12 @@ export function EarningsForm({
   payrollRunId,
   employmentId,
   earnings,
+  onSaved,
 }: {
   payrollRunId: string;
   employmentId: string;
   earnings: EarningLineDto[];
+  onSaved?: () => void;
 }) {
   const setEarnings = useSetRunEarnings(payrollRunId);
 
@@ -139,59 +152,74 @@ export function EarningsForm({
     try {
       await setEarnings.mutateAsync({ employmentId, earnings: request });
       setSaved(true);
+      onSaved?.();
     } catch (caught) {
       setError(earningsFailureMessage(caught));
     }
   }
 
   return (
-    <form onSubmit={(event) => void handleSubmit(event)}>
+    <form onSubmit={(event) => void handleSubmit(event)} className="flex flex-col gap-3">
       {allowances.length === 0 ? (
-        <p>No taxable allowances on this line.</p>
+        <p className="text-sm text-muted-foreground">No taxable allowances on this line.</p>
       ) : (
-        <ul>
+        <ul className="flex flex-col gap-2">
           {allowances.map((amount, index) => {
             const inputId = `${employmentId}-allowance-${index}`;
             const invalid = lineError !== null && lineError.index === index;
             return (
-              <li key={index}>
-                <label htmlFor={inputId}>Taxable allowance</label>{' '}
-                <input
-                  id={inputId}
-                  type="text"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={amount}
-                  aria-invalid={invalid || undefined}
-                  aria-describedby={invalid ? errorId : undefined}
-                  onChange={(event) => editAllowance(index, event.target.value)}
-                />{' '}
-                <button type="button" onClick={() => removeAllowance(index)}>
-                  Remove
-                </button>
-                {invalid && (
-                  <p id={errorId} role="alert">
-                    {lineError.message}
-                  </p>
-                )}
+              <li key={index} className="flex flex-col gap-1">
+                <div className="flex items-end gap-2">
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor={inputId}>Taxable allowance</Label>
+                    <Input
+                      id={inputId}
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      className="w-32"
+                      value={amount}
+                      aria-invalid={invalid || undefined}
+                      aria-describedby={invalid ? errorId : undefined}
+                      onChange={(event) => editAllowance(index, event.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeAllowance(index)}
+                  >
+                    <X className="size-4" aria-hidden="true" />
+                    Remove
+                  </Button>
+                </div>
+                {invalid && <ValidationError id={errorId}>{lineError.message}</ValidationError>}
               </li>
             );
           })}
         </ul>
       )}
 
-      <p>
-        <button type="button" onClick={addAllowance}>
-          Add a taxable allowance
-        </button>
-      </p>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={addAllowance}
+        className="self-start"
+      >
+        <Plus className="size-4" aria-hidden="true" />
+        Add a taxable allowance
+      </Button>
 
-      {error !== null && <p role="alert">{error}</p>}
+      {error !== null && <ValidationError>{error}</ValidationError>}
 
-      <button type="submit" disabled={setEarnings.isPending}>
+      <Button type="submit" size="sm" disabled={setEarnings.isPending} className="self-start">
         {setEarnings.isPending ? 'Saving…' : 'Save earnings'}
-      </button>
-      <p role="status">{saved ? 'Earnings saved.' : ''}</p>
+      </Button>
+      <p role="status" className="text-sm text-success">
+        {saved ? 'Earnings saved.' : ''}
+      </p>
     </form>
   );
 }

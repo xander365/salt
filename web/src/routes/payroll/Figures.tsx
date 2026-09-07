@@ -7,7 +7,7 @@
 
 import { useId } from 'react';
 import type { FiguresDto } from '../../api/types';
-import { centsText } from '../../money';
+import { moneyDisplayText } from '../../money';
 
 /** The nine figures §0.29 names, in the order it names them. */
 const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
@@ -29,7 +29,7 @@ export function Figures({ figures }: { figures: FiguresDto }) {
   const termIdPrefix = useId();
 
   return (
-    <dl>
+    <dl className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
       {FIGURE_FIELDS.map(({ key, label }) => {
         const termId = `${termIdPrefix}-${key}`;
         return (
@@ -39,9 +39,11 @@ export function Figures({ figures }: { figures: FiguresDto }) {
           // the pair instead is what lets a person — or the browser journey
           // test standing in for one — reach "PAYE" by the word beside it
           // rather than by counting rows.
-          <div key={key} role="group" aria-labelledby={termId}>
-            <dt id={termId}>{label}</dt>
-            <dd>{centsText(figures[key])}</dd>
+          <div key={key} role="group" aria-labelledby={termId} className="flex flex-col">
+            <dt id={termId} className="text-xs text-muted-foreground">
+              {label}
+            </dt>
+            <dd className="money text-sm font-medium">{moneyDisplayText(figures[key])}</dd>
           </div>
         );
       })}

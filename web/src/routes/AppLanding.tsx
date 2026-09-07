@@ -4,9 +4,12 @@
 // it. Reads the memberships `GET /api/session` already returned; there is no
 // second call to make here.
 
+import { Building2 } from 'lucide-react';
 import { Link, Navigate } from 'react-router-dom';
 import { useAuthorizedSession } from '../session/AuthorizedSession';
 import { SignOutButton } from '../session/SignOutButton';
+import { Card, CardHeader, CardTitle } from '../components/ui/card';
+import { EmptyState } from '../components/states/EmptyState';
 import { employerPath } from './paths';
 
 export function AppLanding() {
@@ -17,20 +20,30 @@ export function AppLanding() {
   }
 
   return (
-    <main>
-      <h1>Choose an Employer</h1>
+    <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-6 px-6 py-16">
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold tracking-tight">Choose an Employer</h1>
+        <SignOutButton />
+      </div>
+
       {memberships.length === 0 ? (
-        <p>You have no Employers yet.</p>
+        <EmptyState>You have no Employers yet.</EmptyState>
       ) : (
-        <ul>
+        <ul className="flex flex-col gap-3">
           {memberships.map((membership) => (
             <li key={membership.employerId}>
-              <Link to={employerPath(membership.employerId)}>{membership.name}</Link>
+              <Link to={employerPath(membership.employerId)}>
+                <Card className="transition-colors hover:border-primary">
+                  <CardHeader className="flex-row items-center gap-3 space-y-0">
+                    <Building2 className="size-5 text-primary" aria-hidden="true" />
+                    <CardTitle>{membership.name}</CardTitle>
+                  </CardHeader>
+                </Card>
+              </Link>
             </li>
           ))}
         </ul>
       )}
-      <SignOutButton />
     </main>
   );
 }

@@ -95,17 +95,18 @@ const payDateText = isoDate(payDate);
 // own tax year the server checks PriorEmployment's declaration against.
 const taxYearStarting = currentTaxYearStartingYear(periodStart);
 
-/** The inverse of `web/src/money.ts`'s own `formatCents`: an exact
- * "whole.dd" string back into a whole number of cents, in integer
- * arithmetic only, for the same reason the source it mirrors never lets a
- * `Money` value near a float. */
+/** The inverse of `web/src/money.ts`'s own `formatMoneyDisplay` (issue #88:
+ * every figure now renders as `N$1,234.56`, right-aligned in tabular
+ * numerals) — strips the currency prefix and thousands separators before
+ * parsing, in integer arithmetic only, for the same reason the source it
+ * mirrors never lets a `Money` value near a float. */
 function parseCentsText(text: string): number {
-  const match = /^(\d+)\.(\d{2})$/.exec(text.trim());
+  const match = /^N\$(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})$/.exec(text.trim());
   if (match === null) {
     throw new Error(`not a cents-exact amount: "${text}"`);
   }
   const [, whole, fraction] = match;
-  return Number(BigInt(whole) * 100n + BigInt(fraction));
+  return Number(BigInt(whole.replace(/,/g, '')) * 100n + BigInt(fraction));
 }
 
 /** Reads the nine figures §0.29 names off whichever screen is showing them

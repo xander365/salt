@@ -1,5 +1,9 @@
-import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import path from 'node:path';
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite';
+
+const rootDir = import.meta.dirname;
 
 // Development runs on one origin: this proxies `/api` to salt-server rather
 // than the browser calling a second origin directly, so no CORS layer is
@@ -14,10 +18,15 @@ const apiProxy = {
     target: 'http://127.0.0.1:8080',
     changeOrigin: true,
   },
-}
+};
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': path.resolve(rootDir, './src'),
+    },
+  },
   server: {
     proxy: apiProxy,
   },
@@ -28,4 +37,4 @@ export default defineConfig({
   preview: {
     proxy: apiProxy,
   },
-})
+});

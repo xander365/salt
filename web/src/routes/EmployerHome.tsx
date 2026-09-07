@@ -1,26 +1,21 @@
-// The Employer's own landing screen, inside the shell that names it. `people`
-// and `payroll` are now sibling routes (issues #62 and #64); `finalized`
-// still arrives as a further child of `EmployerShell` (a later ticket), each
-// carrying `:employerId` in its own URL.
+// The Employer's own landing screen, inside the shell that names it (issue
+// #88: the "Employer" third of D13's People / Payroll / Employer
+// navigation). `people` and `payroll` are sibling routes reached from the
+// persistent nav above (issues #62 and #64) — this screen adds no second,
+// differently-worded way to reach either: two links named alike would leave
+// an Operator (and a role/name-driven test) unable to tell them apart.
 
-import { Link } from 'react-router-dom';
 import { useAuthorizedSession } from '../session/AuthorizedSession';
 
 export function EmployerHome() {
   const session = useAuthorizedSession();
 
   return (
-    <main>
-      <p>Signed in as {session.operator.displayName}.</p>
-      {/* Relative, not an absolute path rebuilt from `:employerId`: this
-          screen already renders beneath `/app/employers/:employerId`, so
-          resolving against the current route needs no second read of the
-          same param — and cannot disagree with it. */}
-      <p>
-        <Link to="people">People</Link>
-      </p>
-      <p>
-        <Link to="payroll">Payroll</Link>
+    <main className="flex flex-col gap-2">
+      <p className="text-sm text-muted-foreground">Signed in as {session.operator.displayName}.</p>
+      <p className="text-muted-foreground">
+        Use People to add employees and record what they are paid, or Payroll to run, calculate and
+        finalize a pay period.
       </p>
     </main>
   );
