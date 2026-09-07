@@ -10,9 +10,17 @@ Payroll for Namibian SMEs. Salt calculates, explains, and permanently records wh
 The legal entity that employs people and owes remuneration, PAYE, and social security contributions.
 _Avoid_: Company, tenant, client, account
 
+**EmployerParticulars**:
+The Employer's registered name, addresses and statutory registration numbers as they must appear on a document Salt prints. Master data, correctable with a stated reason — and frozen into every FinalizedPayroll, so correcting them can never rewrite a payslip already issued.
+_Avoid_: Company details, employer info, profile
+
 **Person**:
 A human being, independent of any job they hold. What Salt *records* is narrower: a Person is known to one Employer, so the same human employed by two Employers is two records (ADR-0020). Salt cannot substantiate that two records are one human, and saying so would tell one Employer where its people work elsewhere.
 _Avoid_: Employee (as a record), user
+
+**PersonParticulars**:
+The Person's full name, identity number and address as they must appear on a document Salt prints. Correctable with a stated reason, like EmployerParticulars, and frozen into every FinalizedPayroll for the same reason.
+_Avoid_: Employee details, personal info, demographics
 
 **Employment**:
 The relationship between one Person and one Employer over a period of time. The central payroll concept — payroll is calculated per Employment, never per Person.
@@ -29,24 +37,48 @@ _Avoid_: Permission, access, tenancy, role (unqualified)
 ### Compensation
 
 **CompensationTerms**:
-What an Employment agrees to pay, valid over a stated effective period. Never a mutable "current salary" field. Master data, not history — correctable with a stated reason even after payroll has been paid against it, because a FinalizedPayroll explains itself and never looks back at these.
+What an Employment agrees to pay, valid over a stated effective period. Never a mutable "current salary" field. Master data, not history — correctable with a stated reason even after payroll has been paid against it, because a FinalizedPayroll explains itself and never looks back at these. Carries the BasicPay and the OrdinaryHours the DerivedHourlyRate is built from.
 _Avoid_: Salary, package, remuneration terms
 
 **BasicPay**:
 The contractual base amount for the period, before allowances, overtime, or any other addition. The base for social security contributions.
 _Avoid_: Basic salary, basic wage, base pay
 
+**OrdinaryHours**:
+The hours per week an Employment's BasicPay is agreed to cover, held on CompensationTerms and effective-dated with it. It exists to make the DerivedHourlyRate's assumption visible and per-person, rather than hidden inside a constant. Not hours worked, and not hours payable.
+_Avoid_: Working hours, standard hours, hours per week (unqualified)
+
+**DerivedHourlyRate**:
+The hourly rate Salt computes for a salaried Employment in order to price Overtime: BasicPay x 12 / 52 / OrdinaryHours. A SaltPolicy, never a StatutoryRule — no published rule prescribing the divisor was found. Distinct from a contracted hourly rate, which an hourly-paid Employment would agree and Salt does not yet support.
+_Avoid_: Hourly rate (unqualified), rate of pay, divisor
+
 **Earning**:
 One classified line of money owed to the employee for the period. Classification, not description, decides tax and contribution treatment.
 _Avoid_: Payment, income line, pay item
+
+**Overtime**:
+An Earning for hours worked beyond ordinary hours, priced at a DerivedHourlyRate times an OvertimeMultiplier. It feeds GrossRemuneration and TaxableRemuneration and never the social security base, because the Social Security General Regulations exclude overtime from `basic wage`. Salt receives the hours; the attendance system owns the rules that decided which hours they are.
+_Avoid_: OT, extra hours, additional pay
+
+**OvertimeMultiplier**:
+The factor an Overtime line is priced at — 1.5 or 2.0, a closed set. It is the classification, not a reason: Salt knows the factor and never why the factor applies. A free-text label may carry the human reason and never affects money.
+_Avoid_: Overtime rate, OT type, premium
 
 **RemunerationClassification**:
 Deciding which legal category a pay line falls into. It happens before calculation, never inside it — the calculator only ever receives Earnings already classified.
 _Avoid_: Tax treatment, categorisation, tagging
 
 **Deduction**:
-One classified amount withheld from the employee's remuneration under a stated legal authority.
+One classified amount withheld from the employee's remuneration under a stated authority — a statute, or the employee's own standing instruction. Classification, not description, decides whether it touches PAYE or the social security base.
 _Avoid_: Withholding, subtraction, negative earning
+
+**StatutoryDeduction**:
+A Deduction the law requires — PAYE and social security. Salt calculates the amount from PayrollRules; nobody types it.
+_Avoid_: Tax, compulsory deduction
+
+**VoluntaryDeduction**:
+A Deduction withheld on the employee's own standing instruction, a medical aid premium being the ordinary case. Withheld after tax: it reduces NetPay and never TaxableRemuneration or the social security base. Distinct from an UnsupportedDeductionKind, which Salt refuses precisely because it *would* change PAYE.
+_Avoid_: Other deduction, private deduction, after-tax deduction (as a category)
 
 **EmployerContribution**:
 An amount the Employer owes on top of remuneration. It is an employer cost and never reduces net pay.
@@ -63,6 +95,14 @@ _Avoid_: Taxable income, taxable pay
 **NetPay**:
 GrossRemuneration less all Deductions. What the employee actually receives.
 _Avoid_: Take-home, net salary
+
+**StandingPayItem**:
+An Earning or Deduction an Employment carries with effective dates, which every PayrollRun proposes on its own. It is what stops an operator retyping the same allowance twelve times a year. A pay line typed directly onto a run is not one, and never recurs.
+_Avoid_: Recurring item, fixed deduction, template line
+
+**RunOverride**:
+A change to, or removal of, one StandingPayItem for one PayrollRun only. It records what the run actually paid without touching the standing record, which is what keeps a one-month variation from rewriting master data.
+_Avoid_: Adjustment, one-off change, exception
 
 ### Time and rules
 
@@ -149,7 +189,7 @@ A PayrollRun that puts right one Employment's payroll for a PayPeriod already fi
 _Avoid_: Adjustment run, re-run, supplementary payroll
 
 **FinalizedPayroll**:
-An immutable record of a PayrollCalculation the Employer has committed to, stored with the exact PayrollInput and PayrollRules that produced it. The **sole** explanation of that payroll — nothing about it is ever rebuilt from what the master records say today.
+An immutable record of a PayrollCalculation the Employer has committed to, stored with the exact PayrollInput, PayrollRules, EmployerParticulars, PersonParticulars and PayslipTemplateVersion that produced it. The **sole** explanation of that payroll — nothing about it is ever rebuilt from what the master records say today.
 _Avoid_: Closed payroll, posted payroll, history
 
 **Reversal**:
@@ -177,5 +217,17 @@ The append-only record of who did what and when. Separate from payroll history, 
 _Avoid_: Audit trail, event log, history
 
 **Payslip**:
-A statutory statement rendered from a FinalizedPayroll. A view, never a source of truth.
+A statutory statement rendered from a FinalizedPayroll. A view, never a source of truth. Rendered on demand and never stored: asking for it again renders it again. That is only safe because everything it prints — figures, rules, particulars and template version — froze with the FinalizedPayroll.
 _Avoid_: Pay advice, payslip record
+
+**PayslipTemplateVersion**:
+The identifier of the layout that a Payslip is rendered with, frozen on the FinalizedPayroll beside the SaltVersion. It is what lets an unstored document be re-rendered years later without silently changing. Its consequence is that a retired template's renderer is never deleted.
+_Avoid_: Template, layout version, format
+
+**PayrollRegister**:
+Every Employment in one PayrollRun with its figures and the run's totals. A view over FinalizedPayrolls, never a source of truth.
+_Avoid_: Payroll report, summary, run listing
+
+**PaymentSummary**:
+Who is to be paid what, for one PayrollRun. A view, and an instruction to a human — producing one never means money moved, and it is deliberately not a bank import file.
+_Avoid_: Payment file, bank file, EFT export
