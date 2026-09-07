@@ -6,14 +6,23 @@ import { defineConfig } from 'vite'
 // ever needed in either environment (§0.15 of
 // docs/domain/operator-auth-http-web-grill.md). salt-server's own default
 // bind address is 0.0.0.0:8080 (crates/salt-server/src/config.rs).
+const apiProxy = {
+  '/api': {
+    target: 'http://localhost:8080',
+    changeOrigin: true,
+  },
+}
+
 export default defineConfig({
   plugins: [react()],
   server: {
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
-      },
-    },
+    proxy: apiProxy,
+  },
+  // `vite preview` serves this project's own build output (`dist/`) rather
+  // than source, which is what `e2e`'s browser test (issue #68) drives as
+  // "the built bundle" — the same one-origin shape production has behind
+  // Caddy, stood up here with no Caddy of its own.
+  preview: {
+    proxy: apiProxy,
   },
 })

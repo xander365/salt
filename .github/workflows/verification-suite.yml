@@ -202,3 +202,98 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # Issue #68 (parent #59 Spec 3 of 3): one Playwright test proves a real
+  # human operator can sign into Salt and run one ordinary payroll, driving
+  # a built `salt-server`, a migrated PostgreSQL and the built web bundle —
+  # never `cargo run` or `vite dev`, which would prove the journey against
+  # something nobody ships. Self-contained rather than depending on `verify`
+  # or `web`'s own artifacts, the same way those two jobs share no artifacts
+  # with each other.
+  browser:
+    name: browser
+    runs-on: ubuntu-latest
+    services:
+      # Its own service, never `verify`'s: `payroll_app::bootstrap` refuses
+      # outright once any Operator exists anywhere in the database (§0.2 —
+      # "a first-run command, not an administrative back door"), so this
+      # suite needs one with none yet, every run.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      SALT_SERVER_BIN: ${{ github.workspace }}/target/release/salt-server
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - name: Build salt-server
+        run: cargo build --release --locked -p salt-server
+
+      - name: Cache sqlx-cli
+        id: cache-sqlx-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/sqlx
+          key: sqlx-cli-0.8.6-${{ runner.os }}
+
+      - name: Install sqlx-cli
+        if: steps.cache-sqlx-cli.outputs.cache-hit != 'true'
+        run: |
+          cargo install sqlx-cli --version 0.8.6 --locked \
+            --no-default-features --features postgres,rustls
+
+      - name: Run database migrations
+        run: sqlx migrate run --source crates/payroll-app/migrations
+
+      - name: Install the pinned Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            e2e/package-lock.json
+
+      - name: npm ci (web)
+        working-directory: web
+        run: npm ci
+
+      - name: Build the web bundle
+        working-directory: web
+        run: npm run build
+
+      - name: npm ci (e2e)
+        working-directory: e2e
+        run: npm ci
+
+      - name: Type-check (e2e)
+        working-directory: e2e
+        run: npm run typecheck
+
+      - name: Install Chromium
+        # Exactly the build @playwright/test's own pinned version in
+        # e2e/package-lock.json names — this is the whole of how the browser
+        # version stays pinned (issue #68's own acceptance criterion), the
+        # same way Cargo.lock pins a crate.
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the browser payroll journey test
+        working-directory: e2e
+        run: npm test
