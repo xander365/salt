@@ -337,6 +337,50 @@ async fn an_effective_from_that_is_not_a_period_start_is_the_calculators_own_ref
     assert_eq!(json["error"]["code"], "effective_from_not_a_period_start");
 }
 
+/// Issue #69: a second row for one `effectiveFrom` is a fact about what the
+/// caller asked for, so it is a 409 naming the date — never the 500 the
+/// table's own UNIQUE violation used to produce.
+#[tokio::test]
+async fn recording_compensation_terms_twice_for_one_effective_date_is_a_conflict() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    let first = router()
+        .await
+        .oneshot(post_request(
+            &employer_id,
+            &employment_id,
+            "compensation-terms",
+            &cookie,
+            true,
+            compensation_terms_body(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let mut body = compensation_terms_body();
+    body["basicPayCents"] = serde_json::json!(1_600_000);
+
+    let response = router()
+        .await
+        .oneshot(post_request(
+            &employer_id,
+            &employment_id,
+            "compensation-terms",
+            &cookie,
+            true,
+            body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "compensation_terms_already_exist_at");
+    assert_eq!(json["error"]["details"]["effectiveFrom"], "2026-04-01");
+}
+
 #[tokio::test]
 async fn declaring_prior_employment_confirmed_none_succeeds() {
     let (cookie, employer_id) = an_authorized_operator().await;

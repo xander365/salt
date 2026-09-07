@@ -442,11 +442,13 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         diverging_periods: Vec<PayPeriod>,
     },
-    /// A `CompensationTerms` correction would move a row onto a date where
-    /// this Employment already has one. Stated as a domain refusal rather
-    /// than left to the table's `UNIQUE (employment_id, effective_from)`, so
-    /// a caller is told which date collided instead of being handed a
-    /// database error for a rule Rust can name.
+    /// A `CompensationTerms` write would put a row on a date where this
+    /// Employment already has one — `CorrectCompensationTerms` moving one
+    /// there, or `RecordCompensationTerms` inserting a second (issue #69).
+    /// Stated as a domain refusal rather than left to the table's `UNIQUE
+    /// (employment_id, effective_from)`, so a caller is told which date
+    /// collided instead of being handed a database error for a rule Rust
+    /// can name.
     CompensationTermsAlreadyExistAt {
         employment_id: EmploymentId,
         effective_from: NaiveDate,

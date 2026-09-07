@@ -28,6 +28,16 @@ function messageForRefusal(caught: unknown): string {
         : 'Pay must start on the first day of one of this employer’s pay periods.';
     }
 
+    // Issue #69: the one refusal this form can state as an ordinary fact —
+    // pay from that date is already recorded, so the way forward is another
+    // date, not a retry of the same one.
+    case 'compensation_terms_already_exist_at': {
+      const effectiveFrom = (error.details as { effectiveFrom?: unknown } | null)?.effectiveFrom;
+      return typeof effectiveFrom === 'string'
+        ? `Pay from ${effectiveFrom} is already recorded. Choose another date.`
+        : 'Pay from that date is already recorded. Choose another date.';
+    }
+
     case 'master_data_divergence_not_acknowledged':
       return 'This would change pay for a period already paid, which this screen cannot confirm. Contact support.';
 

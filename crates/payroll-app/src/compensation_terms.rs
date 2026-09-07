@@ -33,6 +33,12 @@ use payroll::{EmploymentId, Money, PayPeriod, validate_effective_from_is_a_perio
 /// recorded mistake that never reaches a payroll, so standing pay facts
 /// against it would describe an Employment nobody will ever pay.
 ///
+/// Refused with [`PayrollAppError::CompensationTermsAlreadyExistAt`] when
+/// this Employment already has a row at `effective_from` — a domain refusal
+/// checked in Rust, never the table's own UNIQUE violation handed back as a
+/// [`PayrollAppError::Database`] (issue #69). Changing what an existing row
+/// says is [`correct_compensation_terms`], not a second insert.
+///
 /// Returns every Live finalized `PayPeriod` this new row now diverges from:
 /// the periods already finalized inside the span it takes over,
 /// `[effective_from, next_effective_from)`, `next_effective_from` being
@@ -111,6 +117,33 @@ pub async fn record_compensation_terms(
     }
 
     validate_effective_from_is_a_period_start(schedule, effective_from)?;
+
+    // An insert onto a date this Employment already has a row at collides
+    // with `UNIQUE (employment_id, effective_from)`. Named here as the
+    // domain refusal it is, exactly as `correct_compensation_terms` names
+    // the same collision on a move (issue #69): "pay from that date is
+    // already recorded" is a fact about what the caller asked for, and a
+    // `Database` refusal would reach them as a 500 they cannot act on.
+    //
+    // Checked before the divergence list is computed, because a caller
+    // cannot be asked to acknowledge what this row would disagree with when
+    // the row can never be written.
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM compensation_terms
+            WHERE employment_id = $1 AND effective_from = $2
+        )",
+    )
+    .bind(employment_id.as_str())
+    .bind(effective_from)
+    .fetch_one(&mut *tx)
+    .await?;
+    if taken {
+        return Err(PayrollAppError::CompensationTermsAlreadyExistAt {
+            employment_id: employment_id.clone(),
+            effective_from,
+        });
+    }
 
     // The span this insert takes over, derived exactly as
     // `declare_unsupported_deduction_status` derives its own: up to whichever

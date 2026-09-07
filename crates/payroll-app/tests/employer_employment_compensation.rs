@@ -223,11 +223,13 @@ async fn recording_compensation_terms_against_a_missing_employment_is_refused(po
     assert_eq!(result, Err(PayrollAppError::EmploymentNotFound(missing)));
 }
 
-/// A UNIQUE constraint violation is PostgreSQL refusing the statement, not
-/// Rust refusing a fact it understands — the Deep Instruction that a
-/// PostgreSQL constraint violation must never surface as a domain refusal.
+/// Issue #69: recording pay from a date this Employment already has a row at
+/// is a fact about what the caller asked for, so Rust names it rather than
+/// letting `UNIQUE (employment_id, effective_from)` reach the caller as a
+/// `Database` refusal — the same refusal `correct_compensation_terms`
+/// already raises for the same collision on a move.
 #[sqlx::test]
-async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool: PgPool) {
+async fn a_duplicate_effective_from_is_a_domain_refusal(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, employment_id, _) = an_employer_and_employment(&db).await;
     let basic_pay = Money::from_cents(500000).unwrap();
@@ -255,10 +257,21 @@ async fn a_duplicate_effective_from_is_a_database_refusal_not_a_domain_one(pool:
     )
     .await;
 
-    assert!(
-        matches!(result, Err(PayrollAppError::Database(_))),
-        "expected a Database refusal, got {result:?}"
+    assert_eq!(
+        result,
+        Err(PayrollAppError::CompensationTermsAlreadyExistAt {
+            employment_id: employment_id.clone(),
+            effective_from: date(2026, 1, 26),
+        })
     );
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM compensation_terms WHERE employment_id = $1")
+            .bind(employment_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "the first row stands, unchanged and alone");
 }
 
 #[sqlx::test]
