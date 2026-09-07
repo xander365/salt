@@ -45,6 +45,11 @@ export default defineConfig({
       command: SALT_SERVER_BIN,
       url: `http://127.0.0.1:${SALT_SERVER_PORT}/api/health`,
       reuseExistingServer: !process.env.CI,
+      // Playwright discards a webServer's output by default, so a server
+      // that refuses to start fails this suite with nothing but "Timed out
+      // waiting 60000ms" and no way to tell which of the two it was.
+      stdout: 'pipe',
+      stderr: 'pipe',
       env: {
         ...process.env,
         SALT_ENVIRONMENT: 'development',
@@ -62,10 +67,16 @@ export default defineConfig({
       // salt-server (`web/vite.config.ts`'s own `preview.proxy`, the
       // `preview`-mode twin of the proxy `npm run dev` already uses) — never
       // a mocked API (Deep Instructions).
-      command: `npm run preview -- --port ${WEB_PORT} --strictPort`,
+      // `--host 127.0.0.1` is not decoration: Vite's own default is the
+      // name `localhost`, and a host that resolves that to `::1` first —
+      // GitHub's runners do — leaves the bundle listening where the
+      // `url` below, salt-server and the browser never look.
+      command: `npm run preview -- --host 127.0.0.1 --port ${WEB_PORT} --strictPort`,
       cwd: path.resolve(__dirname, '../web'),
       url: `http://127.0.0.1:${WEB_PORT}`,
       reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
     },
   ],
 });

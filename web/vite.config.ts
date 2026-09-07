@@ -5,10 +5,13 @@ import { defineConfig } from 'vite'
 // than the browser calling a second origin directly, so no CORS layer is
 // ever needed in either environment (§0.15 of
 // docs/domain/operator-auth-http-web-grill.md). salt-server's own default
-// bind address is 0.0.0.0:8080 (crates/salt-server/src/config.rs).
+// bind address is 0.0.0.0:8080 (crates/salt-server/src/config.rs) — IPv4,
+// which is why the target below names `127.0.0.1` and never `localhost`: a
+// machine that resolves that name to `::1` first would send every proxied
+// `/api` call somewhere nothing is listening.
 const apiProxy = {
   '/api': {
-    target: 'http://localhost:8080',
+    target: 'http://127.0.0.1:8080',
     changeOrigin: true,
   },
 }
