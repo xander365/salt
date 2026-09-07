@@ -24,7 +24,11 @@ export default defineConfig({
   testDir: './tests',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // One bootstrap owns one stateful journey. Retrying only the test would
+  // reuse its partially-written database and turn the retry into a different
+  // scenario (duplicate people or an already-created run), so failures must
+  // be reported from their original attempt.
+  retries: 0,
   workers: 1,
   reporter: 'list',
   globalSetup: './global-setup.ts',

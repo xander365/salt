@@ -5,6 +5,7 @@
 // own `FiguresDto` on the server side, so a figure reads identically
 // whichever screen shows it.
 
+import { useId } from 'react';
 import type { FiguresDto } from '../../api/types';
 import { centsText } from '../../money';
 
@@ -22,14 +23,19 @@ const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
 ];
 
 export function Figures({ figures }: { figures: FiguresDto }) {
+  const labelIdPrefix = useId();
+
   return (
     <dl>
-      {FIGURE_FIELDS.map(({ key, label }) => (
-        <div key={key}>
-          <dt>{label}</dt>
-          <dd>{centsText(figures[key])}</dd>
-        </div>
-      ))}
+      {FIGURE_FIELDS.map(({ key, label }) => {
+        const labelId = `${labelIdPrefix}-${key}`;
+        return (
+          <div key={key} role="group" aria-labelledby={labelId}>
+            <dt id={labelId}>{label}</dt>
+            <dd>{centsText(figures[key])}</dd>
+          </div>
+        );
+      })}
     </dl>
   );
 }

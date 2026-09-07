@@ -25,24 +25,22 @@ import { readFile } from 'node:fs/promises';
 import { type Page, expect, test } from '@playwright/test';
 import { type BootstrappedOperator, CREDENTIALS_PATH } from '../global-setup.js';
 
-/** `web/src/routes/payroll/Figures.tsx`'s own `FIGURE_FIELDS`, in the exact
- * order it renders them. A figure's `<dd>` carries no accessible name of
- * its own to tell one from another, so this test reads them by position —
- * the DOM equivalent of the Rust journey test reading `figures["fieldName"]`
- * off a JSON object. */
+/** The nine figures §0.29 names and the accessible names the screen gives
+ * them. Order is immaterial: each value is read by what a person calls it,
+ * never by where its definition happens to sit in the document. */
 const FIGURE_FIELDS = [
-  'basicPayCents',
-  'taxableAllowancesCents',
-  'grossCents',
-  'taxableRemunerationCents',
-  'payeCents',
-  'employeeSscCents',
-  'employerSscCents',
-  'totalDeductionsCents',
-  'netCents',
+  { field: 'basicPayCents', name: 'Basic Pay' },
+  { field: 'taxableAllowancesCents', name: 'Taxable Allowances' },
+  { field: 'grossCents', name: 'Gross' },
+  { field: 'taxableRemunerationCents', name: 'Taxable Remuneration' },
+  { field: 'payeCents', name: 'PAYE' },
+  { field: 'employeeSscCents', name: 'Employee SSC' },
+  { field: 'employerSscCents', name: 'Employer SSC' },
+  { field: 'totalDeductionsCents', name: 'Total Deductions' },
+  { field: 'netCents', name: 'Net' },
 ] as const;
 
-type Figures = Record<(typeof FIGURE_FIELDS)[number], number>;
+type Figures = Record<(typeof FIGURE_FIELDS)[number]['field'], number>;
 
 /** `web/src/employments/useEmployments.ts`'s own `useCreateEmployment` sets
  * a new Employment's `startDate` to the real "today" — there is no field on
@@ -118,10 +116,15 @@ function parseCentsText(text: string): number {
 async function readFigures(page: Page): Promise<Figures> {
   const definitions = page.getByRole('definition');
   await expect(definitions).toHaveCount(FIGURE_FIELDS.length);
-  const values = await definitions.allTextContents();
-  return Object.fromEntries(
-    FIGURE_FIELDS.map((field, index) => [field, parseCentsText(values[index])]),
-  ) as Figures;
+  const figures = {} as Figures;
+  for (const { field, name } of FIGURE_FIELDS) {
+    const figure = page.getByRole('group', { name, exact: true });
+    await expect(figure).toBeVisible();
+    const definition = figure.getByRole('definition');
+    await expect(definition).toBeVisible();
+    figures[field] = parseCentsText(await definition.innerText());
+  }
+  return figures;
 }
 
 test('signing in and running one ordinary payroll end to end', async ({ page }) => {
@@ -145,39 +148,46 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await expect(page.getByRole('heading', { level: 2, name: 'Ada Lovelace' })).toBeVisible();
 
   // Record CompensationTerms, effective from the start of the period this
-  // Employment can first be paid for. Its own "Effective from" is the first
-  // of two fields sharing that label on this screen — Unsupported
-  // deductions' section, further down, is the second.
-  await page.getByLabel('Effective from').first().fill(periodStartText);
-  await page.getByLabel('Basic pay').fill('15000.00');
-  await page.getByRole('button', { name: 'Save pay' }).click();
+  // Employment can first be paid for.
+  const payRegion = page.getByRole('region', { name: 'Pay', exact: true });
+  await payRegion.getByLabel('Effective from').fill(periodStartText);
+  await payRegion.getByLabel('Basic pay').fill('15000.00');
+  await payRegion.getByRole('button', { name: 'Save pay' }).click();
   await expect(page.getByText(`Pay of 15000.00 recorded from ${periodStartText}.`)).toBeVisible();
 
-  // Declare PriorEmployment: no prior employment this tax year. "Tax year
-  // starting" is the first of two fields sharing that label — Opening
-  // balance's own, never filled in this journey, is the second. Its own
+  // Declare PriorEmployment: no prior employment this tax year. Its own
   // default assumes the tax year real "today" falls in, which right at the
   // tax year's own March boundary can differ from the period's — so this
   // fills it explicitly rather than trust that default.
-  const priorEmploymentGroup = page.getByRole('radiogroup', {
+  const priorEmploymentRegion = page.getByRole('region', {
+    name: 'Prior employment',
+    exact: true,
+  });
+  const priorEmploymentGroup = priorEmploymentRegion.getByRole('radiogroup', {
     name: 'Did this employee have taxable employment earlier this tax year?',
   });
-  await page.getByLabel('Tax year starting').first().fill(String(taxYearStarting));
+  await priorEmploymentRegion.getByLabel('Tax year starting').fill(String(taxYearStarting));
   await priorEmploymentGroup.getByRole('radio', { name: 'No', exact: true }).check();
-  await page.getByRole('button', { name: 'Save prior employment' }).click();
+  await priorEmploymentRegion.getByRole('button', { name: 'Save prior employment' }).click();
   await expect(
     page.getByText(`Recorded: no prior employment in tax year ${taxYearStarting}.`),
   ).toBeVisible();
 
   // Declare UnsupportedDeductionStatus: none, from the same date pay
   // starts. The form requires a reason even for "none".
-  const unsupportedDeductionsGroup = page.getByRole('radiogroup', {
+  const unsupportedDeductionsRegion = page.getByRole('region', {
+    name: 'Unsupported deductions',
+    exact: true,
+  });
+  const unsupportedDeductionsGroup = unsupportedDeductionsRegion.getByRole('radiogroup', {
     name: 'Does this employee have any deductions Salt does not support?',
   });
-  await page.getByLabel('Effective from').last().fill(periodStartText);
+  await unsupportedDeductionsRegion.getByLabel('Effective from').fill(periodStartText);
   await unsupportedDeductionsGroup.getByRole('radio', { name: 'No', exact: true }).check();
-  await page.getByLabel('Reason').fill('no unsupported deductions');
-  await page.getByRole('button', { name: 'Save unsupported deductions' }).click();
+  await unsupportedDeductionsRegion.getByLabel('Reason').fill('no unsupported deductions');
+  await unsupportedDeductionsRegion
+    .getByRole('button', { name: 'Save unsupported deductions' })
+    .click();
   await expect(
     page.getByText(`Recorded: no unsupported deductions from ${periodStartText}.`),
   ).toBeVisible();

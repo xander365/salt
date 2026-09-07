@@ -122,8 +122,8 @@ export function PriorEmploymentForm({ employmentId }: { employmentId: string }) 
     // Named so a payroll run's `prior_employment_unknown` and
     // `prior_employment_treatment_unconfirmed` blockers can link straight
     // here (issue #64's own Deep Instructions).
-    <section id="prior-employment">
-      <h3>Prior employment</h3>
+    <section id="prior-employment" aria-labelledby={`${taxYearId}-section-heading`}>
+      <h3 id={`${taxYearId}-section-heading`}>Prior employment</h3>
       <form onSubmit={handleSubmit}>
         <div>
           <label htmlFor={taxYearId}>Tax year starting</label>
