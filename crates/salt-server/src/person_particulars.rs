@@ -1,6 +1,8 @@
-//! `GET`/`PUT /api/employers/{e}/people/{p}/particulars`, `PUT
-//! /api/employers/{e}/people/{p}/name`, and `GET
-//! /api/employers/{e}/people/{p}/action-log` (issue #72, parent #70 D-7).
+//! `GET`/`PUT /api/employers/{e}/people/{p}/particulars` and `PUT
+//! /api/employers/{e}/people/{p}/name` (issue #72, parent #70 D-7). The
+//! correction trail is not a route of its own: it rides on the particulars
+//! `GET`, because the screen that shows it never wants one without the
+//! other, and a second round trip would only let the two disagree.
 //!
 //! Unlike `employer_particulars.rs`, no handler here calls `require_role`:
 //! PersonParticulars are not Owner-only (D25 restricts only Employer

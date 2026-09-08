@@ -173,14 +173,20 @@ pub(crate) async fn live_finalized_periods_for_employer(
 }
 
 /// Every Live `FinalizedPayroll` `PayPeriod` for any Employment of
-/// `person_id` — across every Employer, since `PersonId` is globally unique
-/// even though ADR-0020 scopes what it names to one Employer, the same
-/// Person-scoped sibling of [`live_finalized_periods_for_employer`] for
-/// `PersonParticulars` and a `full_name` correction (issue #72), neither of
-/// which carries an `effective_from` of its own any more than
-/// `EmployerParticulars` does. A Person with more than one Employment (a
-/// rehire) diverges from every Live finalized period any of them has, not
-/// just the Employment the correcting screen happened to be opened from.
+/// `person_id` — the Person-scoped sibling of
+/// [`live_finalized_periods_for_employer`], for `PersonParticulars` and a
+/// `full_name` correction (issue #72), neither of which carries an
+/// `effective_from` of its own any more than `EmployerParticulars` does. A
+/// Person with more than one Employment (a rehire) diverges from every Live
+/// finalized period any of them has, not just the Employment the correcting
+/// screen happened to be opened from.
+///
+/// No `employer_id` predicate is needed and none is added: migration 0031's
+/// `employment_person_is_scoped_to_its_employer` foreign key makes an
+/// Employment of another Employer's Person unrepresentable, so every row
+/// this reaches is already inside the one Employer ADR-0020 scopes the
+/// Person to. The caller has separately proved that Employer is the
+/// authorized one.
 pub(crate) async fn live_finalized_periods_for_person(
     conn: &mut sqlx::PgConnection,
     person_id: &PersonId,

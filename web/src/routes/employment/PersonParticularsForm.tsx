@@ -223,9 +223,14 @@ function PersonNameForm({ personId, fullName }: { personId: string; fullName: st
             required
             {...fieldErrorProps(fieldError, 'reason', errorId)}
             value={reason}
+            // Deliberately not `edited()`: rewording the reason must not
+            // withdraw a divergence panel the operator is answering. Only a
+            // change to the name itself makes the acknowledgement stale.
             onChange={(event) => {
               setReason(event.target.value);
-              edited();
+              setFieldError(null);
+              setError(null);
+              setSaved(false);
             }}
           />
         </div>
@@ -506,13 +511,20 @@ function changedActionFields(context: Record<string, unknown>) {
     return [];
   }
 
-  return Object.keys(ACTION_FIELD_LABEL)
-    .filter((field) => before?.[field] !== after[field])
-    .map((field) => ({
-      field,
-      before: displayedActionValue(before?.[field]),
-      after: displayedActionValue(after[field]),
-    }));
+  return (
+    Object.keys(ACTION_FIELD_LABEL)
+      .map((field) => ({
+        field,
+        before: displayedActionValue(before?.[field]),
+        after: displayedActionValue(after[field]),
+      }))
+      // Compared after display, not before it: an entry with no `before` at
+      // all — a first record that already diverged from finalized payroll —
+      // reads `undefined` where the `after` reads `null`, and listing that
+      // as "From Not recorded to Not recorded" would state a change that
+      // never happened.
+      .filter((change) => change.before !== change.after)
+  );
 }
 
 function ActionLogTrail({ entries }: { entries: ActionLogEntryDto[] }) {
