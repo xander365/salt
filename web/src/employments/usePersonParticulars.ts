@@ -13,7 +13,7 @@ import type {
   PersonParticularsResponse,
   SetPersonParticularsRequest,
 } from '../api/types';
-import { useEmployerId } from './useEmployments';
+import { employmentsQueryKey, useEmployerId } from './useEmployments';
 
 function personParticularsQueryKey(employerId: string, personId: string) {
   return ['employers', employerId, 'people', personId, 'particulars'] as const;
@@ -64,8 +64,14 @@ export function useCorrectPersonFullName(personId: string) {
         body: JSON.stringify(request),
       }),
     onSuccess: () =>
-      queryClient.invalidateQueries({
-        queryKey: personParticularsQueryKey(employerId, personId),
-      }),
+      Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: personParticularsQueryKey(employerId, personId),
+        }),
+        // A Person's name is repeated in the People list and every Employment
+        // detail for that Person. Invalidate the whole Employment prefix so
+        // no screen keeps presenting the misspelling after it was corrected.
+        queryClient.invalidateQueries({ queryKey: employmentsQueryKey(employerId) }),
+      ]),
   });
 }

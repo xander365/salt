@@ -480,6 +480,41 @@ const ACTION_TYPE_LABEL: Record<string, string> = {
   person_full_name_corrected: 'Name corrected',
 };
 
+const ACTION_FIELD_LABEL: Record<string, string> = {
+  full_name: 'Full name',
+  identity_number: 'Identity number',
+  address_line1: 'Address line 1',
+  address_line2: 'Address line 2',
+  city: 'City',
+  postal_code: 'Postal code',
+};
+
+function contextRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function displayedActionValue(value: unknown): string {
+  return typeof value === 'string' && value !== '' ? value : 'Not recorded';
+}
+
+function changedActionFields(context: Record<string, unknown>) {
+  const before = contextRecord(context.before);
+  const after = contextRecord(context.after);
+  if (after === null) {
+    return [];
+  }
+
+  return Object.keys(ACTION_FIELD_LABEL)
+    .filter((field) => before?.[field] !== after[field])
+    .map((field) => ({
+      field,
+      before: displayedActionValue(before?.[field]),
+      after: displayedActionValue(after[field]),
+    }));
+}
+
 function ActionLogTrail({ entries }: { entries: ActionLogEntryDto[] }) {
   if (entries.length === 0) {
     return null;
@@ -492,6 +527,7 @@ function ActionLogTrail({ entries }: { entries: ActionLogEntryDto[] }) {
         {entries.map((entry, index) => {
           const context = entry.context ?? {};
           const reason = typeof context.reason === 'string' ? context.reason : null;
+          const changes = changedActionFields(context);
           return (
             // Newest first, from the server's own ordering — an id is not
             // sent over the wire for a read-only list, so the occurrence
@@ -504,6 +540,21 @@ function ActionLogTrail({ entries }: { entries: ActionLogEntryDto[] }) {
                 {new Date(entry.occurredAt).toLocaleString()} by {entry.actor}
               </p>
               {reason !== null && <p className="mt-1">“{reason}”</p>}
+              {changes.length > 0 && (
+                <dl className="mt-2 flex flex-col gap-1">
+                  {changes.map((change) => (
+                    <div key={change.field} className="grid gap-x-2 sm:grid-cols-[8rem_1fr]">
+                      <dt className="font-medium">{ACTION_FIELD_LABEL[change.field]}</dt>
+                      <dd>
+                        <span className="text-muted-foreground">From </span>
+                        {change.before}
+                        <span className="text-muted-foreground"> to </span>
+                        {change.after}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
             </li>
           );
         })}

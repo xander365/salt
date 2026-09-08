@@ -13,7 +13,7 @@ import type {
   EmploymentsResponse,
 } from '../api/types';
 
-function employmentsQueryKey(employerId: string) {
+export function employmentsQueryKey(employerId: string) {
   return ['employers', employerId, 'employments'] as const;
 }
 

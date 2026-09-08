@@ -353,6 +353,54 @@ async fn a_person_id_of_another_employer_is_refused_on_write_and_writes_nothing(
 }
 
 #[tokio::test]
+async fn a_person_id_of_another_employer_is_refused_on_name_write_like_an_unknown_person() {
+    let (cookie, own_employer_id) = an_operator_with_role(MembershipRole::PayrollOperator).await;
+    let (other_cookie, other_employer_id) =
+        an_operator_with_role(MembershipRole::PayrollOperator).await;
+    let other_person_id = a_person(&other_employer_id, &other_cookie, "Ada Lovelaec").await;
+
+    let cross_employer = router()
+        .await
+        .oneshot(put_name_request(
+            &own_employer_id,
+            &other_person_id,
+            &cookie,
+            json!({ "fullName": "Ada Lovelace", "reason": "fixing a misspelling" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cross_employer.status(), StatusCode::NOT_FOUND);
+    let cross_employer_code = body_json(cross_employer).await["error"]["code"].clone();
+
+    let unknown_person = router()
+        .await
+        .oneshot(put_name_request(
+            &own_employer_id,
+            "no-such-person",
+            &cookie,
+            json!({ "fullName": "Ada Lovelace", "reason": "fixing a misspelling" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown_person.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        cross_employer_code,
+        body_json(unknown_person).await["error"]["code"]
+    );
+
+    let get_after = router()
+        .await
+        .oneshot(get_request(
+            &other_employer_id,
+            &other_person_id,
+            &other_cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(get_after).await["fullName"], "Ada Lovelaec");
+}
+
+#[tokio::test]
 async fn correcting_particulars_demands_a_reason_and_logs_it() {
     let (cookie, employer_id) = an_operator_with_role(MembershipRole::PayrollOperator).await;
     let person_id = a_person(&employer_id, &cookie, "Ada Lovelace").await;

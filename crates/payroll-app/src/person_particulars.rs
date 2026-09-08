@@ -85,19 +85,23 @@ impl From<StoredFields> for PersonParticularsFields {
     }
 }
 
-/// [`crate::employer_particulars`]'s own optional-field rule, restated here
-/// rather than shared: this crate owns the invariant at the point each table
-/// writes it (ADR-0018), and a whitespace-only optional value states nothing
-/// whichever table it was headed for.
-fn normalize_optional_fields(fields: PersonParticularsFields) -> PersonParticularsFields {
+/// Stores every particulars value trimmed, while treating a whitespace-only
+/// optional value as absent. This crate owns the invariant at the use-case
+/// boundary (ADR-0018), before either persistence or ActionLog serialization.
+fn normalize_fields(fields: PersonParticularsFields) -> PersonParticularsFields {
     fn stated(value: Option<String>) -> Option<String> {
-        value.filter(|value| !value.trim().is_empty())
+        value.and_then(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
     }
 
     PersonParticularsFields {
+        identity_number: fields.identity_number.trim().to_string(),
+        address_line1: fields.address_line1.trim().to_string(),
         address_line2: stated(fields.address_line2),
+        city: fields.city.trim().to_string(),
         postal_code: stated(fields.postal_code),
-        ..fields
     }
 }
 
@@ -196,7 +200,7 @@ pub async fn set_person_particulars(
     reason: &str,
     actor: &str,
 ) -> Result<Vec<PayPeriod>, PayrollAppError> {
-    let fields = normalize_optional_fields(fields);
+    let fields = normalize_fields(fields);
 
     if fields.identity_number.trim().is_empty() {
         return Err(PayrollAppError::PersonParticularsIdentityNumberCannotBeEmpty);
@@ -524,6 +528,40 @@ mod tests {
             stored.particulars_created_by,
             Some("operator:alice".to_string())
         );
+    }
+
+    #[sqlx::test]
+    async fn particulars_are_stored_trimmed(pool: PgPool) {
+        let db = SaltDatabase::from_pool(pool);
+        let employer_id = an_employer(&db).await;
+        let person_id = a_person(&db, &employer_id, "Ada Lovelace").await;
+
+        set_person_particulars(
+            &db,
+            &employer_id,
+            &person_id,
+            PersonParticularsFields {
+                identity_number: "  12345678901  ".to_string(),
+                address_line1: "  1 Independence Ave  ".to_string(),
+                address_line2: Some("  Apartment 2  ".to_string()),
+                city: "  Windhoek  ".to_string(),
+                postal_code: Some("  10001  ".to_string()),
+            },
+            &[],
+            "",
+            "operator:alice",
+        )
+        .await
+        .unwrap();
+
+        let stored = get_person_particulars(&db, &employer_id, &person_id)
+            .await
+            .unwrap();
+        assert_eq!(stored.identity_number.as_deref(), Some("12345678901"));
+        assert_eq!(stored.address_line1.as_deref(), Some("1 Independence Ave"));
+        assert_eq!(stored.address_line2.as_deref(), Some("Apartment 2"));
+        assert_eq!(stored.city.as_deref(), Some("Windhoek"));
+        assert_eq!(stored.postal_code.as_deref(), Some("10001"));
     }
 
     #[sqlx::test]
