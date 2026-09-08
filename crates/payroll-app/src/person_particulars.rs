@@ -15,11 +15,14 @@
 //! ([`PayrollAppError::PersonNotFound`], ADR-0017) — the same check
 //! `create_employment`'s `EmploymentPerson::Existing` branch makes.
 //!
-//! Nothing here freezes into a `FinalizedPayroll` — that is #70 D-7's own
-//! later ticket — so `person_particulars` and `person.full_name` are read
-//! live by whatever renders a payslip until then. The divergence
-//! acknowledgement below exists to keep the audit trail honest in the
-//! meantime, not because anything downstream depends on it yet.
+//! `person_particulars` and `person.full_name` both freeze onto every
+//! `FinalizedPayroll` at finalization (issue #73, #70 D-7 and D22):
+//! [`person_particulars_snapshot`] is the read `finalize_payroll_run`
+//! makes, and a correction made here afterwards can never rewrite what a
+//! payroll already committed to (ADR-0004). The divergence acknowledgement
+//! below is what keeps that honest — it warns the corrector which live
+//! finalized periods now disagree with the master record, and never
+//! touches a finalized row.
 
 use chrono::{DateTime, Utc};
 use payroll::{EmployerId, PayPeriod, PersonId};

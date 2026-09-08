@@ -6,9 +6,13 @@
 //! existing one" by, so both acts collapse into one upsert,
 //! [`set_employer_particulars`], decided by whether a row already exists.
 //!
-//! Nothing here freezes into a `FinalizedPayroll` — that is #70 D-7's own
-//! later ticket, out of this one's scope — so this table is read live by
-//! whatever renders a payslip until then.
+//! These values freeze onto every `FinalizedPayroll` at finalization (issue
+//! #73, #70 D-7 and D22): [`employer_particulars_snapshot`] is the read
+//! `finalize_payroll_run` makes, and a correction made here afterwards can
+//! never rewrite what a payroll already committed to (ADR-0004). The
+//! divergence acknowledgement below is what keeps that honest — it warns
+//! the corrector which live finalized periods now disagree with the master
+//! record, and never touches a finalized row.
 
 use chrono::{DateTime, Utc};
 use payroll::{EmployerId, PayPeriod};

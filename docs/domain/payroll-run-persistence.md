@@ -1153,6 +1153,13 @@ onward it always carries at least a `full_name`, whatever
 finalization with nothing recorded — so `employer_particulars_json` can be
 null on a version-2 row for a reason that has nothing to do with version.
 
+`finalized_payroll` keeps §6.2's `REVOKE UPDATE, DELETE` with the new columns
+present — migration 0034 restates the whole permission matrix, and both halves
+are tested. A frozen particulars column that is present but does not decode is
+refused as `FinalizedPayrollSnapshotUnreadable`, the same refusal an
+undecodable `payroll_calculation_json` earns, never a panic: the route whose
+job is explaining a past month answers with a stated reason or not at all.
+
 **`PayslipTemplateVersion` identifier scheme:** `"<family>-v<n>"`, e.g.
 `standard-v1`. `family` names a template's overall shape — a different
 family exists for print requirements that differ in kind (a different

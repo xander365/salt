@@ -77,6 +77,37 @@ fn calculation_from_snapshot(
     })
 }
 
+/// Decodes one frozen particulars column, which is absent (`None`) on every
+/// row finalized before issue #73 and, for
+/// [`FinalizedEmployerParticulars`], on a row whose Employer had recorded
+/// nothing at finalize time.
+///
+/// A blob that is present but does not decode is refused as
+/// [`PayrollAppError::FinalizedPayrollSnapshotUnreadable`], exactly as an
+/// undecodable `payroll_calculation_json` already is — never a panic. The
+/// column is written only by `finalize_payroll_run` and never updated in
+/// place (§6.2 revokes `UPDATE`), so this cannot happen to a row this build
+/// wrote; it can happen to a row written by a *later* build whose version
+/// this one does not know, and that case is already the one
+/// [`calculation_from_snapshot`] answers with this same error rather than a
+/// 500 on the route whose whole job is explaining a past month.
+fn particulars_from_snapshot<T: serde::de::DeserializeOwned>(
+    finalized_payroll_id: &FinalizedPayrollId,
+    schema_version: i32,
+    particulars_json: Option<serde_json::Value>,
+) -> Result<Option<T>, PayrollAppError> {
+    particulars_json
+        .map(|value| {
+            serde_json::from_value(value).map_err(|_| {
+                PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+                    finalized_payroll_id: finalized_payroll_id.clone(),
+                    schema_version,
+                }
+            })
+        })
+        .transpose()
+}
+
 /// The frozen `EmployerParticulars` on one `FinalizedPayroll` (issue #73,
 /// CONTEXT.md's own glossary entry). `None` on
 /// [`FinalizedPayrollDetail::employer_particulars`] means either this
@@ -212,20 +243,16 @@ pub async fn get_finalized_payroll_detail(
     let calculation =
         calculation_from_snapshot(&finalized_payroll_id, schema_version, calculation_json)?;
 
-    let employer_particulars: Option<FinalizedEmployerParticulars> =
-        employer_particulars_json.map(|value| {
-            serde_json::from_value(value).expect(
-                "finalized_payroll.employer_particulars_json is always a serialized \
-                 FinalizedEmployerParticulars snapshot",
-            )
-        });
-    let person_particulars: Option<FinalizedPersonParticulars> =
-        person_particulars_json.map(|value| {
-            serde_json::from_value(value).expect(
-                "finalized_payroll.person_particulars_json is always a serialized \
-                 FinalizedPersonParticulars snapshot",
-            )
-        });
+    let employer_particulars: Option<FinalizedEmployerParticulars> = particulars_from_snapshot(
+        &finalized_payroll_id,
+        schema_version,
+        employer_particulars_json,
+    )?;
+    let person_particulars: Option<FinalizedPersonParticulars> = particulars_from_snapshot(
+        &finalized_payroll_id,
+        schema_version,
+        person_particulars_json,
+    )?;
     let full_name = person_particulars
         .as_ref()
         .map(|particulars| particulars.full_name.clone())
@@ -307,6 +334,37 @@ mod tests {
             Err(PayrollAppError::FinalizedPayrollSnapshotUnreadable {
                 finalized_payroll_id: id,
                 schema_version: 99,
+            })
+        );
+    }
+
+    /// An absent column is the ordinary case, not a failure: a row finalized
+    /// before issue #73, or one whose Employer had recorded nothing.
+    #[test]
+    fn an_absent_particulars_column_reads_back_as_nothing_frozen() {
+        let id = FinalizedPayrollId::new("finalized-payroll-1");
+
+        let decoded: Option<FinalizedEmployerParticulars> =
+            particulars_from_snapshot(&id, 2, None).unwrap();
+
+        assert_eq!(decoded, None);
+    }
+
+    /// A present-but-undecodable blob is refused with the same error an
+    /// undecodable calculation snapshot gets, never a panic — a 500 with a
+    /// backtrace is not how this route explains a past month.
+    #[test]
+    fn a_particulars_blob_this_build_cannot_decode_is_refused_rather_than_panicking() {
+        let id = FinalizedPayrollId::new("finalized-payroll-1");
+
+        let result: Result<Option<FinalizedPersonParticulars>, _> =
+            particulars_from_snapshot(&id, 3, Some(serde_json::json!({ "not": "particulars" })));
+
+        assert_eq!(
+            result,
+            Err(PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+                finalized_payroll_id: id,
+                schema_version: 3,
             })
         );
     }

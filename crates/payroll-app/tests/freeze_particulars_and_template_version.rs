@@ -368,6 +368,78 @@ async fn a_payroll_finalized_before_this_ticket_reads_back_with_no_frozen_partic
     assert_eq!(detail.full_name, "Ada Lovelace");
 }
 
+/// The acceptance criterion names `UPDATE` *and* `DELETE`: adding columns to
+/// `finalized_payroll` must not have weakened either half of §6.2's revoke.
+/// Migration 0034 restates the whole permission matrix (as every migration
+/// since 0017 does), and this is what proves the restatement did not quietly
+/// grant back the row-level deletion the table has never allowed.
+#[sqlx::test]
+async fn the_restricted_role_cannot_delete_a_row_carrying_the_new_frozen_columns(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    let (_run_id, finalized_payroll_id) = finalize_march(&db, &employer_id).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+
+    let result = sqlx::query("DELETE FROM finalized_payroll WHERE id = $1::uuid")
+        .bind(&finalized_payroll_id)
+        .execute(&mut *conn)
+        .await;
+
+    let err = result.expect_err("the restricted role's DELETE must be refused");
+    assert!(matches!(
+        &err,
+        sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("42501")
+    ));
+
+    // Still there, and still carrying what it froze.
+    let detail = get_finalized_payroll_detail(&db, &employer_id, &finalized_payroll_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.payslip_template_version.as_deref(),
+        Some(payroll_app::PAYSLIP_TEMPLATE_VERSION)
+    );
+}
+
+/// The other two frozen columns, for the same reason: a `payslip_template_version`
+/// `UPDATE` proves the table-level revoke, but only naming each column proves
+/// no column-scoped grant (0033 restored one on `person.full_name`) leaked
+/// onto this table.
+#[sqlx::test]
+async fn the_restricted_role_cannot_update_the_new_frozen_particulars_columns(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    let (_run_id, finalized_payroll_id) = finalize_march(&db, &employer_id).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+
+    for column in ["employer_particulars_json", "person_particulars_json"] {
+        let result = sqlx::query(&format!(
+            "UPDATE finalized_payroll SET {column} = '{{}}'::jsonb WHERE id = $1::uuid"
+        ))
+        .bind(&finalized_payroll_id)
+        .execute(&mut *conn)
+        .await;
+
+        let err = result.expect_err("the restricted role's UPDATE must be refused");
+        assert!(
+            matches!(&err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("42501")),
+            "{column} was not refused"
+        );
+    }
+}
+
 #[sqlx::test]
 async fn the_restricted_role_cannot_update_the_new_frozen_columns(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
