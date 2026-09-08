@@ -26,6 +26,7 @@ mod membership;
 mod opening_balance;
 mod operator;
 mod payroll_run;
+mod person_particulars;
 mod prior_employment;
 mod reversal;
 mod sequencing;
@@ -33,7 +34,7 @@ mod session;
 mod unsupported_deduction_status;
 mod year_to_date;
 
-pub use action_log::ActionType;
+pub use action_log::{ActionLogEntryRecord, ActionType, list_action_log_entries_for_target};
 pub use bootstrap::{BootstrapOutcome, BootstrapPeriodEndDay, bootstrap};
 pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
 pub use compensation_terms::{correct_compensation_terms, record_compensation_terms};
@@ -74,6 +75,10 @@ pub use payroll_run::{
     PayrollRunSummary, RunStatus, create_correction_run, create_ordinary_payroll_run,
     get_payroll_run_detail, list_payroll_runs, remove_employment_from_run, set_run_earnings,
     verify_payroll_run_belongs_to_employer,
+};
+pub use person_particulars::{
+    PersonParticulars, PersonParticularsFields, correct_person_full_name, get_person_particulars,
+    set_person_particulars,
 };
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use reversal::reverse_finalized_payroll;

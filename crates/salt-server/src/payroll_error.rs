@@ -595,6 +595,48 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
                     .collect::<Vec<_>>(),
             })),
         ),
+        PayrollAppError::PersonParticularsIdentityNumberCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "person_particulars_identity_number_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::PersonParticularsAddressLine1CannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "person_particulars_address_line1_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::PersonParticularsCityCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "person_particulars_city_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::PersonParticularsCorrectionReasonCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "person_particulars_correction_reason_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::PersonNameCorrectionReasonCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "person_name_correction_reason_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::PersonMasterDataDivergenceNotAcknowledged {
+            person_id,
+            diverging_periods,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "person_master_data_divergence_not_acknowledged",
+            Some(json!({
+                "personId": person_id.to_string(),
+                "divergingPeriods": diverging_periods
+                    .iter()
+                    .map(|period| json!({
+                        "start": period.start().to_string(),
+                        "end": period.end().to_string(),
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+        ),
         PayrollAppError::OperatorEmailCannotBeEmpty => Classification::Mapped(
             StatusCode::BAD_REQUEST,
             "operator_email_cannot_be_empty",

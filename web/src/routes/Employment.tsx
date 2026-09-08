@@ -19,6 +19,7 @@ import { humanDate } from '../format';
 import { Money } from '../components/Money';
 import { CompensationTermsForm } from './employment/CompensationTermsForm';
 import { OpeningBalanceForm } from './employment/OpeningBalanceForm';
+import { PersonParticularsSection } from './employment/PersonParticularsForm';
 import { PriorEmploymentForm } from './employment/PriorEmploymentForm';
 import { UnsupportedDeductionStatusForm } from './employment/UnsupportedDeductionStatusForm';
 import { useScrollToSection } from './employment/useScrollToSection';
@@ -114,6 +115,7 @@ export function Employment() {
           </div>
 
           <div className="flex flex-col gap-6">
+            <PersonParticularsSection personId={employment.data.personId} />
             <CompensationTermsForm employmentId={employmentId} />
             <PriorEmploymentForm employmentId={employmentId} />
             <UnsupportedDeductionStatusForm employmentId={employmentId} />

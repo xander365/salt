@@ -19,6 +19,7 @@ use crate::employments;
 use crate::error::ApiError;
 use crate::finalized_payroll;
 use crate::payroll_runs;
+use crate::person_particulars;
 use crate::request_id;
 use crate::session;
 use crate::state::AppState;
@@ -88,6 +89,15 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
             axum::routing::post(employment_facts::record_opening_balance),
+        )
+        .route(
+            "/api/employers/{employer_id}/people/{person_id}/particulars",
+            get(person_particulars::get_person_particulars)
+                .put(person_particulars::set_person_particulars),
+        )
+        .route(
+            "/api/employers/{employer_id}/people/{person_id}/name",
+            axum::routing::put(person_particulars::correct_person_full_name),
         )
         .route(
             "/api/employers/{employer_id}/payroll-runs",

@@ -486,6 +486,36 @@ pub enum PayrollAppError {
         employer_id: EmployerId,
         diverging_periods: Vec<PayPeriod>,
     },
+    /// `SetPersonParticulars` was given an `identityNumber` that is empty or
+    /// only whitespace.
+    PersonParticularsIdentityNumberCannotBeEmpty,
+    /// `SetPersonParticulars` was given an `addressLine1` that is empty or
+    /// only whitespace.
+    PersonParticularsAddressLine1CannotBeEmpty,
+    /// `SetPersonParticulars` was given a `city` that is empty or only
+    /// whitespace.
+    PersonParticularsCityCannotBeEmpty,
+    /// A `SetPersonParticulars` write that either corrects an existing row or
+    /// diverges from live finalized payroll was given a reason that is empty
+    /// or only whitespace — [`Self::EmployerParticularsCorrectionReasonCannotBeEmpty`]'s
+    /// own demand, Person-scoped (issue #72).
+    PersonParticularsCorrectionReasonCannotBeEmpty,
+    /// `CorrectPersonFullName` was given a reason that is empty or only
+    /// whitespace. Unlike [`Self::PersonParticularsCorrectionReasonCannotBeEmpty`],
+    /// this is demanded unconditionally: a Person's `full_name` is set the
+    /// moment the Person is created (issue #51), so every write this use
+    /// case ever makes corrects an existing value — there is no "first
+    /// record" case that could owe no explanation.
+    PersonNameCorrectionReasonCannotBeEmpty,
+    /// A master-data write to a Person's `PersonParticulars` or `full_name`
+    /// was asked for without acknowledging exactly the Live finalized
+    /// `PayPeriod`s it now diverges from — the Person-scoped sibling of
+    /// [`Self::EmployerMasterDataDivergenceNotAcknowledged`], spanning every
+    /// Employment this Person has rather than one Employer's (issue #72).
+    PersonMasterDataDivergenceNotAcknowledged {
+        person_id: PersonId,
+        diverging_periods: Vec<PayPeriod>,
+    },
     /// `CreateOperator` was given an email that is empty or only whitespace.
     OperatorEmailCannotBeEmpty,
     /// `CreateOperator` was given a display name that is empty or only
@@ -983,6 +1013,41 @@ impl std::fmt::Display for PayrollAppError {
                 }
                 Ok(())
             }
+            Self::PersonParticularsIdentityNumberCannotBeEmpty => {
+                write!(f, "a PersonParticulars identity number must not be empty")
+            }
+            Self::PersonParticularsAddressLine1CannotBeEmpty => {
+                write!(f, "a PersonParticulars address line 1 must not be empty")
+            }
+            Self::PersonParticularsCityCannotBeEmpty => {
+                write!(f, "a PersonParticulars city must not be empty")
+            }
+            Self::PersonParticularsCorrectionReasonCannotBeEmpty => {
+                write!(f, "a PersonParticulars correction reason must not be empty")
+            }
+            Self::PersonNameCorrectionReasonCannotBeEmpty => {
+                write!(f, "a Person name correction reason must not be empty")
+            }
+            Self::PersonMasterDataDivergenceNotAcknowledged {
+                person_id,
+                diverging_periods,
+            } => {
+                write!(
+                    f,
+                    "correcting Person {person_id} needs the acknowledgement of every Live \
+                     finalized PayPeriod it now diverges from: "
+                )?;
+                if diverging_periods.is_empty() {
+                    return write!(f, "none");
+                }
+                for (index, period) in diverging_periods.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} to {}", period.start(), period.end())?;
+                }
+                Ok(())
+            }
             Self::OperatorEmailCannotBeEmpty => {
                 write!(f, "an Operator email must not be empty")
             }
@@ -1122,6 +1187,12 @@ impl std::error::Error for PayrollAppError {
             | Self::EmployerParticularsCityCannotBeEmpty
             | Self::EmployerParticularsCorrectionReasonCannotBeEmpty
             | Self::EmployerMasterDataDivergenceNotAcknowledged { .. }
+            | Self::PersonParticularsIdentityNumberCannotBeEmpty
+            | Self::PersonParticularsAddressLine1CannotBeEmpty
+            | Self::PersonParticularsCityCannotBeEmpty
+            | Self::PersonParticularsCorrectionReasonCannotBeEmpty
+            | Self::PersonNameCorrectionReasonCannotBeEmpty
+            | Self::PersonMasterDataDivergenceNotAcknowledged { .. }
             | Self::OperatorEmailCannotBeEmpty
             | Self::OperatorDisplayNameCannotBeEmpty
             | Self::OperatorPasswordTooShort { .. }

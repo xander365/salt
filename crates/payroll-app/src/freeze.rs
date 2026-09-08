@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
-use payroll::{EmployerId, EmploymentId, PayPeriod, TaxYear};
+use payroll::{EmployerId, EmploymentId, PayPeriod, PersonId, TaxYear};
 
 use crate::error::PayrollAppError;
 
@@ -172,6 +172,40 @@ pub(crate) async fn live_finalized_periods_for_employer(
         .collect())
 }
 
+/// Every Live `FinalizedPayroll` `PayPeriod` for any Employment of
+/// `person_id` — across every Employer, since `PersonId` is globally unique
+/// even though ADR-0020 scopes what it names to one Employer, the same
+/// Person-scoped sibling of [`live_finalized_periods_for_employer`] for
+/// `PersonParticulars` and a `full_name` correction (issue #72), neither of
+/// which carries an `effective_from` of its own any more than
+/// `EmployerParticulars` does. A Person with more than one Employment (a
+/// rehire) diverges from every Live finalized period any of them has, not
+/// just the Employment the correcting screen happened to be opened from.
+pub(crate) async fn live_finalized_periods_for_person(
+    conn: &mut sqlx::PgConnection,
+    person_id: &PersonId,
+) -> Result<Vec<PayPeriod>, sqlx::Error> {
+    let rows: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
+        "SELECT DISTINCT finalized.period_start, finalized.period_end
+         FROM live_finalized_payroll AS live
+         JOIN finalized_payroll AS finalized ON finalized.id = live.finalized_payroll_id
+         JOIN employment ON employment.id = live.employment_id
+         WHERE employment.person_id = $1
+         ORDER BY finalized.period_end",
+    )
+    .bind(person_id.as_str())
+    .fetch_all(conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(start, end)| {
+            PayPeriod::new(start, end)
+                .expect("finalized_payroll CHECK: period_end is never before period_start")
+        })
+        .collect())
+}
+
 /// Refuses unless `acknowledged` names exactly the periods in
 /// `diverging_periods` — §6.5 guard 2's "requires the user to acknowledge",
 /// enforced rather than assumed.
@@ -221,6 +255,23 @@ pub(crate) fn require_acknowledgement_of_employer(
             diverging_periods: diverging_periods.to_vec(),
         },
     )
+}
+
+/// [`require_acknowledgement_of`]'s Person-scoped sibling, for
+/// [`live_finalized_periods_for_person`]'s list.
+pub(crate) fn require_acknowledgement_of_person(
+    person_id: &PersonId,
+    diverging_periods: &[PayPeriod],
+    acknowledged: &[PayPeriod],
+) -> Result<(), PayrollAppError> {
+    if acknowledgement_is_exact(diverging_periods, acknowledged) {
+        return Ok(());
+    }
+
+    Err(PayrollAppError::PersonMasterDataDivergenceNotAcknowledged {
+        person_id: person_id.clone(),
+        diverging_periods: diverging_periods.to_vec(),
+    })
 }
 
 fn acknowledgement_is_exact(diverging_periods: &[PayPeriod], acknowledged: &[PayPeriod]) -> bool {

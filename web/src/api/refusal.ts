@@ -29,6 +29,7 @@ export function sharedFactRefusalMessage(caught: unknown): string | null {
     case 'not_found':
     case 'employer_not_found':
     case 'employment_not_found':
+    case 'person_not_found':
       return 'This employee is no longer available to you. Reload the page.';
 
     case 'employment_is_void':

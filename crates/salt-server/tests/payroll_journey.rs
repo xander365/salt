@@ -234,6 +234,61 @@ fn set_employer_particulars_request(
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
+fn get_person_particulars_request(
+    employer_id: &str,
+    person_id: &str,
+    cookie: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/employers/{employer_id}/people/{person_id}/particulars"
+        ))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn set_person_particulars_request(
+    employer_id: &str,
+    person_id: &str,
+    cookie: &str,
+    salt_header: bool,
+    body: Value,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/employers/{employer_id}/people/{person_id}/particulars"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+fn correct_person_full_name_request(
+    employer_id: &str,
+    person_id: &str,
+    cookie: &str,
+    salt_header: bool,
+    body: Value,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/employers/{employer_id}/people/{person_id}/name"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
 fn employment_detail_request(
     employer_id: &str,
     employment_id: &str,
@@ -1105,6 +1160,7 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
 async fn every_payroll_route_answers_401_without_a_session() {
     let e = "placeholder-employer";
     let em = "placeholder-employment";
+    let p = "placeholder-person";
     let r = "placeholder-run";
     let f = "placeholder-finalized";
     let no_cookie = "";
@@ -1117,6 +1173,21 @@ async fn every_payroll_route_answers_401_without_a_session() {
             no_cookie,
             true,
             json!({ "registeredName": "Nobody", "addressLine1": "Nowhere", "city": "Nowhere" }),
+        ),
+        get_person_particulars_request(e, p, no_cookie),
+        set_person_particulars_request(
+            e,
+            p,
+            no_cookie,
+            true,
+            json!({ "identityNumber": "1", "addressLine1": "Nowhere", "city": "Nowhere" }),
+        ),
+        correct_person_full_name_request(
+            e,
+            p,
+            no_cookie,
+            true,
+            json!({ "fullName": "Nobody", "reason": "test" }),
         ),
         create_employment_request(e, no_cookie, true, "Nobody", "2026-01-01"),
         list_employments_request(e, no_cookie),
@@ -1169,6 +1240,7 @@ async fn every_payroll_route_answers_401_without_a_session() {
 async fn every_mutating_payroll_route_requires_the_salt_request_header() {
     let (_operator_id, cookie, employer_id) = an_authorized_operator(MembershipRole::Owner).await;
     let em = "placeholder-employment";
+    let p = "placeholder-person";
     let r = "placeholder-run";
 
     for request in [
@@ -1177,6 +1249,20 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
             &cookie,
             false,
             json!({ "registeredName": "Acme Corp", "addressLine1": "1 Main St", "city": "Windhoek" }),
+        ),
+        set_person_particulars_request(
+            &employer_id,
+            p,
+            &cookie,
+            false,
+            json!({ "identityNumber": "1", "addressLine1": "1 Main St", "city": "Windhoek" }),
+        ),
+        correct_person_full_name_request(
+            &employer_id,
+            p,
+            &cookie,
+            false,
+            json!({ "fullName": "Ada Lovelace", "reason": "test" }),
         ),
         create_employment_request(&employer_id, &cookie, false, "Nobody", "2026-01-01"),
         record_compensation_terms_request(
@@ -1366,6 +1452,8 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/finalize",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/earnings",
+            "/api/employers/{employer_id}/people/{person_id}/name",
+            "/api/employers/{employer_id}/people/{person_id}/particulars",
             "/api/health",
             "/api/ready",
             "/api/session",
@@ -1381,7 +1469,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 18, "{paths:?}");
+    assert_eq!(paths.len(), 20, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

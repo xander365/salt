@@ -267,6 +267,7 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
     let mutable = [
         "employer",
         "employer_particulars",
+        "person_particulars",
         "employment",
         "compensation_terms",
         "opening_balance",
@@ -406,5 +407,59 @@ async fn the_restricted_role_can_disable_an_operator_but_not_delete_one(pool: Pg
     assert!(
         is_insufficient_privilege(&err),
         "expected an insufficient_privilege refusal while attempting to delete an Operator,          got {err:?}"
+    );
+}
+
+/// `person` is append-only overall (`the_restricted_role_holds_exactly_the_permissions_the_design_intends`
+/// still finds only `INSERT, SELECT` at the table level — a column grant does
+/// not roll up into one), but issue #72's migration 0033 restores `UPDATE` on
+/// its `full_name` column alone. Proved directly: the restricted role can
+/// correct a name, but not the columns ADR-0020's scoping and §10's own
+/// attribution depend on.
+#[sqlx::test]
+async fn the_restricted_role_can_update_only_person_full_name(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+
+    sqlx::query(
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-1', 'Employer', 'day', 25, 'test-actor')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("insert employer");
+    sqlx::query(
+        "INSERT INTO person (id, employer_id, full_name, created_by)
+         VALUES ('person-1', 'employer-1', 'Misspelled Nmae', 'test-actor')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("insert person");
+
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .expect("switch to the restricted role");
+
+    sqlx::query("UPDATE person SET full_name = 'Corrected Name' WHERE id = 'person-1'")
+        .execute(&mut *conn)
+        .await
+        .expect("the restricted role can correct full_name");
+
+    let err = sqlx::query("UPDATE person SET created_by = 'someone-else' WHERE id = 'person-1'")
+        .execute(&mut *conn)
+        .await
+        .expect_err("the restricted role cannot rewrite created_by");
+    assert!(
+        is_insufficient_privilege(&err),
+        "expected an insufficient_privilege refusal while updating created_by, got {err:?}"
+    );
+
+    let err = sqlx::query("UPDATE person SET employer_id = 'employer-1' WHERE id = 'person-1'")
+        .execute(&mut *conn)
+        .await
+        .expect_err("the restricted role cannot rewrite employer_id, even to its own value");
+    assert!(
+        is_insufficient_privilege(&err),
+        "expected an insufficient_privilege refusal while updating employer_id, got {err:?}"
     );
 }

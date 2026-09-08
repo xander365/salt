@@ -5,8 +5,10 @@
 //! design calls out, so the database's `action_type` CHECK and this type
 //! can never quietly drift apart.
 
+use chrono::{DateTime, Utc};
 use payroll::EmployerId;
 
+use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 
 /// One of the acts §10 names as worth an audit-trail entry. Only
@@ -29,12 +31,14 @@ pub enum ActionType {
     PayScheduleChanged,
     EmploymentVoided,
     EmployerParticularsCorrected,
+    PersonParticularsCorrected,
+    PersonFullNameCorrected,
 }
 
 impl ActionType {
     /// Every variant, so a test can walk the whole enum and compare it with
     /// the database's own `action_type` CHECK.
-    pub const ALL: [ActionType; 14] = [
+    pub const ALL: [ActionType; 16] = [
         Self::PayrollRunCreated,
         Self::EmploymentRemovedFromRun,
         Self::EmploymentAddedToCorrectionRun,
@@ -49,6 +53,8 @@ impl ActionType {
         Self::PayScheduleChanged,
         Self::EmploymentVoided,
         Self::EmployerParticularsCorrected,
+        Self::PersonParticularsCorrected,
+        Self::PersonFullNameCorrected,
     ];
 
     /// The exact string `action_log_entry.action_type`'s CHECK accepts.
@@ -68,6 +74,8 @@ impl ActionType {
             Self::PayScheduleChanged => "pay_schedule_changed",
             Self::EmploymentVoided => "employment_voided",
             Self::EmployerParticularsCorrected => "employer_particulars_corrected",
+            Self::PersonParticularsCorrected => "person_particulars_corrected",
+            Self::PersonFullNameCorrected => "person_full_name_corrected",
         }
     }
 }
@@ -105,6 +113,56 @@ pub(crate) async fn write_action_log_entry(
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// One `ActionLogEntry`, read back for display (issue #72: the Employment
+/// screen's own audit trail for a Person's name and particulars
+/// corrections). `action_type` stays the raw database string here rather
+/// than the typed enum: a read model shows what happened, and has no
+/// occasion to construct an `ActionType` to write with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionLogEntryRecord {
+    pub occurred_at: DateTime<Utc>,
+    pub actor: String,
+    pub action_type: String,
+    pub context: Option<serde_json::Value>,
+}
+
+/// Every `ActionLogEntry` recorded against `(target_type, target_id)`,
+/// newest first. Scoped to `employer_id` too, though `target_id` alone
+/// already picks out at most one row's worth of history in every caller
+/// today: the extra predicate is the same defence-in-depth ADR-0017 asks of
+/// every other read here, at no real cost.
+pub async fn list_action_log_entries_for_target(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    target_type: &str,
+    target_id: &str,
+) -> Result<Vec<ActionLogEntryRecord>, PayrollAppError> {
+    type Row = (DateTime<Utc>, String, String, Option<serde_json::Value>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT occurred_at, actor, action_type, context
+         FROM action_log_entry
+         WHERE employer_id = $1 AND target_type = $2 AND target_id = $3
+         ORDER BY occurred_at DESC, id DESC",
+    )
+    .bind(employer_id.as_str())
+    .bind(target_type)
+    .bind(target_id)
+    .fetch_all(db.pool())
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(occurred_at, actor, action_type, context)| ActionLogEntryRecord {
+                occurred_at,
+                actor,
+                action_type,
+                context,
+            },
+        )
+        .collect())
 }
 
 #[cfg(test)]
@@ -156,6 +214,14 @@ mod tests {
             (
                 ActionType::EmployerParticularsCorrected,
                 "employer_particulars_corrected",
+            ),
+            (
+                ActionType::PersonParticularsCorrected,
+                "person_particulars_corrected",
+            ),
+            (
+                ActionType::PersonFullNameCorrected,
+                "person_full_name_corrected",
             ),
         ];
 

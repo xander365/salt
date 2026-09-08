@@ -59,6 +59,49 @@ export interface SetEmployerParticularsRequest {
   reason?: string;
 }
 
+// `crates/salt-server/src/person_particulars.rs` (issue #72, parent #70
+// D-7): a Person's identity number and address, plus every ActionLog entry a
+// correction of either that or `fullName` has ever produced. Not
+// Owner-only — any active member reads and writes this.
+
+export interface ActionLogEntryDto {
+  occurredAt: string;
+  actor: string;
+  actionType: string;
+  context: Record<string, unknown> | null;
+}
+
+export interface PersonParticularsResponse {
+  fullName: string;
+  identityNumber: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  postalCode: string | null;
+  particularsCreatedAt: string | null;
+  particularsCreatedBy: string | null;
+  actionLog: ActionLogEntryDto[];
+}
+
+/** `PUT .../particulars`. */
+export interface SetPersonParticularsRequest {
+  identityNumber: string;
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  postalCode?: string;
+  acknowledgedDivergingPeriods?: PayPeriodDto[];
+  reason?: string;
+}
+
+/** `PUT .../name`. Unlike `SetPersonParticularsRequest`, `reason` is never
+ * optional here — the server refuses a blank one unconditionally. */
+export interface CorrectPersonFullNameRequest {
+  fullName: string;
+  acknowledgedDivergingPeriods?: PayPeriodDto[];
+  reason: string;
+}
+
 // `crates/salt-server/src/employments.rs` (issue #62, §0.38): the interface
 // only ever sends `fullName`, never `personId` — there is no Person screen to
 // have picked one from.
