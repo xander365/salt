@@ -20,8 +20,11 @@ ALTER TABLE finalized_payroll
     ADD COLUMN person_particulars_json   JSONB,
     ADD COLUMN payslip_template_version  TEXT;
 
--- No grant to restate: these are new columns on an existing table, not a
--- new table, and `finalized_payroll` already carries the table-level
--- REVOKE UPDATE, DELETE migration 0015 put on it — a column added to an
--- already-restricted table inherits the same restriction with nothing
--- further to grant or revoke.
+-- Restate the restricted role's permission matrix, as every migration since
+-- 0017 does. The table-level revoke continues to cover columns added above;
+-- repeating it here makes that invariant survive a future change to the
+-- broad grant without relying on migration 0015 remaining the last word.
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO payroll_app;
+REVOKE UPDATE, DELETE ON finalized_payroll, reversal, action_log_entry, person FROM payroll_app;
+REVOKE DELETE ON operator, employer_membership FROM payroll_app;
+GRANT UPDATE (full_name) ON person TO payroll_app;
