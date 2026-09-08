@@ -208,6 +208,32 @@ fn list_employments_request(employer_id: &str, cookie: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn get_employer_particulars_request(employer_id: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/api/employers/{employer_id}/particulars"))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn set_employer_particulars_request(
+    employer_id: &str,
+    cookie: &str,
+    salt_header: bool,
+    body: Value,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/employers/{employer_id}/particulars"))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
 fn employment_detail_request(
     employer_id: &str,
     employment_id: &str,
@@ -1085,6 +1111,13 @@ async fn every_payroll_route_answers_401_without_a_session() {
 
     for request in [
         get_employers_request(None),
+        get_employer_particulars_request(e, no_cookie),
+        set_employer_particulars_request(
+            e,
+            no_cookie,
+            true,
+            json!({ "registeredName": "Nobody", "addressLine1": "Nowhere", "city": "Nowhere" }),
+        ),
         create_employment_request(e, no_cookie, true, "Nobody", "2026-01-01"),
         list_employments_request(e, no_cookie),
         employment_detail_request(e, em, no_cookie),
@@ -1139,6 +1172,12 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
     let r = "placeholder-run";
 
     for request in [
+        set_employer_particulars_request(
+            &employer_id,
+            &cookie,
+            false,
+            json!({ "registeredName": "Acme Corp", "addressLine1": "1 Main St", "city": "Windhoek" }),
+        ),
         create_employment_request(&employer_id, &cookie, false, "Nobody", "2026-01-01"),
         record_compensation_terms_request(
             &employer_id,
@@ -1321,6 +1360,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
+            "/api/employers/{employer_id}/particulars",
             "/api/employers/{employer_id}/payroll-runs",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
@@ -1341,7 +1381,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 17, "{paths:?}");
+    assert_eq!(paths.len(), 18, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

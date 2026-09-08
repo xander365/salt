@@ -266,6 +266,7 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
     // because a reversal deletes the row (§6.2).
     let mutable = [
         "employer",
+        "employer_particulars",
         "employment",
         "compensation_terms",
         "opening_balance",

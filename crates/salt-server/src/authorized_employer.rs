@@ -57,7 +57,6 @@ impl AuthorizedEmployerContext {
         &self.employer_id
     }
 
-    #[allow(dead_code, reason = "unused until the first Owner-only route lands")]
     pub(crate) fn role(&self) -> MembershipRole {
         self.role
     }
@@ -76,11 +75,10 @@ impl AuthorizedEmployerContext {
     /// the time a handler can call this, [`payroll_app::resolve_employer_access`]
     /// has already proven the caller *is* a member, so refusing here leaks
     /// nothing ADR-0017 protects.
-    #[allow(dead_code, reason = "unused until the first Owner-only route lands")]
     pub(crate) fn require_role(&self, required: MembershipRole) -> Result<(), ApiError> {
         let sufficient = match required {
             MembershipRole::PayrollOperator => true,
-            MembershipRole::Owner => self.role == MembershipRole::Owner,
+            MembershipRole::Owner => self.role() == MembershipRole::Owner,
         };
         if sufficient {
             Ok(())

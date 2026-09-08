@@ -28,6 +28,37 @@ export interface SessionResponse {
   memberships: MembershipDto[];
 }
 
+// `crates/salt-server/src/employer_particulars.rs` (issue #71, parent #70
+// D-7): the Employer's registered name, address and statutory registration
+// numbers. `null` means this Employer has never recorded any.
+
+export interface EmployerParticularsResponse {
+  registeredName: string;
+  addressLine1: string;
+  addressLine2: string | null;
+  city: string;
+  postalCode: string | null;
+  incomeTaxNumber: string | null;
+  socialSecurityNumber: string | null;
+  createdAt: string;
+  createdBy: string;
+}
+
+/** `PUT .../particulars`. `acknowledgedDivergingPeriods` and `reason` default
+ * to empty on the server, so a write that diverges from nothing can omit
+ * both — see `DivergingPeriodsResponse` below for what a write returns. */
+export interface SetEmployerParticularsRequest {
+  registeredName: string;
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  postalCode?: string;
+  incomeTaxNumber?: string;
+  socialSecurityNumber?: string;
+  acknowledgedDivergingPeriods?: PayPeriodDto[];
+  reason?: string;
+}
+
 // `crates/salt-server/src/employments.rs` (issue #62, §0.38): the interface
 // only ever sends `fullName`, never `personId` — there is no Person screen to
 // have picked one from.

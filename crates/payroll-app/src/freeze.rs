@@ -136,6 +136,42 @@ pub(crate) async fn live_finalized_periods_in_span(
         .collect())
 }
 
+/// Every Live `FinalizedPayroll` `PayPeriod` for any Employment of
+/// `employer_id`, read back in `period_end` order — the Employer-scoped
+/// sibling of [`live_finalized_periods_in_span`] for a fact that carries no
+/// `effective_from` of its own to derive a span from (`EmployerParticulars`,
+/// §6.5 generalized by issue #71).
+///
+/// Unlike the Employment-scoped span above, this asks for no `from`/`until`:
+/// `EmployerParticulars` is not effective-dated, so a write to it disagrees
+/// with *every* Live finalized period this Employer has, not a slice of
+/// them — the same "changed company info after payslips already went out"
+/// warning §6.5 raises for a dated fact, generalized to one that has no date
+/// to be dated by.
+pub(crate) async fn live_finalized_periods_for_employer(
+    conn: &mut sqlx::PgConnection,
+    employer_id: &EmployerId,
+) -> Result<Vec<PayPeriod>, sqlx::Error> {
+    let rows: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
+        "SELECT finalized.period_start, finalized.period_end
+         FROM live_finalized_payroll AS live
+         JOIN finalized_payroll AS finalized ON finalized.id = live.finalized_payroll_id
+         WHERE finalized.employer_id = $1
+         ORDER BY live.period_end",
+    )
+    .bind(employer_id.as_str())
+    .fetch_all(conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(start, end)| {
+            PayPeriod::new(start, end)
+                .expect("finalized_payroll CHECK: period_end is never before period_start")
+        })
+        .collect())
+}
+
 /// Refuses unless `acknowledged` names exactly the periods in
 /// `diverging_periods` — §6.5 guard 2's "requires the user to acknowledge",
 /// enforced rather than assumed.
@@ -168,6 +204,27 @@ pub(crate) fn require_acknowledgement_of(
         employment_id: employment_id.clone(),
         diverging_periods: diverging_periods.to_vec(),
     })
+}
+
+/// [`require_acknowledgement_of`]'s Employer-scoped sibling, for
+/// [`live_finalized_periods_for_employer`]'s list.
+pub(crate) fn require_acknowledgement_of_employer(
+    employer_id: &EmployerId,
+    diverging_periods: &[PayPeriod],
+    acknowledged: &[PayPeriod],
+) -> Result<(), PayrollAppError> {
+    let acknowledged: BTreeSet<&PayPeriod> = acknowledged.iter().collect();
+    let diverging: BTreeSet<&PayPeriod> = diverging_periods.iter().collect();
+    if acknowledged == diverging {
+        return Ok(());
+    }
+
+    Err(
+        PayrollAppError::EmployerMasterDataDivergenceNotAcknowledged {
+            employer_id: employer_id.clone(),
+            diverging_periods: diverging_periods.to_vec(),
+        },
+    )
 }
 
 /// The ActionLog representation of a correction's named divergence. Both

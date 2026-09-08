@@ -12,12 +12,12 @@ use payroll::{
     TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    EmploymentPerson, FinalizedPayrollId, PayrollAppError, SaltDatabase,
+    EmployerParticularsFields, EmploymentPerson, FinalizedPayrollId, PayrollAppError, SaltDatabase,
     add_employment_to_correction_run, build_year_to_date_context, calculate_payroll_run,
     correct_compensation_terms, create_correction_run, create_employer, create_employment,
     create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
-    finalize_payroll_run, get_unsupported_deduction_status, record_compensation_terms,
-    reverse_finalized_payroll,
+    finalize_payroll_run, get_employer_particulars, get_unsupported_deduction_status,
+    record_compensation_terms, reverse_finalized_payroll, set_employer_particulars,
 };
 use sqlx::{PgPool, Row};
 
@@ -1458,4 +1458,218 @@ async fn an_insert_acknowledging_a_reversed_period_is_refused(pool: PgPool) {
     );
     assert_eq!(compensation_terms_row_count(&pool, &employment_id).await, 1);
     assert_eq!(correction_entry_count(&pool, &employment_id).await, 0);
+}
+
+// ---- `set_employer_particulars` (issue #71): the same §6.5 divergence
+// treatment, generalized to a fact with no `effective_from` of its own — a
+// write diverges from every Live finalized period this Employer has, not a
+// dated slice of them.
+
+fn particulars(registered_name: &str) -> EmployerParticularsFields {
+    EmployerParticularsFields {
+        registered_name: registered_name.to_string(),
+        address_line1: "1 Independence Ave".to_string(),
+        address_line2: None,
+        city: "Windhoek".to_string(),
+        postal_code: None,
+        income_tax_number: None,
+        social_security_number: None,
+    }
+}
+
+#[sqlx::test]
+async fn an_unacknowledged_first_record_over_live_finalized_payroll_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+    finalize_period(&db, &employer_id, march()).await;
+    finalize_period(&db, &employer_id, april()).await;
+
+    let result = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[],
+        "",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::EmployerMasterDataDivergenceNotAcknowledged {
+                employer_id: employer_id.clone(),
+                diverging_periods: vec![march(), april()],
+            }
+        )
+    );
+    assert_eq!(
+        get_employer_particulars(&db, &employer_id).await.unwrap(),
+        None,
+        "a refused write records nothing"
+    );
+}
+
+#[sqlx::test]
+async fn an_acknowledged_first_record_over_live_finalized_payroll_still_demands_a_reason(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+    finalize_period(&db, &employer_id, march()).await;
+
+    let result = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[march()],
+        "   ",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmployerParticularsCorrectionReasonCannotBeEmpty)
+    );
+    assert_eq!(
+        get_employer_particulars(&db, &employer_id).await.unwrap(),
+        None
+    );
+}
+
+#[sqlx::test]
+async fn an_acknowledged_reasoned_first_record_over_live_finalized_payroll_is_written(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+    finalize_period(&db, &employer_id, march()).await;
+
+    let diverging = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[march()],
+        "particulars recorded after the first payroll already ran",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(diverging, vec![march()]);
+    assert_eq!(
+        get_employer_particulars(&db, &employer_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .registered_name,
+        "Acme Corp"
+    );
+}
+
+#[sqlx::test]
+async fn correcting_employer_particulars_demands_a_reason_even_with_nothing_to_diverge_from(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let result = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Holdings"),
+        &[],
+        "",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EmployerParticularsCorrectionReasonCannotBeEmpty)
+    );
+    assert_eq!(
+        get_employer_particulars(&db, &employer_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .registered_name,
+        "Acme Corp",
+        "a refused correction leaves the row untouched"
+    );
+}
+
+#[sqlx::test]
+async fn a_reasoned_correction_over_live_finalized_payroll_names_it_and_writes_the_new_values(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    finalize_period(&db, &employer_id, march()).await;
+
+    let result = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Holdings"),
+        &[],
+        "registered new legal name",
+        "actor",
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::EmployerMasterDataDivergenceNotAcknowledged {
+                employer_id: employer_id.clone(),
+                diverging_periods: vec![march()],
+            }
+        ),
+        "a reason alone does not stand in for the acknowledgement"
+    );
+
+    let diverging = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Holdings"),
+        &[march()],
+        "registered new legal name",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(diverging, vec![march()]);
+    assert_eq!(
+        get_employer_particulars(&db, &employer_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .registered_name,
+        "Acme Holdings"
+    );
 }

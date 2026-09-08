@@ -556,6 +556,45 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
                 "effectiveFrom": effective_from.to_string(),
             })),
         ),
+        PayrollAppError::EmployerParticularsRegisteredNameCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "employer_particulars_registered_name_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::EmployerParticularsAddressLine1CannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "employer_particulars_address_line1_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::EmployerParticularsCityCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "employer_particulars_city_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::EmployerParticularsCorrectionReasonCannotBeEmpty => {
+            Classification::Mapped(
+                StatusCode::BAD_REQUEST,
+                "employer_particulars_correction_reason_cannot_be_empty",
+                None,
+            )
+        }
+        PayrollAppError::EmployerMasterDataDivergenceNotAcknowledged {
+            employer_id,
+            diverging_periods,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "employer_master_data_divergence_not_acknowledged",
+            Some(json!({
+                "employerId": employer_id.to_string(),
+                "divergingPeriods": diverging_periods
+                    .iter()
+                    .map(|period| json!({
+                        "start": period.start().to_string(),
+                        "end": period.end().to_string(),
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+        ),
         PayrollAppError::OperatorEmailCannotBeEmpty => Classification::Mapped(
             StatusCode::BAD_REQUEST,
             "operator_email_cannot_be_empty",

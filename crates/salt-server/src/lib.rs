@@ -25,6 +25,7 @@
 mod authorized_employer;
 mod bootstrap_cli;
 mod config;
+mod employer_particulars;
 mod employers;
 mod employment_facts;
 mod employments;

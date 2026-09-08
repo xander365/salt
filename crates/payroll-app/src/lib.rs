@@ -15,6 +15,7 @@ mod correction;
 mod database;
 mod employer;
 mod employer_access;
+mod employer_particulars;
 mod employment;
 mod error;
 mod finalize;
@@ -42,6 +43,10 @@ pub use employer::{
     EmployerSummary, change_pay_schedule, create_employer, list_employers_for_operator,
 };
 pub use employer_access::{AuthorizedEmployerId, EmployerAccess, resolve_employer_access};
+pub use employer_particulars::{
+    EmployerParticulars, EmployerParticularsFields, get_employer_particulars,
+    set_employer_particulars,
+};
 pub use employment::{
     EmploymentDetail, EmploymentListing, EmploymentPerson, create_employment,
     get_employment_detail, get_employment_snapshot, list_employments_for_employer,

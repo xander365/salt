@@ -453,6 +453,39 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         effective_from: NaiveDate,
     },
+    /// `SetEmployerParticulars` was given a `registeredName` that is empty
+    /// or only whitespace. The same demand [`Self::EmployerNameCannotBeEmpty`]
+    /// makes of its own text.
+    EmployerParticularsRegisteredNameCannotBeEmpty,
+    /// `SetEmployerParticulars` was given an `addressLine1` that is empty or
+    /// only whitespace.
+    EmployerParticularsAddressLine1CannotBeEmpty,
+    /// `SetEmployerParticulars` was given a `city` that is empty or only
+    /// whitespace.
+    EmployerParticularsCityCannotBeEmpty,
+    /// A `SetEmployerParticulars` write that either corrects an existing row
+    /// or diverges from live finalized payroll was given a reason that is
+    /// empty or only whitespace — the same demand
+    /// [`Self::CompensationTermsCorrectionReasonCannotBeEmpty`] makes of its
+    /// own two callers (§6.5 guard 1). Correcting an existing row demands it
+    /// unconditionally, the same as [`correct_compensation_terms`]; recording
+    /// one for the first time demands it only once its divergence list comes
+    /// back non-empty, the same as [`record_compensation_terms`] — an insert
+    /// that diverges from nothing owes no explanation.
+    ///
+    /// [`correct_compensation_terms`]: crate::correct_compensation_terms
+    /// [`record_compensation_terms`]: crate::record_compensation_terms
+    EmployerParticularsCorrectionReasonCannotBeEmpty,
+    /// A master-data write to `EmployerParticulars` was asked for without
+    /// acknowledging exactly the Live finalized `PayPeriod`s it now diverges
+    /// from — the Employer-scoped sibling of
+    /// [`Self::MasterDataDivergenceNotAcknowledged`], for a fact that
+    /// diverges from every Live finalized period this Employer has rather
+    /// than a dated span of them (§6.5, issue #71).
+    EmployerMasterDataDivergenceNotAcknowledged {
+        employer_id: EmployerId,
+        diverging_periods: Vec<PayPeriod>,
+    },
     /// `CreateOperator` was given an email that is empty or only whitespace.
     OperatorEmailCannotBeEmpty,
     /// `CreateOperator` was given a display name that is empty or only
@@ -912,6 +945,44 @@ impl std::fmt::Display for PayrollAppError {
                 "Employment {employment_id} already has a CompensationTerms row effective \
                  {effective_from}"
             ),
+            Self::EmployerParticularsRegisteredNameCannotBeEmpty => {
+                write!(
+                    f,
+                    "an EmployerParticulars registered name must not be empty"
+                )
+            }
+            Self::EmployerParticularsAddressLine1CannotBeEmpty => {
+                write!(f, "an EmployerParticulars address line 1 must not be empty")
+            }
+            Self::EmployerParticularsCityCannotBeEmpty => {
+                write!(f, "an EmployerParticulars city must not be empty")
+            }
+            Self::EmployerParticularsCorrectionReasonCannotBeEmpty => {
+                write!(
+                    f,
+                    "an EmployerParticulars correction reason must not be empty"
+                )
+            }
+            Self::EmployerMasterDataDivergenceNotAcknowledged {
+                employer_id,
+                diverging_periods,
+            } => {
+                write!(
+                    f,
+                    "correcting EmployerParticulars for Employer {employer_id} needs the \
+                     acknowledgement of every Live finalized PayPeriod it now diverges from: "
+                )?;
+                if diverging_periods.is_empty() {
+                    return write!(f, "none");
+                }
+                for (index, period) in diverging_periods.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} to {}", period.start(), period.end())?;
+                }
+                Ok(())
+            }
             Self::OperatorEmailCannotBeEmpty => {
                 write!(f, "an Operator email must not be empty")
             }
@@ -1046,6 +1117,11 @@ impl std::error::Error for PayrollAppError {
             | Self::UnsupportedDeductionDeclarationReasonCannotBeEmpty
             | Self::MasterDataDivergenceNotAcknowledged { .. }
             | Self::CompensationTermsAlreadyExistAt { .. }
+            | Self::EmployerParticularsRegisteredNameCannotBeEmpty
+            | Self::EmployerParticularsAddressLine1CannotBeEmpty
+            | Self::EmployerParticularsCityCannotBeEmpty
+            | Self::EmployerParticularsCorrectionReasonCannotBeEmpty
+            | Self::EmployerMasterDataDivergenceNotAcknowledged { .. }
             | Self::OperatorEmailCannotBeEmpty
             | Self::OperatorDisplayNameCannotBeEmpty
             | Self::OperatorPasswordTooShort { .. }

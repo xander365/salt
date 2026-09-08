@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use serde_json::json;
 use tower_http::catch_panic::CatchPanicLayer;
 
+use crate::employer_particulars;
 use crate::employers;
 use crate::employment_facts;
 use crate::employments;
@@ -59,6 +60,11 @@ fn production_routes() -> Router<AppState> {
                 .delete(session::logout),
         )
         .route("/api/employers", get(employers::list_employers))
+        .route(
+            "/api/employers/{employer_id}/particulars",
+            get(employer_particulars::get_employer_particulars)
+                .put(employer_particulars::set_employer_particulars),
+        )
         .route(
             "/api/employers/{employer_id}/employments",
             get(employments::list_employments).post(employments::create_employment),

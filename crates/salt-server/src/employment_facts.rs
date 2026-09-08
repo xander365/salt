@@ -76,7 +76,7 @@ impl From<PayPeriod> for PayPeriodDto {
     }
 }
 
-fn parse_pay_periods(periods: Vec<PayPeriodDto>) -> Result<Vec<PayPeriod>, ApiError> {
+pub(crate) fn parse_pay_periods(periods: Vec<PayPeriodDto>) -> Result<Vec<PayPeriod>, ApiError> {
     periods
         .into_iter()
         .map(PayPeriod::try_from)
@@ -88,6 +88,20 @@ fn parse_pay_periods(periods: Vec<PayPeriodDto>) -> Result<Vec<PayPeriod>, ApiEr
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DivergingPeriodsResponse {
     diverging_periods: Vec<PayPeriodDto>,
+}
+
+impl DivergingPeriodsResponse {
+    /// Built from `payroll::PayPeriod`, so a caller outside this module —
+    /// `crate::employer_particulars`'s own write route — never has to
+    /// construct [`PayPeriodDto`] by hand.
+    pub(crate) fn from_periods(diverging_periods: Vec<PayPeriod>) -> Self {
+        Self {
+            diverging_periods: diverging_periods
+                .into_iter()
+                .map(PayPeriodDto::from)
+                .collect(),
+        }
+    }
 }
 
 /// The body of a route that records a fact and has nothing to report back:
