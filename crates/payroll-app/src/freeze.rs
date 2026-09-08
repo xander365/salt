@@ -153,11 +153,11 @@ pub(crate) async fn live_finalized_periods_for_employer(
     employer_id: &EmployerId,
 ) -> Result<Vec<PayPeriod>, sqlx::Error> {
     let rows: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
-        "SELECT finalized.period_start, finalized.period_end
+        "SELECT DISTINCT finalized.period_start, finalized.period_end
          FROM live_finalized_payroll AS live
          JOIN finalized_payroll AS finalized ON finalized.id = live.finalized_payroll_id
          WHERE finalized.employer_id = $1
-         ORDER BY live.period_end",
+         ORDER BY finalized.period_end",
     )
     .bind(employer_id.as_str())
     .fetch_all(conn)
@@ -194,9 +194,7 @@ pub(crate) fn require_acknowledgement_of(
     diverging_periods: &[PayPeriod],
     acknowledged: &[PayPeriod],
 ) -> Result<(), PayrollAppError> {
-    let acknowledged: BTreeSet<&PayPeriod> = acknowledged.iter().collect();
-    let diverging: BTreeSet<&PayPeriod> = diverging_periods.iter().collect();
-    if acknowledged == diverging {
+    if acknowledgement_is_exact(diverging_periods, acknowledged) {
         return Ok(());
     }
 
@@ -213,9 +211,7 @@ pub(crate) fn require_acknowledgement_of_employer(
     diverging_periods: &[PayPeriod],
     acknowledged: &[PayPeriod],
 ) -> Result<(), PayrollAppError> {
-    let acknowledged: BTreeSet<&PayPeriod> = acknowledged.iter().collect();
-    let diverging: BTreeSet<&PayPeriod> = diverging_periods.iter().collect();
-    if acknowledged == diverging {
+    if acknowledgement_is_exact(diverging_periods, acknowledged) {
         return Ok(());
     }
 
@@ -225,6 +221,12 @@ pub(crate) fn require_acknowledgement_of_employer(
             diverging_periods: diverging_periods.to_vec(),
         },
     )
+}
+
+fn acknowledgement_is_exact(diverging_periods: &[PayPeriod], acknowledged: &[PayPeriod]) -> bool {
+    let acknowledged: BTreeSet<&PayPeriod> = acknowledged.iter().collect();
+    let diverging: BTreeSet<&PayPeriod> = diverging_periods.iter().collect();
+    acknowledged == diverging
 }
 
 /// The ActionLog representation of a correction's named divergence. Both

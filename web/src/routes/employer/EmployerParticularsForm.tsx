@@ -332,7 +332,9 @@ export function EmployerParticularsForm({
               value={reason}
               onChange={(event) => {
                 setReason(event.target.value);
-                edited();
+                setFieldError(null);
+                setError(null);
+                setSaved(false);
               }}
             />
           </div>
@@ -343,7 +345,7 @@ export function EmployerParticularsForm({
         )}
 
         {pendingAcknowledgement !== null && (
-          <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+          <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-sm">
             <p className="font-medium">This disagrees with payroll already finalized</p>
             {pendingAcknowledgement.length === 0 ? (
               <p className="mt-1 text-muted-foreground">

@@ -1478,6 +1478,35 @@ fn particulars(registered_name: &str) -> EmployerParticularsFields {
 }
 
 #[sqlx::test]
+async fn an_employer_divergence_names_each_pay_period_once(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+    an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(600000).unwrap()).await;
+    finalize_period(&db, &employer_id, march()).await;
+
+    let result = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[],
+        "",
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            PayrollAppError::EmployerMasterDataDivergenceNotAcknowledged {
+                employer_id,
+                diverging_periods: vec![march()],
+            }
+        )
+    );
+}
+
+#[sqlx::test]
 async fn an_unacknowledged_first_record_over_live_finalized_payroll_is_refused(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
