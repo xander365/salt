@@ -119,6 +119,43 @@ fn normalize_optional_fields(fields: EmployerParticularsFields) -> EmployerParti
     }
 }
 
+/// The frozen snapshot [`crate::finalize::finalize_payroll_run`] writes onto
+/// every member's `FinalizedPayroll` for `employer_id` (issue #73,
+/// CONTEXT.md's own glossary entry) — `None` when this Employer has never
+/// recorded particulars, because there is nothing true to freeze (ADR-0004):
+/// a `FinalizedPayroll` freezes the values an Employer actually had on
+/// record, never a value derived from what it has today. Reuses
+/// [`fields_json`], the exact shape [`set_employer_particulars`]'s own
+/// ActionLog "after" already builds, so the frozen snapshot and a live
+/// correction's own record of itself can never describe the same row two
+/// different ways.
+///
+/// Takes a plain connection and locks nothing itself:
+/// `finalize_payroll_run` calls this only after its own `FOR SHARE` on the
+/// `employer` row (via `pay_schedule_for_employer`, `freeze.rs`'s module
+/// doc), and that is what serializes this read against a concurrent
+/// `set_employer_particulars`, which takes `FOR UPDATE` on that same row
+/// before it ever writes this table.
+pub(crate) async fn employer_particulars_snapshot(
+    conn: &mut sqlx::PgConnection,
+    employer_id: &EmployerId,
+) -> Result<Option<serde_json::Value>, PayrollAppError> {
+    let existing: Option<StoredFields> = sqlx::query_as(
+        "SELECT registered_name, address_line1, address_line2, city, postal_code,
+                income_tax_number, social_security_number
+         FROM employer_particulars
+         WHERE employer_id = $1",
+    )
+    .bind(employer_id.as_str())
+    .fetch_optional(conn)
+    .await?;
+
+    Ok(existing
+        .map(EmployerParticularsFields::from)
+        .as_ref()
+        .map(fields_json))
+}
+
 /// `GET`'s own read: `None` when this Employer has never recorded
 /// particulars.
 pub async fn get_employer_particulars(

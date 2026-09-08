@@ -247,8 +247,9 @@ async fn finalizing_a_calculated_run_freezes_the_complete_snapshot_and_marks_the
     assert_eq!(row.salt_version, SALT_VERSION);
     assert_eq!(row.snapshot_schema_version, SNAPSHOT_SCHEMA_VERSION);
     assert_eq!(
-        SNAPSHOT_SCHEMA_VERSION, 1,
-        "§9: the snapshot ships at version 1"
+        SNAPSHOT_SCHEMA_VERSION, 2,
+        "§9: issue #73 bumped the snapshot to version 2, the shape this \
+         entire milestone writes"
     );
     assert_eq!(row.finalized_by, "finalizer");
     assert_eq!(row.replaces_finalized_payroll_id, None);

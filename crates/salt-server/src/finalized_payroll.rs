@@ -36,6 +36,65 @@ use crate::error::ApiError;
 use crate::payroll_runs::{FiguresDto, figures_to_dto};
 use crate::state::AppState;
 
+/// The frozen `EmployerParticulars` on one `FinalizedPayroll` (issue #73):
+/// `null` on the wire means either the Employer had never recorded
+/// particulars at finalize time, or this row predates issue #73 and never
+/// froze one at all — the two are indistinguishable on purpose (see
+/// `payroll_app::FinalizedEmployerParticulars`'s own docs).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FrozenEmployerParticularsDto {
+    registered_name: String,
+    address_line1: String,
+    address_line2: Option<String>,
+    city: String,
+    postal_code: Option<String>,
+    income_tax_number: Option<String>,
+    social_security_number: Option<String>,
+}
+
+impl From<payroll_app::FinalizedEmployerParticulars> for FrozenEmployerParticularsDto {
+    fn from(particulars: payroll_app::FinalizedEmployerParticulars) -> Self {
+        Self {
+            registered_name: particulars.registered_name,
+            address_line1: particulars.address_line1,
+            address_line2: particulars.address_line2,
+            city: particulars.city,
+            postal_code: particulars.postal_code,
+            income_tax_number: particulars.income_tax_number,
+            social_security_number: particulars.social_security_number,
+        }
+    }
+}
+
+/// The frozen `PersonParticulars` on one `FinalizedPayroll` (issue #73):
+/// `fullName` is never absent when this is present at all — see
+/// `payroll_app::FinalizedPersonParticulars`'s own docs for what `null` on
+/// the whole object means.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FrozenPersonParticularsDto {
+    full_name: String,
+    identity_number: Option<String>,
+    address_line1: Option<String>,
+    address_line2: Option<String>,
+    city: Option<String>,
+    postal_code: Option<String>,
+}
+
+impl From<payroll_app::FinalizedPersonParticulars> for FrozenPersonParticularsDto {
+    fn from(particulars: payroll_app::FinalizedPersonParticulars) -> Self {
+        Self {
+            full_name: particulars.full_name,
+            identity_number: particulars.identity_number,
+            address_line1: particulars.address_line1,
+            address_line2: particulars.address_line2,
+            city: particulars.city,
+            postal_code: particulars.postal_code,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FinalizedPayrollDetailResponse {
@@ -46,6 +105,9 @@ pub(crate) struct FinalizedPayrollDetailResponse {
     pay_date: NaiveDate,
     figures: FiguresDto,
     salt_version: String,
+    employer_particulars: Option<FrozenEmployerParticularsDto>,
+    person_particulars: Option<FrozenPersonParticularsDto>,
+    payslip_template_version: Option<String>,
 }
 
 /// `GET /api/employers/{e}/finalized-payroll/{f}`: the nine figures, the
@@ -73,6 +135,9 @@ pub(crate) async fn get_finalized_payroll(
         pay_date: detail.pay_date,
         figures: figures_to_dto(detail.figures),
         salt_version: detail.salt_version,
+        employer_particulars: detail.employer_particulars.map(Into::into),
+        person_particulars: detail.person_particulars.map(Into::into),
+        payslip_template_version: detail.payslip_template_version,
     }))
 }
 

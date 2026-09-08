@@ -298,10 +298,14 @@ fn overlaps(period: PayPeriod, start_date: NaiveDate, end_date: Option<NaiveDate
 ///
 /// [`crate::sequencing`] decides §7.1 branch 1 — "P does not overlap the
 /// Employment" — from this, with the same [`overlaps`] predicate membership
-/// itself is decided by.
+/// itself is decided by. `person_id` rides along for the same reason (issue
+/// #73): freezing this member's `PersonParticulars` needs it, and the row is
+/// already locked here — a second read under a second lock would only
+/// duplicate what this one already holds.
 #[derive(sqlx::FromRow)]
 pub(crate) struct EmploymentSpan {
     pub(crate) id: String,
+    pub(crate) person_id: String,
     start_date: NaiveDate,
     end_date: Option<NaiveDate>,
 }

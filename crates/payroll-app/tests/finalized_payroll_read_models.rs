@@ -268,7 +268,10 @@ async fn a_snapshot_layout_this_build_does_not_know_is_refused_on_both_routes(po
     let (_run_id, _employment_id, finalized_payroll_id) =
         a_finalized_payroll(&db, &employer_id, "Ada Lovelace").await;
 
-    sqlx::query("UPDATE finalized_payroll SET snapshot_schema_version = 2 WHERE id = $1::uuid")
+    // 99: a version well past anything issue #73's own bump to 2 could ever
+    // collide with, so this stays the one genuinely unknown layout whatever
+    // this build's own `SNAPSHOT_SCHEMA_VERSION` is.
+    sqlx::query("UPDATE finalized_payroll SET snapshot_schema_version = 99 WHERE id = $1::uuid")
         .bind(&finalized_payroll_id)
         .execute(&pool)
         .await
@@ -285,7 +288,7 @@ async fn a_snapshot_layout_this_build_does_not_know_is_refused_on_both_routes(po
         assert!(matches!(
             result,
             Some(PayrollAppError::FinalizedPayrollSnapshotUnreadable {
-                schema_version: 2,
+                schema_version: 99,
                 ..
             })
         ));

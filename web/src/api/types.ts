@@ -312,6 +312,31 @@ export interface FinalizePayrollRunResponse {
 // immutable finalized payroll — the same nine figures a working run's own
 // detail carries, plus the period, the pay date and the SaltVersion that
 // produced them. Never the raw frozen snapshot (§0.29).
+//
+// `employerParticulars`, `personParticulars` and `payslipTemplateVersion`
+// are issue #73's own three frozen fields: `null` on any of them means
+// either nothing was on record to freeze at finalize time, or this payroll
+// finalized before issue #73 shipped at all — the two read back
+// indistinguishably, on purpose.
+
+export interface FrozenEmployerParticularsDto {
+  registeredName: string;
+  addressLine1: string;
+  addressLine2: string | null;
+  city: string;
+  postalCode: string | null;
+  incomeTaxNumber: string | null;
+  socialSecurityNumber: string | null;
+}
+
+export interface FrozenPersonParticularsDto {
+  fullName: string;
+  identityNumber: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  postalCode: string | null;
+}
 
 export interface FinalizedPayrollDetailResponse {
   finalizedPayrollId: string;
@@ -321,6 +346,9 @@ export interface FinalizedPayrollDetailResponse {
   payDate: string;
   figures: FiguresDto;
   saltVersion: string;
+  employerParticulars: FrozenEmployerParticularsDto | null;
+  personParticulars: FrozenPersonParticularsDto | null;
+  payslipTemplateVersion: string | null;
 }
 
 // `GET /api/employers/{e}/finalized-payroll/{f}/traces`

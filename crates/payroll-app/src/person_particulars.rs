@@ -128,6 +128,59 @@ async fn person_full_name(
     full_name.ok_or_else(|| PayrollAppError::PersonNotFound(person_id.clone()))
 }
 
+/// The frozen snapshot [`crate::finalize::finalize_payroll_run`] writes onto
+/// one member's `FinalizedPayroll` for `person_id` (issue #73, CONTEXT.md's
+/// own glossary entry: "the Person's full name, identity number and
+/// address"). Unlike
+/// [`crate::employer_particulars::employer_particulars_snapshot`], this
+/// never has nothing to freeze: `full_name` is set the moment
+/// `create_employment` creates the Person and is never absent, whatever
+/// `person_particulars` this Person has, or has not, recorded.
+///
+/// Takes a plain connection and locks nothing itself, for the same reason
+/// `employer_particulars_snapshot` does: `finalize_payroll_run` calls this
+/// only after locking every member's `employment` row, and that lock is
+/// exactly what [`set_person_particulars`] and [`correct_person_full_name`]
+/// take `FOR UPDATE` on (via `lock_this_persons_employments`) before either
+/// writes this Person's facts (`freeze.rs`'s module doc).
+pub(crate) async fn person_particulars_snapshot(
+    conn: &mut sqlx::PgConnection,
+    person_id: &PersonId,
+) -> Result<serde_json::Value, PayrollAppError> {
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT person.full_name, particulars.identity_number, particulars.address_line1,
+                particulars.address_line2, particulars.city, particulars.postal_code
+         FROM person
+         LEFT JOIN person_particulars AS particulars ON particulars.person_id = person.id
+         WHERE person.id = $1",
+    )
+    .bind(person_id.as_str())
+    .fetch_optional(conn)
+    .await?;
+
+    let (full_name, identity_number, address_line1, address_line2, city, postal_code) = row.expect(
+        "employment.person_id always names a Person, and person is never deleted \
+             (migration 0031)",
+    );
+
+    Ok(serde_json::json!({
+        "full_name": full_name,
+        "identity_number": identity_number,
+        "address_line1": address_line1,
+        "address_line2": address_line2,
+        "city": city,
+        "postal_code": postal_code,
+    }))
+}
+
 /// `GET`'s own read: the Person's `full_name`, plus `None` particulars
 /// fields when this Person has never recorded them.
 pub async fn get_person_particulars(

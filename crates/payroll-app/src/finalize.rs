@@ -60,28 +60,72 @@ use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
 use crate::correction::{validate_correction_target, verify_null_lineage_is_legitimate};
 use crate::database::{SaltDatabase, is_unique_violation};
 use crate::employer::pay_schedule_for_employer;
+use crate::employer_particulars::employer_particulars_snapshot;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
 use crate::payroll_run::{
     EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids,
     finalized_payrolls_for_run, lock_run,
 };
+use crate::person_particulars::person_particulars_snapshot;
 use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollInput, PayrollRules, TaxYear,
-    ruleset_for,
+    EmployerId, EmploymentId, PayPeriod, PayrollCalculation, PayrollInput, PayrollRules, PersonId,
+    TaxYear, ruleset_for,
 };
 
-/// The shape of the three JSONB snapshots this code freezes (§9, §9.1).
+/// The shape of one `FinalizedPayroll` row's frozen snapshot (§9, §9.1) —
+/// not only the three JSONB blobs any more, since issue #73: version 2 is
+/// the first row shape to also carry `employer_particulars_json`,
+/// `person_particulars_json` and `payslip_template_version`.
 ///
 /// It ships from day one and is stored on every row, because it is the field
 /// a future reader branches on to render old history without constructing
 /// current domain types — and there are no in-place JSON migrations, ever
 /// (the application has no `UPDATE` grant on the table). A shape change means
-/// this constant becomes 2 and new rows carry 2; rows written at 1 stay at 1
-/// and are still read by the version-1 reader.
-pub const SNAPSHOT_SCHEMA_VERSION: i32 = 1;
+/// this constant becomes the next integer and new rows carry it; rows
+/// written at an earlier version stay there and are still read by the
+/// reader written for them.
+///
+/// **What this integer is not for**, since issue #73's own Deep
+/// Instructions: deciding whether a *particular* field froze. Version 2 rows
+/// can themselves carry a null `employer_particulars_json` — an Employer
+/// that simply had never recorded any at finalize time — so "are the frozen
+/// particulars present" is answered by reading that column, never by
+/// comparing this one against 2. This integer answers a narrower question:
+/// which decoder reads the JSONB blobs (see `KNOWN_JSON_SNAPSHOT_VERSIONS`
+/// and `crate::correction::prepopulate_earnings`).
+pub const SNAPSHOT_SCHEMA_VERSION: i32 = 2;
+
+/// The `snapshot_schema_version` values whose `payroll_input_json` and
+/// `payroll_calculation_json` this build can deserialize (§9.1). Version 2
+/// (issue #73) added three new sibling *columns* — it never reshaped either
+/// JSONB blob — so 1 and 2 read through the exact same decoder, and both
+/// belong here. A version that actually reshapes one of the blobs earns
+/// itself a new decoder and a new entry; until then, this list is the one
+/// place [`crate::finalized_payroll_read::calculation_from_snapshot`] and
+/// `crate::correction::prepopulate_earnings` both check against, rather than
+/// each comparing a stored version to [`SNAPSHOT_SCHEMA_VERSION`] directly —
+/// a row is not unreadable merely for having finalized under an earlier
+/// version whose blobs still read the same today.
+pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2];
+
+/// The `PayslipTemplateVersion` [`finalize_payroll_run`] freezes onto every
+/// `FinalizedPayroll` (issue #73, CONTEXT.md's own glossary entry, Grill
+/// Brief D12): the identifier a later ticket's renderer will be selected by,
+/// chosen now because it must be frozen at the moment history is written,
+/// not invented after a renderer exists to justify it.
+///
+/// Scheme: `"<family>-v<n>"`. `family` names a template's overall shape —
+/// distinct families exist for print requirements that differ in kind (a
+/// different statutory layout, say), not merely in degree. `n` bumps
+/// whenever `family`'s own layout changes in a way that would render an
+/// already-issued payslip differently. Both halves are stable once written:
+/// a retired version's renderer is kept alive forever (Grill Brief
+/// ADR-0021), because any `n` ever frozen here may be asked to re-render at
+/// any time — `n` is exactly the key that future dispatch switches on.
+pub const PAYSLIP_TEMPLATE_VERSION: &str = "standard-v1";
 
 app_id! {
     /// `payroll-app`'s own id for a `FinalizedPayroll` row (§4.1): a native
@@ -155,6 +199,14 @@ pub async fn finalize_payroll_run(
 
     let schedule = pay_schedule_for_employer(&mut tx, &employer_id).await?;
 
+    // The frozen `EmployerParticulars` snapshot every member's
+    // `FinalizedPayroll` carries (issue #73): read once, here, because it
+    // does not vary by member, and the `FOR SHARE` `pay_schedule_for_employer`
+    // just took on the `employer` row above is what already makes this read
+    // hold against a concurrent `set_employer_particulars` (`freeze.rs`'s
+    // module doc) — no lock of this function's own.
+    let employer_particulars_json = employer_particulars_snapshot(&mut tx, &employer_id).await?;
+
     // Resolved once, outside the per-member loop, for the same reason
     // `calculate_payroll_run` resolves it once: it depends only on the
     // period, not on any one member.
@@ -183,6 +235,15 @@ pub async fn finalize_payroll_run(
     // order for every finalizer, so two overlapping runs queue rather than
     // deadlock.
     let members = lock_member_employments(&mut tx, &member_ids).await?;
+
+    // Every locked member's own `PersonId` (issue #73): read off the same
+    // locked rows above rather than a second query, and kept as a map so
+    // the write loop below can look one up per member without caring what
+    // order `ready` puts them in.
+    let person_id_by_employment: HashMap<String, PersonId> = members
+        .iter()
+        .map(|member| (member.id.clone(), PersonId::new(member.person_id.clone())))
+        .collect();
 
     // §4.8: `None` for every Ordinary member, always — only a Correction
     // run's own single membership row ever carries a declared target. Read
@@ -305,6 +366,17 @@ pub async fn finalize_payroll_run(
 
     let mut finalized_ids = Vec::with_capacity(ready.len());
     for (employment_id, input, calculation, replaces_finalized_payroll_id) in ready {
+        let person_id = person_id_by_employment.get(employment_id.as_str()).expect(
+            "every ready member's employment was locked above, which is where this map came from",
+        );
+        // The frozen `PersonParticulars` snapshot (issue #73): fetched per
+        // member, here, because it is Person-scoped rather than
+        // Employer-scoped — the `FOR SHARE` `lock_member_employments` took
+        // on this member's own `employment` row is what makes this read hold
+        // against a concurrent `set_person_particulars`/
+        // `correct_person_full_name` (`freeze.rs`'s module doc).
+        let person_particulars_json = person_particulars_snapshot(&mut tx, person_id).await?;
+
         let finalized_payroll_id = insert_finalized_payroll(
             &mut tx,
             payroll_run_id,
@@ -318,6 +390,9 @@ pub async fn finalize_payroll_run(
             replaces_finalized_payroll_id
                 .as_ref()
                 .map(FinalizedPayrollId::as_str),
+            employer_particulars_json.clone(),
+            person_particulars_json,
+            PAYSLIP_TEMPLATE_VERSION,
             finalized_by,
         )
         .await?;
@@ -488,7 +563,7 @@ async fn lock_member_employments(
     member_ids: &[String],
 ) -> Result<Vec<EmploymentSpan>, PayrollAppError> {
     let locked: Vec<EmploymentSpan> = sqlx::query_as(
-        "SELECT id, start_date, end_date FROM employment
+        "SELECT id, person_id, start_date, end_date FROM employment
          WHERE id = ANY($1) ORDER BY id FOR SHARE",
     )
     .bind(member_ids)
@@ -561,6 +636,16 @@ async fn fetch_working_calculation(
 /// violation on it — another Correction finalizing against the same target
 /// first — is read back as [`PayrollAppError::CorrectionTargetAlreadyReplaced`]
 /// rather than surfacing as a raw database error (§4.8, §9).
+///
+/// `employer_particulars_json`, `person_particulars_json` and
+/// `payslip_template_version` are issue #73's own three columns:
+/// `employer_particulars_json` is whatever the caller's own
+/// `employer_particulars_snapshot` read (`None` when nothing was on
+/// record), `person_particulars_json` is this member's own
+/// `person_particulars_snapshot` (never `None` — see that function's own
+/// docs), and `payslip_template_version` is always
+/// [`PAYSLIP_TEMPLATE_VERSION`] — none of the three is decided in here, all
+/// three are simply frozen.
 #[allow(clippy::too_many_arguments)]
 async fn insert_finalized_payroll(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -573,6 +658,9 @@ async fn insert_finalized_payroll(
     rules: &PayrollRules,
     calculation: &PayrollCalculation,
     replaces_finalized_payroll_id: Option<&str>,
+    employer_particulars_json: Option<serde_json::Value>,
+    person_particulars_json: serde_json::Value,
+    payslip_template_version: &str,
     finalized_by: &str,
 ) -> Result<FinalizedPayrollId, PayrollAppError> {
     let input_json = serde_json::to_value(input).expect("PayrollInput always serializes");
@@ -586,9 +674,10 @@ async fn insert_finalized_payroll(
              replaces_finalized_payroll_id,
              payroll_input_json, payroll_rules_json, payroll_calculation_json,
              taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version,
-             snapshot_schema_version, finalized_by)
+             snapshot_schema_version, finalized_by,
+             employer_particulars_json, person_particulars_json, payslip_template_version)
          VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::uuid, $8, $9, $10, $11, $12, $13, $14, $15,
-                 $16, $17)
+                 $16, $17, $18, $19, $20)
          RETURNING id::text",
     )
     .bind(payroll_run_id.as_str())
@@ -608,6 +697,9 @@ async fn insert_finalized_payroll(
     .bind(crate::SALT_VERSION)
     .bind(SNAPSHOT_SCHEMA_VERSION)
     .bind(finalized_by)
+    .bind(employer_particulars_json)
+    .bind(person_particulars_json)
+    .bind(payslip_template_version)
     .fetch_one(&mut **tx)
     .await;
 

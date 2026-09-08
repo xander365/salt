@@ -13,6 +13,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import { useFinalizedPayroll } from '../finalizedPayroll/useFinalizedPayroll';
+import { FrozenParticulars } from '../finalizedPayroll/FrozenParticulars';
 import { Workings } from '../finalizedPayroll/Workings';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDate, humanDateRange } from '../format';
@@ -89,6 +90,12 @@ export function FinalizedPayroll() {
           </div>
           <FinalizedBanner>This payroll is finalized and cannot be changed.</FinalizedBanner>
           <Figures figures={finalizedPayroll.data.figures} />
+          {/* Issue #73: the Employer and Person particulars frozen at
+              finalize time, never a later correction of either (D22). */}
+          <FrozenParticulars
+            employerParticulars={finalizedPayroll.data.employerParticulars}
+            personParticulars={finalizedPayroll.data.personParticulars}
+          />
           <p className="text-sm text-muted-foreground">
             Salt version: {finalizedPayroll.data.saltVersion}
           </p>

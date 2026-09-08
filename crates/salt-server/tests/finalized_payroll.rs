@@ -420,6 +420,106 @@ async fn reading_a_finalized_payroll_returns_the_nine_figures_the_period_the_pay
     assert!(body.get("payrollCalculationJson").is_none());
     assert!(figures.get("earningLines").is_none());
     assert!(figures.get("trace").is_none());
+
+    // Issue #73: neither particular was ever recorded here, so
+    // `employerParticulars` reads back `null` — nothing was on record to
+    // freeze — while `personParticulars` still freezes, because it always
+    // carries at least a `fullName`. `payslipTemplateVersion` freezes
+    // regardless of any master data.
+    assert_eq!(body["employerParticulars"], Value::Null);
+    assert_eq!(body["personParticulars"]["fullName"], "Ada Lovelace");
+    assert_eq!(body["personParticulars"]["identityNumber"], Value::Null);
+    assert!(!body["payslipTemplateVersion"].as_str().unwrap().is_empty());
+}
+
+fn set_employer_particulars_request(
+    employer_id: &str,
+    cookie: &str,
+    registered_name: &str,
+    acknowledged_diverging_periods: &[Value],
+    reason: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(format!("/api/employers/{employer_id}/particulars"))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "registeredName": registered_name,
+                "addressLine1": "1 Independence Ave",
+                "city": "Windhoek",
+                "acknowledgedDivergingPeriods": acknowledged_diverging_periods,
+                "reason": reason,
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// D22 end to end, over HTTP: what a `FinalizedPayroll` read exposes is
+/// what was on record when it finalized, never what a later correction made
+/// true.
+#[tokio::test]
+async fn a_finalized_payroll_exposes_the_particulars_frozen_at_finalize_time_not_later_corrections()
+{
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(
+            &employer_id,
+            &cookie,
+            "Acme Corp (Pty) Ltd",
+            &[],
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let finalized_payroll_id =
+        finalize_a_fully_declared_employment(&employer_id, &employment_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(detail_request(&employer_id, &finalized_payroll_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let frozen = body_json(response).await;
+    assert_eq!(
+        frozen["employerParticulars"]["registeredName"],
+        "Acme Corp (Pty) Ltd"
+    );
+
+    // Correcting the Employer's particulars after finalization must leave
+    // the already-frozen row untouched.
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(
+            &employer_id,
+            &cookie,
+            "Acme Holdings",
+            &[january_period()],
+            "registered new legal name",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(detail_request(&employer_id, &finalized_payroll_id, &cookie))
+        .await
+        .unwrap();
+    let re_read = body_json(response).await;
+    assert_eq!(
+        re_read["employerParticulars"]["registeredName"], "Acme Corp (Pty) Ltd",
+        "the frozen row must not see the later correction"
+    );
 }
 
 #[tokio::test]

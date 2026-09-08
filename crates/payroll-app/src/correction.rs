@@ -13,7 +13,7 @@
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
-use crate::finalize::{FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION};
+use crate::finalize::FinalizedPayrollId;
 use crate::payroll_run::{LockedRun, PayrollRunId, RunKind, lock_and_reopen_run};
 use payroll::{Earning, EmployerId, EmploymentId, PayPeriod};
 
@@ -228,6 +228,14 @@ pub(crate) async fn validate_correction_target(
 /// `PayrollInput` — because that is the only field this pre-population
 /// exists to carry forward (§4.5d); the rest of a Correction's
 /// `PayrollInput` comes fresh from current master data (§6.5).
+///
+/// Checked against [`crate::finalize::KNOWN_JSON_SNAPSHOT_VERSIONS`], never
+/// against `schema_version != SNAPSHOT_SCHEMA_VERSION` (issue #73): version 2
+/// added sibling columns beside `payroll_input_json`, not a reshape of it, so
+/// a target finalized at version 1 is exactly as readable here as one
+/// finalized at 2 — "the version freshly written" and "a version whose
+/// `earnings` field this build can decode" stopped being the same question
+/// the day a bump stopped implying a reshape.
 async fn prepopulate_earnings(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
@@ -235,7 +243,7 @@ async fn prepopulate_earnings(
     schema_version: i32,
     input_json: &serde_json::Value,
 ) -> Result<EarningPrePopulation, PayrollAppError> {
-    if schema_version != SNAPSHOT_SCHEMA_VERSION {
+    if !crate::finalize::KNOWN_JSON_SNAPSHOT_VERSIONS.contains(&schema_version) {
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     }
 

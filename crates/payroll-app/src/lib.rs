@@ -55,11 +55,12 @@ pub use employment::{
 };
 pub use error::{PayrollAppError, ScheduleBoundedFact};
 pub use finalize::{
-    FinalizationOutcome, FinalizedPayrollId, SNAPSHOT_SCHEMA_VERSION, finalize_payroll_run,
+    FinalizationOutcome, FinalizedPayrollId, PAYSLIP_TEMPLATE_VERSION, SNAPSHOT_SCHEMA_VERSION,
+    finalize_payroll_run,
 };
 pub use finalized_payroll_read::{
-    FinalizedPayrollDetail, FinalizedPayrollTraces, get_finalized_payroll_detail,
-    get_finalized_payroll_traces,
+    FinalizedEmployerParticulars, FinalizedPayrollDetail, FinalizedPayrollTraces,
+    FinalizedPersonParticulars, get_finalized_payroll_detail, get_finalized_payroll_traces,
 };
 pub use membership::{
     EmployerMembershipSnapshot, MembershipRole, MembershipStatus, active_membership_role,

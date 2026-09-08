@@ -1172,6 +1172,7 @@ dependencies = [
  "payroll",
  "rand",
  "salt-server",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",

@@ -1098,13 +1098,73 @@ FinalizedPayroll
 
 - PayeTableId, SscRulesId
 - salt_version
-- snapshot_schema_version           integer, initially 1
+- snapshot_schema_version           integer, 1 or 2 (issue #73)
+
+- employer_particulars_json         JSONB, nullable (issue #73)
+- person_particulars_json           JSONB, nullable (issue #73)
+- payslip_template_version          text, nullable (issue #73)
 
 - finalized_at, finalized_by
 ```
 
 Rows are **never updated and never deleted**, enforced by `REVOKE` (§6.2), not
 by discipline. Audit metadata is as immutable as the figures.
+
+### 9.0 Issue #73: freezing particulars and the template version
+
+This is ADR-0004 applied to more fields, not amended — a reader who knows
+that ADR finds nothing surprising here, and it gets no ADR of its own.
+Finalizing now also freezes `EmployerParticulars`, `PersonParticulars` (full
+name included) and `PayslipTemplateVersion` onto each `FinalizedPayroll`, in
+the same transaction as everything else §5.3 writes, under the same locks
+finalization already takes on the `employer` and `employment` rows — no new
+locking, no changed concurrency story.
+
+The three new columns are nullable, and **stay nullable forever**: existing
+(version-1) rows are never backfilled, because there is nothing true to
+backfill them with — deriving a historical particular from a current master
+record is exactly what ADR-0004 forbids. Even a freshly-written version-2 row
+can carry a null `employer_particulars_json`: an Employer that had simply
+never recorded any particulars at finalize time has nothing to freeze, which
+is a legitimate state, not a defect.
+
+**A reader keys presence, never the version integer.** "Are the frozen
+particulars present" is answered by testing the column itself (`IS NULL` or,
+in Rust, matching on `Option`), never by comparing `snapshot_schema_version`
+to 2. Version 2 is the shape this entire milestone writes; later tickets in
+the same milestone add further optional fields inside version 2 rather than
+bumping again, so a version-keyed presence check would stop being honest the
+day the first of those lands. The version integer keeps exactly the one job
+§9.1 always gave it: naming which decoder reads `payroll_input_json` and
+`payroll_calculation_json`. Both 1 and 2 share the same decoder — the bump
+added sibling columns, it never reshaped either blob — so
+`calculation_from_snapshot` and `prepopulate_earnings` both check a row's
+version against the *set* of versions their decoder reads
+(`KNOWN_JSON_SNAPSHOT_VERSIONS = {1, 2}`), not against
+`SNAPSHOT_SCHEMA_VERSION` (the version this build currently *writes*) — a
+target finalized at version 1 is exactly as readable as one finalized at 2.
+
+**PersonParticulars always freezes something.** `full_name` is set the
+moment `create_employment` creates the Person and is never absent, so
+`person_particulars_json` is `null` only for a version-1 row; from version 2
+onward it always carries at least a `full_name`, whatever
+`person_particulars` this Person has, or has not, separately recorded.
+`EmployerParticulars` has no such floor — an Employer can go an entire
+finalization with nothing recorded — so `employer_particulars_json` can be
+null on a version-2 row for a reason that has nothing to do with version.
+
+**`PayslipTemplateVersion` identifier scheme:** `"<family>-v<n>"`, e.g.
+`standard-v1`. `family` names a template's overall shape — a different
+family exists for print requirements that differ in kind (a different
+statutory layout), not merely in degree; `n` bumps whenever `family`'s own
+layout changes in a way that would render an already-issued payslip
+differently. Both halves are permanent once written: the renderer that
+consumes this arrives in a later ticket, but a retired version's renderer
+must be kept alive forever (Grill Brief ADR-0021) — `n` is exactly the key
+that future dispatch switches on to pick it. Unlike the two particulars,
+`PayslipTemplateVersion` names code, not master data, so it is never null on
+a row finalized from version 2 onward: there is always a "current" template
+identifier to freeze, whether or not anything else froze alongside it.
 
 `payroll_input_json` is the complete `PayrollInput` — which now includes the
 `PriorEmployment` fact, the `UnsupportedDeductionStatus` and the run's earning
@@ -1525,3 +1585,4 @@ The result is testable entirely from Rust plus PostgreSQL.
 | 39 | Lineage may be null for a Correction that supersedes a reasoned removal or covers an omission; `correction_reason` is mandatory in every case |
 | 40 | A Correction run's earnings are pre-populated from the reversed snapshot, degrading to empty when the snapshot schema is no longer readable |
 | 41 | Editing a `Calculated` run's earnings or membership is accepted and reopens it as `Draft`; `Finalized` is the one absolute refusal |
+| 42 | `EmployerParticulars`, `PersonParticulars` and `PayslipTemplateVersion` freeze onto `FinalizedPayroll` at version 2; all three columns are nullable forever and never backfilled, and a reader keys their presence, never `snapshot_schema_version` (§9.0, issue #73) |
