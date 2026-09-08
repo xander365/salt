@@ -90,14 +90,6 @@ pub(crate) struct SetEmployerParticularsRequest {
     reason: String,
 }
 
-/// A blank optional field is sent as `None` rather than as `Some("")`: the
-/// wire has no way to distinguish "not provided" from "provided empty", and
-/// the domain layer's own not-blank-if-present guard exists for a value that
-/// arrives non-empty but whitespace-only, not for this.
-fn blank_to_none(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
 /// `PUT /api/employers/{e}/particulars`. Owner-only — issue #71's own first
 /// Owner-only route.
 pub(crate) async fn set_employer_particulars(
@@ -111,14 +103,18 @@ pub(crate) async fn set_employer_particulars(
 
     let acknowledged_diverging_periods = parse_pay_periods(request.acknowledged_diverging_periods)?;
 
+    // Passed through as sent: an optional field cleared in the browser
+    // arrives as `""` or as absent, and `payroll_app::set_employer_particulars`
+    // owns the rule that either one means "not recorded" (ADR-0018). This
+    // route adds no second, quietly different, version of that rule.
     let fields = EmployerParticularsFields {
         registered_name: request.registered_name,
         address_line1: request.address_line1,
-        address_line2: blank_to_none(request.address_line2),
+        address_line2: request.address_line2,
         city: request.city,
-        postal_code: blank_to_none(request.postal_code),
-        income_tax_number: blank_to_none(request.income_tax_number),
-        social_security_number: blank_to_none(request.social_security_number),
+        postal_code: request.postal_code,
+        income_tax_number: request.income_tax_number,
+        social_security_number: request.social_security_number,
     };
 
     let diverging_periods = payroll_app::set_employer_particulars(

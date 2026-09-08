@@ -60,6 +60,12 @@ fn fields_json(fields: &EmployerParticularsFields) -> serde_json::Value {
     })
 }
 
+/// The seven columns [`set_employer_particulars`] reads back before it
+/// overwrites them, in the order the `SELECT ... FOR UPDATE` below names
+/// them. Converted straight into [`EmployerParticularsFields`] so the
+/// ActionLog's "before" is built by the same [`fields_json`] that builds its
+/// "after": one shape, one builder, and no way for the two halves of a
+/// correction record to drift apart.
 type StoredFields = (
     String,
     String,
@@ -70,25 +76,47 @@ type StoredFields = (
     Option<String>,
 );
 
-fn stored_fields_json(stored: StoredFields) -> serde_json::Value {
-    let (
-        registered_name,
-        address_line1,
-        address_line2,
-        city,
-        postal_code,
-        income_tax_number,
-        social_security_number,
-    ) = stored;
-    serde_json::json!({
-        "registered_name": registered_name,
-        "address_line1": address_line1,
-        "address_line2": address_line2,
-        "city": city,
-        "postal_code": postal_code,
-        "income_tax_number": income_tax_number,
-        "social_security_number": social_security_number,
-    })
+impl From<StoredFields> for EmployerParticularsFields {
+    fn from(stored: StoredFields) -> Self {
+        let (
+            registered_name,
+            address_line1,
+            address_line2,
+            city,
+            postal_code,
+            income_tax_number,
+            social_security_number,
+        ) = stored;
+        Self {
+            registered_name,
+            address_line1,
+            address_line2,
+            city,
+            postal_code,
+            income_tax_number,
+            social_security_number,
+        }
+    }
+}
+
+/// An optional field that arrives holding nothing but whitespace states
+/// nothing, and is stored as the absence it is. This crate owns the
+/// invariant rather than leaving it to `salt-server`'s own wire mapping
+/// (ADR-0018): the migration's `..._not_blank_if_present` CHECKs are the
+/// last line, and a use case that let a whitespace-only value reach them
+/// would turn a refusable input into a 500.
+fn normalize_optional_fields(fields: EmployerParticularsFields) -> EmployerParticularsFields {
+    fn stated(value: Option<String>) -> Option<String> {
+        value.filter(|value| !value.trim().is_empty())
+    }
+
+    EmployerParticularsFields {
+        address_line2: stated(fields.address_line2),
+        postal_code: stated(fields.postal_code),
+        income_tax_number: stated(fields.income_tax_number),
+        social_security_number: stated(fields.social_security_number),
+        ..fields
+    }
 }
 
 /// `GET`'s own read: `None` when this Employer has never recorded
@@ -179,6 +207,8 @@ pub async fn set_employer_particulars(
     reason: &str,
     actor: &str,
 ) -> Result<Vec<PayPeriod>, PayrollAppError> {
+    let fields = normalize_optional_fields(fields);
+
     if fields.registered_name.trim().is_empty() {
         return Err(PayrollAppError::EmployerParticularsRegisteredNameCannotBeEmpty);
     }
@@ -296,7 +326,10 @@ pub async fn set_employer_particulars(
                     // absence is recorded as an absence rather than as a
                     // fabricated value (the same choice
                     // `record_compensation_terms` makes of its own insert).
-                    "before": existing.map(stored_fields_json),
+                    "before": existing
+                        .map(EmployerParticularsFields::from)
+                        .as_ref()
+                        .map(fields_json),
                     "after": fields_json(&fields),
                     "diverging_live_finalized_periods": diverging_periods_json(&diverging_periods),
                 })),
@@ -390,6 +423,40 @@ mod tests {
             err,
             PayrollAppError::EmployerParticularsRegisteredNameCannotBeEmpty
         );
+    }
+
+    #[sqlx::test]
+    async fn a_whitespace_only_optional_field_is_stored_as_the_absence_it_is(pool: PgPool) {
+        let db = SaltDatabase::from_pool(pool);
+        let employer_id = an_employer(&db).await;
+
+        set_employer_particulars(
+            &db,
+            &employer_id,
+            EmployerParticularsFields {
+                address_line2: Some("   ".to_string()),
+                postal_code: Some("\t".to_string()),
+                income_tax_number: Some(String::new()),
+                social_security_number: Some(" \n ".to_string()),
+                ..fields("Acme Corp")
+            },
+            &[],
+            "",
+            "operator:alice",
+        )
+        .await
+        .unwrap();
+
+        // Not a CHECK violation surfacing as an unexpected database error:
+        // the use case normalized all four before they reached the row.
+        let stored = get_employer_particulars(&db, &employer_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.address_line2, None);
+        assert_eq!(stored.postal_code, None);
+        assert_eq!(stored.income_tax_number, None);
+        assert_eq!(stored.social_security_number, None);
     }
 
     #[sqlx::test]

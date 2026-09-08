@@ -1702,3 +1702,81 @@ async fn a_reasoned_correction_over_live_finalized_payroll_names_it_and_writes_t
         "Acme Holdings"
     );
 }
+
+#[sqlx::test]
+async fn an_acknowledged_employer_particulars_correction_touches_no_finalized_row(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id =
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    finalize_period(&db, &employer_id, march()).await;
+
+    let frozen_before = finalized_payroll_fingerprint(&pool, &employment_id, march().end()).await;
+    let live_before =
+        live_finalized_payroll_fingerprint(&pool, &employment_id, march().end()).await;
+
+    let diverging = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Holdings"),
+        &[march()],
+        "registered new legal name",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // §6.5: the divergence is a warning, never a refusal — the write went
+    // through — and the frozen record it warns about is untouched by it.
+    assert_eq!(diverging, vec![march()]);
+    assert_eq!(
+        finalized_payroll_fingerprint(&pool, &employment_id, march().end()).await,
+        frozen_before,
+        "a particulars correction rewrites no finalized row"
+    );
+    assert_eq!(
+        live_finalized_payroll_fingerprint(&pool, &employment_id, march().end()).await,
+        live_before,
+        "a particulars correction cancels no finalized payroll either"
+    );
+}
+
+#[sqlx::test]
+async fn a_reversed_period_is_not_named_as_diverging_from_employer_particulars(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id =
+        an_employment_with_basic_pay(&db, &employer_id, Money::from_cents(500000).unwrap()).await;
+
+    finalize_period(&db, &employer_id, march()).await;
+    let april_original =
+        finalize_period_returning_id(&db, &employer_id, &employment_id, april()).await;
+    reverse_finalized_payroll(&db, &april_original, "April was paid wrong", "actor")
+        .await
+        .unwrap();
+
+    // April is no longer Live, so acknowledging March alone is the exact
+    // acknowledgement — naming April as well would be refused.
+    let diverging = set_employer_particulars(
+        &db,
+        &employer_id,
+        particulars("Acme Corp"),
+        &[march()],
+        "particulars recorded after the first payroll already ran",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(diverging, vec![march()]);
+}

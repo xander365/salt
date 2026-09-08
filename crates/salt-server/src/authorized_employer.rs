@@ -37,10 +37,6 @@ use crate::state::AppState;
 pub(crate) struct AuthorizedEmployerContext {
     operator_id: OperatorId,
     employer_id: AuthorizedEmployerId,
-    #[allow(
-        dead_code,
-        reason = "read by require_role, unused until the first Owner-only route lands"
-    )]
     role: MembershipRole,
 }
 

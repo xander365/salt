@@ -264,6 +264,40 @@ async fn an_employer_id_belonging_to_another_employer_is_refused_like_one_that_d
         body_json(get_response).await["error"]["code"],
         body_json(unknown_response).await["error"]["code"],
     );
+
+    // The write is the dangerous half: an Owner of one Employer reaching
+    // another's particulars must be refused by the extractor, before
+    // `require_role` is ever consulted, and with the identical 404 an
+    // Employer that does not exist gets (ADR-0017 — a 403 here would
+    // confirm the other Employer exists).
+    let put_other = router()
+        .await
+        .oneshot(put_request(&other_employer_id, &cookie, particulars_body()))
+        .await
+        .unwrap();
+    assert_eq!(put_other.status(), StatusCode::NOT_FOUND);
+
+    let put_unknown = router()
+        .await
+        .oneshot(put_request("no-such-employer", &cookie, particulars_body()))
+        .await
+        .unwrap();
+    assert_eq!(put_unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_json(put_other).await["error"]["code"],
+        body_json(put_unknown).await["error"]["code"],
+    );
+
+    // And it wrote nothing: the other Employer still has no particulars.
+    assert_eq!(
+        payroll_app::get_employer_particulars(
+            &test_db().await,
+            &payroll::EmployerId::new(other_employer_id),
+        )
+        .await
+        .unwrap(),
+        None
+    );
 }
 
 #[tokio::test]
@@ -306,5 +340,144 @@ async fn correcting_an_existing_row_demands_a_reason_and_logs_it() {
     assert_eq!(
         body_json(get_response).await["registeredName"],
         "Acme Holdings (Pty) Ltd"
+    );
+}
+
+/// A March pay period finalized for one Employment of `employer_id`, built
+/// straight through `payroll-app` — the HTTP routes that would build it are
+/// another spec's, and this test needs only something Live to diverge from.
+async fn a_finalized_march(employer_id: &str) {
+    let db = test_db().await;
+    let employer = payroll::EmployerId::new(employer_id.to_string());
+    let period = payroll::PayPeriod::new(
+        chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+    )
+    .unwrap();
+
+    let (_, employment_id) = payroll_app::create_employment(
+        &db,
+        &employer,
+        payroll_app::EmploymentPerson::New("Person One".to_string()),
+        period.start(),
+        None,
+        "test-setup",
+    )
+    .await
+    .unwrap();
+    payroll_app::record_compensation_terms(
+        &db,
+        &employment_id,
+        period.start(),
+        payroll::Money::from_cents(500000).unwrap(),
+        &[],
+        "",
+        "test-setup",
+    )
+    .await
+    .unwrap();
+
+    payroll_app::declare_prior_employment(
+        &db,
+        &employment_id,
+        payroll::TaxYear::for_period_end(period.end()),
+        payroll::PriorEmployment::None,
+        "test-setup",
+    )
+    .await
+    .unwrap();
+    payroll_app::declare_unsupported_deduction_status(
+        &db,
+        &employment_id,
+        period.start(),
+        payroll::UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "no unsupported deductions",
+        "test-setup",
+    )
+    .await
+    .unwrap();
+
+    let run_id = payroll_app::create_ordinary_payroll_run(
+        &db,
+        &employer,
+        period,
+        period.end(),
+        "test-setup",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        payroll_app::calculate_payroll_run(&db, &run_id, "test-setup")
+            .await
+            .unwrap(),
+        Vec::new(),
+        "the run must reach Calculated"
+    );
+    payroll_app::finalize_payroll_run(&db, &run_id, "test-setup")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_write_over_live_finalized_payroll_names_the_periods_and_demands_acknowledgement() {
+    let (cookie, employer_id) = an_operator_with_role(MembershipRole::Owner).await;
+    a_finalized_march(&employer_id).await;
+
+    // Guard 1: the divergence is named, in full, and the write is held.
+    let unacknowledged = router()
+        .await
+        .oneshot(put_request(&employer_id, &cookie, particulars_body()))
+        .await
+        .unwrap();
+    assert_eq!(unacknowledged.status(), StatusCode::CONFLICT);
+    let json = body_json(unacknowledged).await;
+    assert_eq!(
+        json["error"]["code"],
+        "employer_master_data_divergence_not_acknowledged"
+    );
+    assert_eq!(
+        json["error"]["details"]["divergingPeriods"],
+        json!([{ "start": "2026-03-01", "end": "2026-03-31" }])
+    );
+
+    // Guard 2: acknowledging it without a reason is still refused — the
+    // acknowledgement does not stand in for the explanation.
+    let mut acknowledged = particulars_body();
+    acknowledged["acknowledgedDivergingPeriods"] =
+        json!([{ "start": "2026-03-01", "end": "2026-03-31" }]);
+    let unreasoned = router()
+        .await
+        .oneshot(put_request(&employer_id, &cookie, acknowledged.clone()))
+        .await
+        .unwrap();
+    assert_eq!(unreasoned.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(unreasoned).await["error"]["code"],
+        "employer_particulars_correction_reason_cannot_be_empty"
+    );
+
+    // Guard 3: acknowledged and reasoned, the write proceeds — a warning,
+    // never a refusal — and reports back the periods it diverged from.
+    acknowledged["reason"] = json!("particulars recorded after March was already paid");
+    let accepted = router()
+        .await
+        .oneshot(put_request(&employer_id, &cookie, acknowledged))
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(accepted).await["divergingPeriods"],
+        json!([{ "start": "2026-03-01", "end": "2026-03-31" }])
+    );
+
+    let get_response = router()
+        .await
+        .oneshot(get_request(&employer_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(get_response).await["registeredName"],
+        "Acme Corp (Pty) Ltd"
     );
 }

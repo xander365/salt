@@ -175,6 +175,11 @@ export function EmployerParticularsForm({
     try {
       await setParticulars.mutateAsync(request);
       setPendingAcknowledgement(null);
+      // Cleared, not kept: the next correction is a different act and owes
+      // its own explanation. A reason left in the box would be sent again
+      // unread, and the ActionLog would carry the previous change's words
+      // as this one's.
+      setReason('');
       setSaved(true);
     } catch (caught) {
       if (
