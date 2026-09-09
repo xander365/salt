@@ -2058,10 +2058,10 @@ mod tests {
         )
     }
 
-    /// Exactly five codes exist and no others. The `match` in
-    /// [`blocker_code_and_details`] has no wildcard arm, so a sixth
+    /// Exactly six codes exist and no others. The `match` in
+    /// [`blocker_code_and_details`] has no wildcard arm, so a seventh
     /// [`PayrollRunBlocker`] variant fails the build; this test is what
-    /// pins the five strings themselves, which no compiler can check.
+    /// pins the six strings themselves, which no compiler can check.
     #[test]
     fn every_blocker_maps_to_its_code_and_details() {
         let mapped: Vec<(&str, Option<Value>)> = [
@@ -2101,7 +2101,7 @@ mod tests {
 
     /// The four blockers a `PayrollError` also reports carry that refusal's
     /// own code *and* its own `details`, read out of the two mappings rather
-    /// than written twice as literals here — issue #54's "the five codes are
+    /// than written twice as literals here — issue #54's blocker codes are
     /// the same strings the mapping in #50 already owns. Do not mint
     /// parallel ones." A rename on either side fails this test.
     #[test]

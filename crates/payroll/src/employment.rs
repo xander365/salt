@@ -387,8 +387,16 @@ mod tests {
             Err(OrdinaryHoursError::ZeroOrNegative)
         );
         assert_eq!(
+            OrdinaryHours::new(dec!(-0.01)),
+            Err(OrdinaryHoursError::ZeroOrNegative)
+        );
+        assert_eq!(
             OrdinaryHours::new(dec!(168.01)),
             Err(OrdinaryHoursError::MoreThanOneWeek)
+        );
+        assert_eq!(
+            OrdinaryHours::new(dec!(168)).unwrap().as_decimal(),
+            dec!(168)
         );
         assert_eq!(
             OrdinaryHours::new(dec!(40.00)).unwrap().as_decimal(),

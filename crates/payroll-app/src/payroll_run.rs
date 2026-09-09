@@ -790,11 +790,12 @@ pub async fn list_payroll_runs(
 
 /// Why `calculate_payroll_run` would refuse to pay this member right now,
 /// read from standing facts rather than remembered from a failed Calculate
-/// (issue #54, §0.31). Exactly the five states a fact lookup alone can
-/// answer — the same five codes the error contract already owns (issue
-/// #50) — and no others: a refusal that only appears once arithmetic runs
-/// (inside [`crate::calculate_payroll_run`]) is out of this list's reach by
-/// construction.
+/// (issue #54, §0.31). The first five states are the standing-fact answers
+/// the current calculator can observe. `OrdinaryHoursNotRecorded` reserves
+/// the same read-model path for the Overtime slice: it becomes observable
+/// only when a line actually needs a DerivedHourlyRate. A refusal that only
+/// appears once arithmetic runs (inside [`crate::calculate_payroll_run`]) is
+/// otherwise out of this list's reach by construction.
 ///
 /// The two "present" variants matter as much as the two "unknown" ones:
 /// known `PriorEmployment` figures are refused while their treatment is

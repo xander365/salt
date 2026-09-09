@@ -155,8 +155,30 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   const payRegion = page.getByRole('region', { name: 'Pay', exact: true });
   await payRegion.getByLabel('Effective from').fill(periodStartText);
   await payRegion.getByLabel('Basic pay').fill('15000.00');
+  const ordinaryHours = payRegion.getByLabel('Ordinary hours per week');
+  for (const invalid of ['0', '-0.01', '168.01', '40.001']) {
+    await ordinaryHours.fill(invalid);
+    await payRegion.getByRole('button', { name: 'Save pay' }).click();
+    await expect(ordinaryHours).toHaveAttribute('aria-invalid', 'true');
+    await expect(
+      payRegion.getByText(
+        'Enter more than 0 and no more than 168 hours per week, with up to two decimal places.',
+      ),
+    ).toBeVisible();
+  }
+  await ordinaryHours.fill('40.00');
   await payRegion.getByRole('button', { name: 'Save pay' }).click();
-  await expect(page.getByText(`Pay of 15000.00 recorded from ${periodStartText}.`)).toBeVisible();
+  await expect(
+    page.getByText(
+      `Pay of 15000.00 for 40.00 ordinary hours per week recorded from ${periodStartText}.`,
+    ),
+  ).toBeVisible();
+
+  // A real document reload proves the value came back from PostgreSQL via
+  // the Employment detail route, not from the form's local React state.
+  await page.reload();
+  await expect(page.getByRole('heading', { level: 2, name: 'Ada Lovelace' })).toBeVisible();
+  await expect(page.getByText('40.00', { exact: true })).toBeVisible();
 
   // Declare PriorEmployment: no prior employment this tax year. Its own
   // default assumes the tax year real "today" falls in, which right at the

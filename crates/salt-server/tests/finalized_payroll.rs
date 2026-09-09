@@ -229,6 +229,7 @@ fn record_compensation_terms_request(
             serde_json::json!({
                 "effectiveFrom": "2026-01-01",
                 "basicPayCents": 1_500_000,
+                "ordinaryHours": "40.00",
             })
             .to_string(),
         ))

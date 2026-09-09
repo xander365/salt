@@ -253,6 +253,57 @@ async fn recording_compensation_terms_succeeds_and_is_reflected_on_the_detail_ro
         .unwrap();
     let detail = body_json(detail).await;
     assert_eq!(detail["currentBasicPayCents"], 1_500_000);
+    assert_eq!(detail["currentOrdinaryHours"], "40.00");
+}
+
+#[tokio::test]
+async fn invalid_ordinary_hours_are_bad_requests_and_write_nothing() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie).await;
+
+    for invalid in ["0", "-0.01", "168.01", "40.001"] {
+        let mut body = compensation_terms_body();
+        body["ordinaryHours"] = serde_json::json!(invalid);
+
+        let response = router()
+            .await
+            .oneshot(post_request(
+                &employer_id,
+                &employment_id,
+                "compensation-terms",
+                &cookie,
+                true,
+                body,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "accepted {invalid}"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "malformed_request");
+    }
+
+    let detail = router()
+        .await
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/employers/{employer_id}/employments/{employment_id}"
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let detail = body_json(detail).await;
+    assert_eq!(detail["currentBasicPayCents"], serde_json::Value::Null);
+    assert_eq!(detail["currentOrdinaryHours"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -799,6 +850,7 @@ async fn money_as_a_json_float_is_a_bad_request() {
             serde_json::json!({
                 "effectiveFrom": "2026-04-01",
                 "basicPayCents": 1_500_000.5,
+                "ordinaryHours": "40.00",
             }),
         ),
         (

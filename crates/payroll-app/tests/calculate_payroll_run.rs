@@ -223,6 +223,48 @@ async fn a_fully_declared_single_member_run_calculates_and_becomes_calculated(po
     );
 }
 
+/// Migration 0035 deliberately leaves historical CompensationTerms without
+/// OrdinaryHours. Until an Overtime line actually needs a DerivedHourlyRate,
+/// that honest absence must not change an ordinary salary calculation.
+#[sqlx::test]
+async fn a_salary_only_run_ignores_historical_terms_without_ordinary_hours(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "historical-person",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    sqlx::query("UPDATE compensation_terms SET ordinary_hours = NULL WHERE employment_id = $1")
+        .bind(employment_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    assert_eq!(refusals, Vec::new());
+    assert_eq!(run_status(&pool, &run_id).await, "calculated");
+    let (input_json, _, calculation_json, _) =
+        working_calculation_row(&pool, &run_id, &employment_id)
+            .await
+            .expect("salary-only historical terms still produce a calculation");
+    assert_eq!(
+        input_json["employment"]["compensation_terms"]["ordinary_hours"],
+        serde_json::Value::Null
+    );
+    assert_eq!(calculation_json["gross_remuneration"], 1_500_000);
+}
+
 /// The whole loop an Employer actually walks: calculate, read the figures,
 /// spot a wrong Earning, fix it, calculate again. The correction reopens the
 /// run to `Draft` (§4.7) and the second calculation carries the new line.

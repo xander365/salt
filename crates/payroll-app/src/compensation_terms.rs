@@ -71,6 +71,9 @@ use payroll::{
 /// correcting anything, no acknowledgement is owed, and no ActionLog entry
 /// is written. Demanding a sentence there is the ceremony §5.1 rejects by
 /// name.
+// Eight independently meaningful facts meet at this application boundary.
+// Grouping them would only hide the use case's inputs behind a parameter bag.
+#[allow(clippy::too_many_arguments)]
 pub async fn record_compensation_terms(
     db: &SaltDatabase,
     employment_id: &EmploymentId,

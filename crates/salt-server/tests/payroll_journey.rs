@@ -418,7 +418,11 @@ async fn fully_declare_employment(employer_id: &str, employment_id: &str, cookie
             employment_id,
             cookie,
             true,
-            json!({ "effectiveFrom": "2026-01-01", "basicPayCents": 1_500_000_i64 }),
+            json!({
+                "effectiveFrom": "2026-01-01",
+                "basicPayCents": 1_500_000_i64,
+                "ordinaryHours": "40.00",
+            }),
         ))
         .await
         .unwrap();
@@ -681,7 +685,11 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             &employment_id,
             &cookie,
             true,
-            json!({ "effectiveFrom": "2026-01-01", "basicPayCents": 1_500_000_i64 }),
+            json!({
+                "effectiveFrom": "2026-01-01",
+                "basicPayCents": 1_500_000_i64,
+                "ordinaryHours": "40.00",
+            }),
         ))
         .await
         .unwrap();
@@ -1197,7 +1205,11 @@ async fn every_payroll_route_answers_401_without_a_session() {
             em,
             no_cookie,
             true,
-            json!({ "effectiveFrom": "2026-01-01", "basicPayCents": 1 }),
+            json!({
+                "effectiveFrom": "2026-01-01",
+                "basicPayCents": 1,
+                "ordinaryHours": "40.00",
+            }),
         ),
         declare_prior_employment_request(e, em, no_cookie, true, 2025),
         declare_unsupported_deductions_request(e, em, no_cookie, true),
@@ -1270,7 +1282,11 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
             em,
             &cookie,
             false,
-            json!({ "effectiveFrom": "2026-01-01", "basicPayCents": 1 }),
+            json!({
+                "effectiveFrom": "2026-01-01",
+                "basicPayCents": 1,
+                "ordinaryHours": "40.00",
+            }),
         ),
         declare_prior_employment_request(&employer_id, em, &cookie, false, 2025),
         declare_unsupported_deductions_request(&employer_id, em, &cookie, false),

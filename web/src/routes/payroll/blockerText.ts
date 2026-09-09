@@ -3,8 +3,8 @@
 // A blocker sentence is a lookup keyed by `code`, never a rendering of a
 // server `message` — there isn't one to render anyway: `PayrollRunBlockerDto`
 // carries only `code` and `details` (`crates/salt-server/src/payroll_error.rs`'s
-// own `blocker_code_and_details`). There are exactly five codes; this module
-// names all five and no others, matching the same rule the server's own Deep
+// own `blocker_code_and_details`). There are exactly six codes; this module
+// names all six and no others, matching the same rule the server's own Deep
 // Instructions state for itself.
 //
 // `blockerSection` names the Employment screen section each blocker's fact
@@ -59,7 +59,7 @@ export function blockerSentence(blocker: PayrollRunBlockerDto): string {
     case 'ordinary_hours_not_recorded':
       return 'Ordinary hours per week have not been recorded.';
 
-    // The five codes above are the contract (§0.31); a sixth reaching the
+    // The six codes above are the contract (§0.31); a seventh reaching the
     // browser is a version skew this screen cannot describe better than
     // this, but must still let the Operator act on by reaching the screen.
     default:
