@@ -233,6 +233,7 @@ impl TryFrom<RawCompensationTerms> for CompensationTerms {
 
     fn try_from(raw: RawCompensationTerms) -> Result<Self, CompensationTermsError> {
         CompensationTerms::new(raw.effective_from, raw.effective_until, raw.basic_pay)
+            .map(|terms| terms.with_ordinary_hours(raw.ordinary_hours))
     }
 }
 
@@ -393,6 +394,23 @@ mod tests {
             OrdinaryHours::new(dec!(40.00)).unwrap().as_decimal(),
             dec!(40.00)
         );
+    }
+
+    #[test]
+    fn compensation_terms_round_trip_keeps_ordinary_hours() {
+        use rust_decimal_macros::dec;
+
+        let terms =
+            CompensationTerms::new(date(2025, 1, 1), None, Money::from_cents(500000).unwrap())
+                .unwrap()
+                .with_ordinary_hours(Some(OrdinaryHours::new(dec!(40.00)).unwrap()));
+
+        let reloaded: CompensationTerms = serde_json::from_str(
+            &serde_json::to_string(&terms).expect("CompensationTerms serializes"),
+        )
+        .expect("CompensationTerms deserializes");
+
+        assert_eq!(reloaded.ordinary_hours(), terms.ordinary_hours());
     }
 
     fn snapshot() -> EmploymentSnapshot {

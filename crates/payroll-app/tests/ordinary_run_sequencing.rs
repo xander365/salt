@@ -70,9 +70,18 @@ async fn a_fully_declared_employment(
     )
     .await
     .unwrap();
-    record_compensation_terms(db, &employment_id, start_date, basic_pay, &[], "", "actor")
-        .await
-        .unwrap();
+    record_compensation_terms(
+        db,
+        &employment_id,
+        start_date,
+        basic_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
     declare_prior_employment(db, &employment_id, tax_year, PriorEmployment::None, "actor")
         .await
         .unwrap();

@@ -148,12 +148,12 @@ pub(crate) async fn record_compensation_terms(
         .and_then(|hours| OrdinaryHours::new(hours).ok())
         .ok_or_else(ApiError::malformed_request)?;
 
-    let diverging_periods = payroll_app::record_compensation_terms_with_ordinary_hours(
+    let diverging_periods = payroll_app::record_compensation_terms(
         state.db(),
         &employment_id,
         request.effective_from,
         basic_pay,
-        Some(ordinary_hours),
+        ordinary_hours,
         &acknowledged_diverging_periods,
         &request.reason,
         &context.actor(),

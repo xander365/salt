@@ -593,6 +593,7 @@ async fn no_other_use_case_writes_an_opening_balance(pool: PgPool) {
         &employment_id,
         date(2026, 3, 1),
         Money::from_cents(1_500_000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",

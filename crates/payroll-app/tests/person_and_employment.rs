@@ -8,7 +8,6 @@ use payroll::{DayOfMonth, Money, OrdinaryHours, PeriodEndDay, PersonId};
 use payroll_app::{
     EmploymentPerson, PayrollAppError, SaltDatabase, create_employer, create_employment,
     get_employment_detail, list_employments_for_employer, record_compensation_terms,
-    record_compensation_terms_with_ordinary_hours,
 };
 use rust_decimal::Decimal;
 use sqlx::{PgPool, Row};
@@ -301,6 +300,7 @@ async fn detail_reads_dates_the_persons_full_name_and_current_pay(pool: PgPool) 
         &employment_id,
         date(2026, 1, 26),
         basic_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -333,12 +333,12 @@ async fn detail_keeps_the_ordinary_hours_recorded_beside_pay_after_a_reload(pool
     .await
     .unwrap();
 
-    record_compensation_terms_with_ordinary_hours(
+    record_compensation_terms(
         &db,
         &employment_id,
         date(2026, 1, 26),
         Money::from_cents(500_000).unwrap(),
-        Some(OrdinaryHours::new(Decimal::new(4_050, 2)).unwrap()),
+        OrdinaryHours::new(Decimal::new(4_050, 2)).unwrap(),
         &[],
         "",
         "actor",

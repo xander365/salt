@@ -75,6 +75,7 @@ async fn an_employment_with_basic_pay(
         &employment_id,
         march().start(),
         basic_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -273,6 +274,7 @@ async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool:
         march().start(),
         march().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(3_750, 2)).unwrap(),
         &[],
         "typo in the original amount",
         "actor",
@@ -283,7 +285,7 @@ async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool:
     assert_eq!(diverging, Vec::new());
 
     let row = sqlx::query(
-        "SELECT basic_pay FROM compensation_terms
+        "SELECT basic_pay, ordinary_hours FROM compensation_terms
          WHERE employment_id = $1 AND effective_from = $2",
     )
     .bind(employment_id.as_str())
@@ -292,6 +294,10 @@ async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool:
     .await
     .unwrap();
     assert_eq!(row.get::<i64, _>(0), 600000);
+    assert_eq!(
+        row.get::<rust_decimal::Decimal, _>(1),
+        rust_decimal::Decimal::new(3_750, 2)
+    );
 
     let entry = sqlx::query(
         "SELECT context FROM action_log_entry
@@ -305,6 +311,8 @@ async fn a_correction_with_no_live_finalized_payroll_diverges_from_nothing(pool:
     assert_eq!(context["reason"], "typo in the original amount");
     assert_eq!(context["before"]["basic_pay_cents"], 500000);
     assert_eq!(context["after"]["basic_pay_cents"], 600000);
+    assert_eq!(context["before"]["ordinary_hours"], "40.00");
+    assert_eq!(context["after"]["ordinary_hours"], "37.50");
     assert_eq!(
         context["diverging_live_finalized_periods"],
         serde_json::json!([])
@@ -324,6 +332,7 @@ async fn an_empty_reason_is_refused_and_nothing_is_touched(pool: PgPool) {
         march().start(),
         march().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "   ",
         "actor",
@@ -373,6 +382,7 @@ async fn correcting_a_row_that_does_not_exist_is_refused(pool: PgPool) {
         date(2026, 6, 1),
         date(2026, 6, 1),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "a reason",
         "actor",
@@ -399,6 +409,7 @@ async fn correcting_against_a_missing_employment_is_refused(pool: PgPool) {
         march().start(),
         march().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "a reason",
         "actor",
@@ -421,6 +432,7 @@ async fn a_new_effective_from_that_is_not_a_period_start_is_a_domain_refusal(poo
         march().start(),
         date(2026, 3, 10),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "a reason",
         "actor",
@@ -473,6 +485,7 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
         march().start(),
         april().start(),
         original_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march(), april(), may()],
         "March rate captured wrong; the terms only took effect in April",
         "actor",
@@ -492,6 +505,7 @@ async fn splitting_a_row_leaves_april_and_may_byte_identical(pool: PgPool) {
         &employment_id,
         march().start(),
         true_march_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march()],
         "March's true rate, recorded over the period it was already paid for",
         "actor",
@@ -586,6 +600,7 @@ async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPoo
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -602,6 +617,7 @@ async fn moving_a_row_past_a_later_sibling_names_both_affected_spans(pool: PgPoo
         march().start(),
         june().start(),
         Money::from_cents(700000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march(), april(), june()],
         "the earlier terms began in June",
         "actor",
@@ -693,6 +709,7 @@ async fn an_unacknowledged_divergence_is_refused_and_names_the_periods(pool: PgP
         march().start(),
         march().start(),
         corrected_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "March rate captured wrong",
         "actor",
@@ -720,6 +737,7 @@ async fn an_unacknowledged_divergence_is_refused_and_names_the_periods(pool: PgP
         march().start(),
         march().start(),
         corrected_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march(), april()],
         "March rate captured wrong",
         "actor",
@@ -754,6 +772,7 @@ async fn an_acknowledgement_that_omits_a_diverging_period_is_refused(pool: PgPoo
         march().start(),
         march().start(),
         Money::from_cents(550000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march()],
         "March rate captured wrong",
         "actor",
@@ -786,6 +805,7 @@ async fn an_acknowledgement_of_a_period_that_does_not_diverge_is_refused(pool: P
         march().start(),
         march().start(),
         Money::from_cents(550000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march()],
         "March rate captured wrong",
         "actor",
@@ -877,6 +897,7 @@ async fn a_correction_moves_no_finalized_figure_and_no_year_to_date_total(pool: 
         march().start(),
         march().start(),
         Money::from_cents(1000000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march(), april(), may()],
         "the salary was captured at half its true value",
         "actor",
@@ -913,6 +934,7 @@ async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) 
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -926,6 +948,7 @@ async fn moving_a_row_onto_a_date_that_already_has_one_is_refused(pool: PgPool) 
         march().start(),
         may().start(),
         Money::from_cents(550000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "the terms began in May",
         "actor",
@@ -994,6 +1017,7 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
         march().start(),
         april().start(),
         wrong_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march(), april(), may()],
         "March rate captured wrong; these terms began in April",
         "actor",
@@ -1008,6 +1032,7 @@ async fn the_march_correction_end_to_end(pool: PgPool) {
         &employment_id,
         march().start(),
         true_march_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march()],
         "March's true rate, over the period already paid at the wrong one",
         "actor",
@@ -1128,6 +1153,7 @@ async fn recording_a_rise_ahead_of_payroll_diverges_from_nothing_and_needs_no_re
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -1169,6 +1195,7 @@ async fn an_unacknowledged_insert_over_a_live_finalized_period_is_refused(pool: 
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -1210,6 +1237,7 @@ async fn an_acknowledged_insert_over_a_live_finalized_period_still_demands_a_rea
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[april()],
         "   ",
         "actor",
@@ -1242,6 +1270,7 @@ async fn an_inserts_divergence_stops_at_the_next_row_that_already_exists(pool: P
         &employment_id,
         may().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
@@ -1259,6 +1288,7 @@ async fn an_inserts_divergence_stops_at_the_next_row_that_already_exists(pool: P
         &employment_id,
         april().start(),
         Money::from_cents(550000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[april()],
         "April's true rate",
         "actor",
@@ -1297,6 +1327,7 @@ async fn an_insert_acknowledging_a_period_it_does_not_diverge_from_is_refused(po
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[march()],
         "a reason",
         "actor",
@@ -1345,6 +1376,7 @@ async fn an_insert_moves_no_finalized_figure_and_no_year_to_date_total(pool: PgP
         &employment_id,
         april().start(),
         Money::from_cents(1000000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[april(), may()],
         "the April rise was never recorded",
         "actor",
@@ -1398,6 +1430,7 @@ async fn an_insert_never_names_a_reversed_period_it_covers(pool: PgPool) {
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[may()],
         "the April rise was never recorded",
         "actor",
@@ -1443,6 +1476,7 @@ async fn an_insert_acknowledging_a_reversed_period_is_refused(pool: PgPool) {
         &employment_id,
         april().start(),
         Money::from_cents(600000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[april()],
         "the April rise was never recorded",
         "actor",

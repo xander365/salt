@@ -370,6 +370,7 @@ async fn a_finalized_march(employer_id: &str) {
         &employment_id,
         period.start(),
         payroll::Money::from_cents(500000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "test-setup",

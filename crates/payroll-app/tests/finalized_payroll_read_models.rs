@@ -75,6 +75,7 @@ async fn a_fully_declared_employment(
         &employment_id,
         period().start(),
         Money::from_cents(BASIC_PAY_CENTS).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",

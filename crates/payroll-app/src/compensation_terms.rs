@@ -76,33 +76,7 @@ pub async fn record_compensation_terms(
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     basic_pay: Money,
-    acknowledged_diverging_periods: &[PayPeriod],
-    reason: &str,
-    created_by: &str,
-) -> Result<Vec<PayPeriod>, PayrollAppError> {
-    record_compensation_terms_with_ordinary_hours(
-        db,
-        employment_id,
-        effective_from,
-        basic_pay,
-        None,
-        acknowledged_diverging_periods,
-        reason,
-        created_by,
-    )
-    .await
-}
-
-/// Records CompensationTerms with the agreed weekly ordinary hours where
-/// known. `None` is retained only for historical rows Salt cannot truthfully
-/// reconstruct; new operator-facing recording supplies `Some`.
-#[allow(clippy::too_many_arguments)]
-pub async fn record_compensation_terms_with_ordinary_hours(
-    db: &SaltDatabase,
-    employment_id: &EmploymentId,
-    effective_from: NaiveDate,
-    basic_pay: Money,
-    ordinary_hours: Option<OrdinaryHours>,
+    ordinary_hours: OrdinaryHours,
     acknowledged_diverging_periods: &[PayPeriod],
     reason: &str,
     created_by: &str,
@@ -215,7 +189,7 @@ pub async fn record_compensation_terms_with_ordinary_hours(
     .bind(employment_id.as_str())
     .bind(effective_from)
     .bind(basic_pay.cents())
-    .bind(ordinary_hours.map(OrdinaryHours::as_decimal))
+    .bind(ordinary_hours.as_decimal())
     .bind(created_by)
     .execute(&mut *tx)
     .await?;
@@ -289,7 +263,7 @@ pub async fn record_compensation_terms_with_ordinary_hours(
 /// forward, then [`record_compensation_terms`] inserts the new earlier row.
 /// The move frees the original `(employment_id, effective_from)` key for the
 /// insert, while its divergence list still names the original wider span.
-// Eight facts, each named at the call site, and no two of them belong
+// Nine facts, each named at the call site, and no two of them belong
 // together in a struct: a parameter object here would only be this list with
 // one more name in front of it.
 #[allow(clippy::too_many_arguments)]
@@ -299,6 +273,7 @@ pub async fn correct_compensation_terms(
     current_effective_from: NaiveDate,
     new_effective_from: NaiveDate,
     new_basic_pay: Money,
+    new_ordinary_hours: OrdinaryHours,
     acknowledged_diverging_periods: &[PayPeriod],
     reason: &str,
     corrected_by: &str,
@@ -338,8 +313,8 @@ pub async fn correct_compensation_terms(
     // `FOR UPDATE` holds the row against a concurrent correction of the same
     // fact while this one computes its divergence list and decides the new
     // values, so two corrections of one row can never interleave.
-    let existing_basic_pay_cents: Option<i64> = sqlx::query_scalar(
-        "SELECT basic_pay FROM compensation_terms
+    let existing: Option<(i64, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+        "SELECT basic_pay, ordinary_hours FROM compensation_terms
          WHERE employment_id = $1 AND effective_from = $2
          FOR UPDATE",
     )
@@ -347,7 +322,7 @@ pub async fn correct_compensation_terms(
     .bind(current_effective_from)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(existing_basic_pay_cents) = existing_basic_pay_cents else {
+    let Some((existing_basic_pay_cents, old_ordinary_hours)) = existing else {
         return Err(PayrollAppError::NoCompensationTermsRowAt {
             employment_id: employment_id.clone(),
             effective_from: current_effective_from,
@@ -439,13 +414,15 @@ pub async fn correct_compensation_terms(
     }
 
     sqlx::query(
-        "UPDATE compensation_terms SET effective_from = $3, basic_pay = $4
+        "UPDATE compensation_terms
+         SET effective_from = $3, basic_pay = $4, ordinary_hours = $5
          WHERE employment_id = $1 AND effective_from = $2",
     )
     .bind(employment_id.as_str())
     .bind(current_effective_from)
     .bind(new_effective_from)
     .bind(new_basic_pay.cents())
+    .bind(new_ordinary_hours.as_decimal())
     .execute(&mut *tx)
     .await?;
 
@@ -462,10 +439,12 @@ pub async fn correct_compensation_terms(
                 "before": {
                     "effective_from": current_effective_from,
                     "basic_pay_cents": old_basic_pay.cents(),
+                    "ordinary_hours": old_ordinary_hours,
                 },
                 "after": {
                     "effective_from": new_effective_from,
                     "basic_pay_cents": new_basic_pay.cents(),
+                    "ordinary_hours": new_ordinary_hours.as_decimal(),
                 },
                 // This entry existing is the record of the acknowledgement:
                 // the call is refused above unless the caller named exactly

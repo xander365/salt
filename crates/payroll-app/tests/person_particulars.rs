@@ -77,6 +77,7 @@ async fn a_payable_person(
         &employment_id,
         march().start(),
         basic_pay,
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
         &[],
         "",
         "actor",
