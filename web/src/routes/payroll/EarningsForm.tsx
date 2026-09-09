@@ -63,6 +63,7 @@ function safeAmountText(cents: number): string {
 
 interface LineError {
   index: number;
+  field: keyof AllowanceDraft;
   message: string;
 }
 
@@ -137,12 +138,17 @@ export function EarningsForm({
     for (const [index, allowance] of allowances.entries()) {
       const label = allowance.label.trim();
       if (label.length === 0) {
-        setLineError({ index, message: 'Enter a label for this taxable allowance.' });
+        setLineError({
+          index,
+          field: 'label',
+          message: 'Enter a label for this taxable allowance.',
+        });
         return;
       }
       if (Array.from(label).length > MAX_LABEL_LENGTH) {
         setLineError({
           index,
+          field: 'label',
           message: `Use ${MAX_LABEL_LENGTH} characters or fewer for the allowance label.`,
         });
         return;
@@ -152,6 +158,7 @@ export function EarningsForm({
       if (cents === null) {
         setLineError({
           index,
+          field: 'amount',
           message: 'Enter a non-negative amount with no more than two decimal places, e.g. 500.00.',
         });
         return;
@@ -192,7 +199,12 @@ export function EarningsForm({
           {allowances.map((allowance, index) => {
             const labelId = `${employmentId}-allowance-label-${index}`;
             const amountId = `${employmentId}-allowance-amount-${index}`;
-            const invalid = lineError !== null && lineError.index === index;
+            const labelIsInvalid =
+              lineError?.index === index && lineError.field === 'label';
+            const amountIsInvalid =
+              lineError?.index === index && lineError.field === 'amount';
+            const labelErrorId = `${errorId}-${index}-label`;
+            const amountErrorId = `${errorId}-${index}-amount`;
             return (
               <li key={index} className="flex flex-col gap-1">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
@@ -204,8 +216,8 @@ export function EarningsForm({
                       placeholder="e.g. standby"
                       className="w-48"
                       value={allowance.label}
-                      aria-invalid={invalid || undefined}
-                      aria-describedby={invalid ? errorId : undefined}
+                      aria-invalid={labelIsInvalid || undefined}
+                      aria-describedby={labelIsInvalid ? labelErrorId : undefined}
                       onChange={(event) => editAllowance(index, 'label', event.target.value)}
                     />
                   </div>
@@ -218,8 +230,8 @@ export function EarningsForm({
                       placeholder="0.00"
                       className="w-32"
                       value={allowance.amount}
-                      aria-invalid={invalid || undefined}
-                      aria-describedby={invalid ? errorId : undefined}
+                      aria-invalid={amountIsInvalid || undefined}
+                      aria-describedby={amountIsInvalid ? amountErrorId : undefined}
                       onChange={(event) => editAllowance(index, 'amount', event.target.value)}
                     />
                   </div>
@@ -233,7 +245,13 @@ export function EarningsForm({
                     Remove
                   </Button>
                 </div>
-                {invalid && <ValidationError id={errorId}>{lineError.message}</ValidationError>}
+                {lineError?.index === index && (
+                  <ValidationError
+                    id={lineError.field === 'label' ? labelErrorId : amountErrorId}
+                  >
+                    {lineError.message}
+                  </ValidationError>
+                )}
               </li>
             );
           })}

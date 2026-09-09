@@ -111,12 +111,10 @@ function parseCentsText(text: string): number {
 
 /** Reads the nine figures §0.29 names off whichever screen is showing them
  * — a payroll run's own calculated member, or a finalized payroll — both of
- * which share this one `Figures` component. Waits for exactly nine to
- * exist first: a bare read the instant Calculate is clicked would otherwise
- * race the response and see none. */
+ * which share this one `Figures` component. Each named group is its own wait:
+ * counting every `definition` on the page would accidentally include facts
+ * outside the figures component as the finalized screen grows. */
 async function readFigures(page: Page): Promise<Figures> {
-  const definitions = page.getByRole('definition');
-  await expect(definitions).toHaveCount(FIGURE_FIELDS.length);
   const figures = {} as Figures;
   for (const { field, name } of FIGURE_FIELDS) {
     // By the name a person reads beside the amount, never by position in the
@@ -219,7 +217,8 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
 
   // Add a taxable allowance.
   await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
-  await page.getByLabel('Taxable allowance').fill('200.00');
+  await page.getByLabel('Allowance label').fill('standby allowance');
+  await page.getByLabel('Amount', { exact: true }).fill('200.00');
   await page.getByRole('button', { name: 'Save earnings' }).click();
   await expect(page.getByText('Earnings saved.')).toBeVisible();
 
@@ -262,9 +261,10 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // Change the line shape without changing its total. This specifically
   // proves Calculate clears the stale state from its own success rather
   // than relying on an equal Figures object receiving a new identity.
-  await page.getByRole('textbox', { name: 'Taxable allowance', exact: true }).fill('100.00');
+  await page.getByRole('textbox', { name: 'Amount', exact: true }).fill('100.00');
   await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
-  await page.getByRole('textbox', { name: 'Taxable allowance', exact: true }).nth(1).fill('100.00');
+  await page.getByRole('textbox', { name: 'Allowance label', exact: true }).nth(1).fill('travel');
+  await page.getByRole('textbox', { name: 'Amount', exact: true }).nth(1).fill('100.00');
   await page.getByRole('button', { name: 'Save earnings' }).click();
   await expect(
     page.getByText('Earnings changed since these figures were calculated.'),

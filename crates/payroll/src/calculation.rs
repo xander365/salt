@@ -2385,6 +2385,8 @@ mod tests {
             (
                 unlabeled.gross_remuneration,
                 unlabeled.taxable_remuneration,
+                unlabeled.employee_social_security.trace.basic_pay,
+                unlabeled.employee_social_security.trace.base,
                 unlabeled.paye.amount,
                 unlabeled.employee_social_security.amount,
                 unlabeled.employer_social_security.amount,
@@ -2393,6 +2395,8 @@ mod tests {
             (
                 labeled.gross_remuneration,
                 labeled.taxable_remuneration,
+                labeled.employee_social_security.trace.basic_pay,
+                labeled.employee_social_security.trace.base,
                 labeled.paye.amount,
                 labeled.employee_social_security.amount,
                 labeled.employer_social_security.amount,

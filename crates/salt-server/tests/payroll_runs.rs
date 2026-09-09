@@ -565,7 +565,7 @@ async fn setting_earnings_replaces_the_whole_list() {
             true,
             serde_json::json!({
                 "earnings": [
-                    { "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" },
+                    { "kind": "taxableAllowance", "amountCents": 5000, "label": "  standby  " },
                     { "kind": "taxableAllowance", "amountCents": 2500, "label": "travel" },
                 ],
             }),
@@ -584,6 +584,8 @@ async fn setting_earnings_replaces_the_whole_list() {
     .await;
     let earnings = after_first["members"][0]["earnings"].as_array().unwrap();
     assert_eq!(earnings.len(), 2);
+    assert_eq!(earnings[0]["label"], "standby");
+    assert_eq!(earnings[1]["label"], "travel");
 
     // Replaces, not merges: a second, shorter call leaves no stale lines.
     let second = router()
@@ -929,7 +931,9 @@ async fn an_earning_line_salt_cannot_represent_is_a_bad_request() {
         serde_json::json!({ "earnings": [{ "kind": "bonus", "amountCents": 1000 }] }),
         serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": -1 }] }),
         serde_json::json!({ "earnings": [{ "kind": "taxableAllowance" }] }),
+        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000 }] }),
         serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "  " }] }),
+        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "x".repeat(101) }] }),
     ] {
         let response = router()
             .await
