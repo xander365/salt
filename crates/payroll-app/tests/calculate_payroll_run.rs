@@ -5,8 +5,8 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    DayOfMonth, Earning, EmployerId, EmploymentId, Money, PayPeriod, PayrollError, PeriodEndDay,
-    PriorEmployment, TaxYear, UnsupportedDeductionStatus,
+    DayOfMonth, EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod, PayrollError,
+    PeriodEndDay, PriorEmployment, TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunCalculationRefusal, PayrollRunId, SaltDatabase,
@@ -252,9 +252,10 @@ async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation
         &db,
         &run_id,
         &employment_id,
-        vec![Earning::TaxableAllowance(
-            Money::from_cents(250000).unwrap(),
-        )],
+        vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(250000).unwrap(),
+            label: None,
+        }],
     )
     .await
     .unwrap();
@@ -473,7 +474,10 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
         &db,
         &run_id,
         &employment_id,
-        vec![Earning::TaxableAllowance(Money::from_cents(50000).unwrap())],
+        vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(50000).unwrap(),
+            label: None,
+        }],
     )
     .await
     .unwrap();

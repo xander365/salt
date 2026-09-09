@@ -13,10 +13,9 @@
 //! method is a decision, not a preference (issue #53's own Deep
 //! Instructions).
 //!
-//! A `BasicPay` line in the request body is parsed here, not dropped or
-//! pre-checked — it reaches `payroll_app::set_run_earnings`, which refuses
-//! it, because that use case is what knows a `BasicPay` line is derived from
-//! `CompensationTerms` and is also the social security base.
+//! The request body contains only taxable allowance instructions. `BasicPay`
+//! is derived by the calculator from `CompensationTerms`, so it cannot be
+//! expressed by this input boundary.
 //!
 //! Every handler here takes its `EmployerId` from
 //! [`AuthorizedEmployerContext`] and never from the path (ADR-0017). `GET`
@@ -42,7 +41,7 @@ use std::collections::HashMap;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, State};
 use chrono::NaiveDate;
-use payroll::{Earning, EmployerId, EmploymentId, Money};
+use payroll::{EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money};
 use payroll_app::{
     PayrollAppError, PayrollFigures, PayrollRunBlocker, PayrollRunDetail, RunStatus,
 };
@@ -66,35 +65,39 @@ fn status_str(status: RunStatus) -> &'static str {
     }
 }
 
-/// One classified Earning line on the wire: `{"kind": "taxableAllowance",
-/// "amountCents": 2000}`. Both directions share this shape — the response
-/// echoes back exactly what a request would set — so `basicPay` round-trips
-/// for display even though [`parse_earning`] lets a request name it only so
-/// `set_run_earnings` can refuse it, never so the handler drops it silently.
+/// One taxable allowance instruction on the wire:
+/// `{"kind": "taxableAllowance", "amountCents": 2000, "label": "standby allowance"}`.
+/// Responses use a nullable label so a version-1 unlabelled allowance can be
+/// displayed honestly; a new request must provide a valid non-blank label.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EarningLineDto {
     kind: String,
     amount_cents: i64,
+    label: Option<String>,
 }
 
-fn parse_earning(line: EarningLineDto) -> Result<Earning, ApiError> {
+fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
     let amount = Money::from_cents(line.amount_cents).map_err(|_| ApiError::malformed_request())?;
-    match line.kind.as_str() {
-        "basicPay" => Ok(Earning::BasicPay(amount)),
-        "taxableAllowance" => Ok(Earning::TaxableAllowance(amount)),
-        _ => Err(ApiError::malformed_request()),
+    if line.kind != "taxableAllowance" {
+        return Err(ApiError::malformed_request());
     }
+    let label = line
+        .label
+        .ok_or_else(ApiError::malformed_request)
+        .and_then(|label| EarningLabel::new(label).map_err(|_| ApiError::malformed_request()))?;
+    Ok(EarningInstruction::TaxableAllowance {
+        amount,
+        label: Some(label),
+    })
 }
 
-fn earning_to_dto(earning: Earning) -> EarningLineDto {
-    let (kind, amount) = match earning {
-        Earning::BasicPay(amount) => ("basicPay", amount),
-        Earning::TaxableAllowance(amount) => ("taxableAllowance", amount),
-    };
+fn earning_to_dto(earning: EarningInstruction) -> EarningLineDto {
+    let EarningInstruction::TaxableAllowance { amount, label } = earning;
     EarningLineDto {
-        kind: kind.to_string(),
+        kind: "taxableAllowance".to_string(),
         amount_cents: amount.cents(),
+        label: label.map(|label| label.to_string()),
     }
 }
 

@@ -15,7 +15,7 @@ use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::finalize::FinalizedPayrollId;
 use crate::payroll_run::{LockedRun, PayrollRunId, RunKind, lock_and_reopen_run};
-use payroll::{Earning, EmployerId, EmploymentId, PayPeriod};
+use payroll::{EarningInstruction, EmployerId, EmploymentId, PayPeriod};
 
 /// What happened to a Correction run's Earning lines when
 /// [`add_employment_to_correction_run`] tried to pre-populate them from a
@@ -230,12 +230,13 @@ pub(crate) async fn validate_correction_target(
 /// `PayrollInput` comes fresh from current master data (§6.5).
 ///
 /// Checked against [`crate::finalize::KNOWN_JSON_SNAPSHOT_VERSIONS`], never
-/// against `schema_version != SNAPSHOT_SCHEMA_VERSION` (issue #73): version 2
-/// added sibling columns beside `payroll_input_json`, not a reshape of it, so
-/// a target finalized at version 1 is exactly as readable here as one
-/// finalized at 2 — "the version freshly written" and "a version whose
-/// `earnings` field this build can decode" stopped being the same question
-/// the day a bump stopped implying a reshape.
+/// against `schema_version != SNAPSHOT_SCHEMA_VERSION` (issue #73/#74):
+/// version 2 added sibling columns beside `payroll_input_json` and carries
+/// the current labelled earning shape. The current instruction deserializer
+/// accepts both the old scalar allowance and the new labelled shape, so
+/// versions 1 and 2 are both readable here — "the version freshly written"
+/// and "a version whose `earnings` field this build can decode" are separate
+/// questions.
 async fn prepopulate_earnings(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
@@ -261,7 +262,8 @@ async fn prepopulate_earnings(
     let Some(earnings_json) = input_json.get("earnings") else {
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     };
-    let Ok(earnings): Result<Vec<Earning>, _> = serde_json::from_value(earnings_json.clone())
+    let Ok(earnings): Result<Vec<EarningInstruction>, _> =
+        serde_json::from_value(earnings_json.clone())
     else {
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     };
@@ -269,7 +271,8 @@ async fn prepopulate_earnings(
     for (index, earning) in earnings.iter().enumerate() {
         let line = i16::try_from(index)
             .expect("a payroll run holds far fewer than i16::MAX earning lines");
-        let earning_json = serde_json::to_value(earning).expect("Earning always serializes");
+        let earning_json =
+            serde_json::to_value(earning).expect("EarningInstruction always serializes");
         sqlx::query(
             "INSERT INTO payroll_run_earning (payroll_run_id, employment_id, line, earning_json)
              VALUES ($1::uuid, $2, $3, $4)",

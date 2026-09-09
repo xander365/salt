@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::deduction::{Deduction, StatutoryDeduction};
-use crate::earning::{Earning, RemunerationBases};
+use crate::earning::{Earning, EarningInstruction, RemunerationBases};
 use crate::employment::EmploymentSnapshot;
 use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
@@ -34,10 +34,10 @@ use crate::year_to_date::{
 pub struct PayrollInput {
     employment: EmploymentSnapshot,
     period: PayPeriod,
-    /// Earning lines beyond `BasicPay` — allowances. `calculate` adds the
-    /// `BasicPay` line itself from the Employment's `CompensationTerms` — a
-    /// caller cannot supply a second one here.
-    earnings: Vec<Earning>,
+    /// Earning instructions beyond `BasicPay` — allowances. `calculate`
+    /// adds the `BasicPay` line itself from the Employment's
+    /// `CompensationTerms`, and the input type cannot express a second one.
+    earnings: Vec<EarningInstruction>,
     year_to_date: YearToDateContext,
     /// The Employer's `PaySchedule`, used only to validate
     /// `CompensationTerms.EffectiveFrom` against INV-014. It never selects
@@ -55,7 +55,7 @@ impl PayrollInput {
     pub fn new(
         employment: EmploymentSnapshot,
         period: PayPeriod,
-        earnings: Vec<Earning>,
+        earnings: Vec<EarningInstruction>,
         year_to_date: YearToDateContext,
         schedule: PaySchedule,
         unsupported_deductions: UnsupportedDeductionStatus,
@@ -112,12 +112,6 @@ pub enum PayrollError {
     /// not this error; it is prorated instead
     /// (`docs/domain/payroll-calculation.md` §8.2).
     EmploymentDoesNotOverlapPeriod,
-    /// `PayrollInput.earnings` contained a `BasicPay` line. `calculate`
-    /// derives that line itself from the Employment's `CompensationTerms`,
-    /// which is also the social security base — a second one supplied here
-    /// would silently change both gross and that base, so it is refused
-    /// rather than added (INV-012).
-    DuplicateBasicPayLine,
     /// Recalculating cumulative PAYE against the corrected year-to-date
     /// figures produced a liability lower than what the context says was
     /// already withheld. Refund handling is not modeled anywhere in this
@@ -234,12 +228,6 @@ impl std::fmt::Display for PayrollError {
             }
             PayrollError::EmploymentDoesNotOverlapPeriod => {
                 write!(f, "employment does not overlap the pay period")
-            }
-            PayrollError::DuplicateBasicPayLine => {
-                write!(
-                    f,
-                    "BasicPay is derived by calculate() from the compensation terms and cannot also be supplied in PayrollInput.earnings"
-                )
             }
             PayrollError::PriorPayeExceedsRecalculatedLiability => {
                 write!(f, "prior PAYE exceeds recalculated year-to-date liability")
@@ -505,14 +493,6 @@ pub fn calculate(
     if !terms.cover_days(employed.first(), employed.last()) {
         return Err(PayrollError::CompensationTermsDoNotCoverPeriod);
     }
-    if input
-        .earnings
-        .iter()
-        .any(|earning| matches!(earning, Earning::BasicPay(_)))
-    {
-        return Err(PayrollError::DuplicateBasicPayLine);
-    }
-
     // Proration (`docs/domain/payroll-calculation.md` §8.2) applies to
     // BasicPay only, and only for a joiner or leaver —
     // `employed_days < period_days`. A continuing employee's
@@ -537,7 +517,12 @@ pub fn calculate(
     // kind are never merged: a payslip has to be able to show each one.
     let mut earning_lines = Vec::with_capacity(input.earnings.len() + 1);
     earning_lines.push(Earning::BasicPay(basic_pay));
-    earning_lines.extend(input.earnings.iter().copied());
+    earning_lines.extend(input.earnings.iter().map(|instruction| match instruction {
+        EarningInstruction::TaxableAllowance { amount, label } => Earning::TaxableAllowance {
+            amount: *amount,
+            label: label.clone(),
+        },
+    }));
 
     // Gross, taxable, and the social security base are accumulated
     // separately from the same lines — never one summation filtered three
@@ -684,6 +669,7 @@ pub fn validate_effective_from_is_a_period_start(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::earning::EarningLabel;
     use crate::employment::{
         CompensationTerms, EmployerId, EmploymentId, PersonId, PersonReference,
     };
@@ -699,6 +685,20 @@ mod tests {
 
     fn money(amount: Decimal) -> Money {
         Money::from_decimal(amount).unwrap()
+    }
+
+    fn allowance(amount: Decimal) -> EarningInstruction {
+        EarningInstruction::TaxableAllowance {
+            amount: money(amount),
+            label: None,
+        }
+    }
+
+    fn output_allowance(amount: Decimal) -> Earning {
+        Earning::TaxableAllowance {
+            amount: money(amount),
+            label: None,
+        }
     }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -863,16 +863,16 @@ mod tests {
         let (mut ssc_base, mut taxable, mut gross) = (Money::ZERO, Money::ZERO, Money::ZERO);
         let mut basic_pay_lines = 0;
         for line in &calc.earning_lines {
-            match *line {
+            match line {
                 Earning::BasicPay(amount) => {
                     basic_pay_lines += 1;
-                    ssc_base = ssc_base.checked_add(amount).unwrap();
-                    taxable = taxable.checked_add(amount).unwrap();
-                    gross = gross.checked_add(amount).unwrap();
+                    ssc_base = ssc_base.checked_add(*amount).unwrap();
+                    taxable = taxable.checked_add(*amount).unwrap();
+                    gross = gross.checked_add(*amount).unwrap();
                 }
-                Earning::TaxableAllowance(amount) => {
-                    taxable = taxable.checked_add(amount).unwrap();
-                    gross = gross.checked_add(amount).unwrap();
+                Earning::TaxableAllowance { amount, .. } => {
+                    taxable = taxable.checked_add(*amount).unwrap();
+                    gross = gross.checked_add(*amount).unwrap();
                 }
             }
         }
@@ -1440,8 +1440,7 @@ mod tests {
         let input = PayrollInput::new(
             employment_paying(dec!(25000.00)),
             test_period(),
-            // A duplicate BasicPay line, refused further down `calculate`.
-            vec![Earning::BasicPay(money(dec!(5000.00)))],
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::Unknown,
@@ -1559,8 +1558,7 @@ mod tests {
         let input = PayrollInput::new(
             employment_paying(dec!(25000.00)),
             test_period(),
-            // A duplicate BasicPay line, refused further down `calculate`.
-            vec![Earning::BasicPay(money(dec!(5000.00)))],
+            Vec::new(),
             YearToDateContext::new(
                 test_tax_year(),
                 Money::ZERO,
@@ -1916,7 +1914,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
-            vec![Earning::TaxableAllowance(money(dec!(800.00)))],
+            vec![allowance(dec!(800.00))],
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -1927,7 +1925,7 @@ mod tests {
             calc.earning_lines,
             vec![
                 Earning::BasicPay(money(dec!(3000.00))),
-                Earning::TaxableAllowance(money(dec!(800.00))),
+                output_allowance(dec!(800.00)),
             ]
         );
         // The allowance is paid in full: 3,000.00 + 800.00 gross and
@@ -2162,7 +2160,7 @@ mod tests {
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::TaxableAllowance(money(dec!(2000.00)))],
+            vec![allowance(dec!(2000.00))],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2178,7 +2176,7 @@ mod tests {
             calc.earning_lines,
             vec![
                 Earning::BasicPay(money(dec!(15000.00))),
-                Earning::TaxableAllowance(money(dec!(2000.00))),
+                output_allowance(dec!(2000.00)),
             ]
         );
         // The allowance raised PAYE by 400.00 over PC-001 and left both
@@ -2211,7 +2209,7 @@ mod tests {
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::TaxableAllowance(money(dec!(5000.00)))],
+            vec![allowance(dec!(5000.00))],
             ytd_context,
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2276,9 +2274,9 @@ mod tests {
             employment_paying(dec!(15000.00)),
             test_period(),
             vec![
-                Earning::TaxableAllowance(money(dec!(600.00))),
-                Earning::TaxableAllowance(money(dec!(700.00))),
-                Earning::TaxableAllowance(money(dec!(600.00))),
+                allowance(dec!(600.00)),
+                allowance(dec!(700.00)),
+                allowance(dec!(600.00)),
             ],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
@@ -2290,9 +2288,9 @@ mod tests {
             calc.earning_lines,
             vec![
                 Earning::BasicPay(money(dec!(15000.00))),
-                Earning::TaxableAllowance(money(dec!(600.00))),
-                Earning::TaxableAllowance(money(dec!(700.00))),
-                Earning::TaxableAllowance(money(dec!(600.00))),
+                output_allowance(dec!(600.00)),
+                output_allowance(dec!(700.00)),
+                output_allowance(dec!(600.00)),
             ]
         );
         assert_eq!(calc.gross_remuneration, money(dec!(16900.00)));
@@ -2307,7 +2305,7 @@ mod tests {
         let with_zero = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::TaxableAllowance(Money::ZERO)],
+            vec![allowance(dec!(0.00))],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2334,9 +2332,10 @@ mod tests {
         let input = PayrollInput::new(
             employment_paying(dec!(15000.00)),
             test_period(),
-            vec![Earning::TaxableAllowance(
-                Money::from_cents(i64::MAX).unwrap(),
-            )],
+            vec![EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(i64::MAX).unwrap(),
+                label: None,
+            }],
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2349,19 +2348,56 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_duplicate_basic_pay_line() {
-        let input = PayrollInput::new(
-            employment_paying(dec!(5000.00)),
-            test_period(),
-            vec![Earning::BasicPay(money(dec!(5000.00)))],
-            YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
-            test_schedule(),
+    fn an_allowance_label_changes_no_calculated_amount() {
+        let employment = employment_paying(dec!(15000.00));
+        let period = test_period();
+        let ytd = ytd(dec!(110000.00), dec!(0.00), 11);
+        let schedule = test_schedule();
+        let rules = test_rules();
+
+        let unlabeled = PayrollInput::new(
+            employment.clone(),
+            period,
+            vec![EarningInstruction::TaxableAllowance {
+                amount: money(dec!(2000.00)),
+                label: None,
+            }],
+            ytd,
+            schedule,
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+        let labeled = PayrollInput::new(
+            employment,
+            period,
+            vec![EarningInstruction::TaxableAllowance {
+                amount: money(dec!(2000.00)),
+                label: Some(EarningLabel::new("standby allowance").unwrap()),
+            }],
+            ytd,
+            schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
         );
 
+        let unlabeled = calculate(&unlabeled, &rules).unwrap();
+        let labeled = calculate(&labeled, &rules).unwrap();
+
         assert_eq!(
-            calculate(&input, &test_rules()),
-            Err(PayrollError::DuplicateBasicPayLine)
+            (
+                unlabeled.gross_remuneration,
+                unlabeled.taxable_remuneration,
+                unlabeled.paye.amount,
+                unlabeled.employee_social_security.amount,
+                unlabeled.employer_social_security.amount,
+                unlabeled.net_pay,
+            ),
+            (
+                labeled.gross_remuneration,
+                labeled.taxable_remuneration,
+                labeled.paye.amount,
+                labeled.employee_social_security.amount,
+                labeled.employer_social_security.amount,
+                labeled.net_pay,
+            )
         );
     }
 

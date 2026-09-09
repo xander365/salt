@@ -23,8 +23,8 @@ use crate::payroll_run::{
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_conn;
 use crate::year_to_date::build_year_to_date_context_conn;
 use payroll::{
-    Earning, EmploymentId, PayPeriod, PaySchedule, PayrollCalculation, PayrollInput, PayrollRules,
-    calculate, ruleset_for,
+    EarningInstruction, EmploymentId, PayPeriod, PaySchedule, PayrollCalculation, PayrollInput,
+    PayrollRules, calculate, ruleset_for,
 };
 
 /// Why one member's calculation was refused, named alongside the
@@ -158,7 +158,7 @@ pub async fn calculate_payroll_run(
 pub(crate) async fn run_earnings_by_member(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
-) -> Result<HashMap<String, Vec<Earning>>, PayrollAppError> {
+) -> Result<HashMap<String, Vec<EarningInstruction>>, PayrollAppError> {
     let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
         "SELECT employment_id, earning_json FROM payroll_run_earning
          WHERE payroll_run_id = $1::uuid ORDER BY employment_id, line",
@@ -167,10 +167,10 @@ pub(crate) async fn run_earnings_by_member(
     .fetch_all(&mut **tx)
     .await?;
 
-    let mut by_member: HashMap<String, Vec<Earning>> = HashMap::new();
+    let mut by_member: HashMap<String, Vec<EarningInstruction>> = HashMap::new();
     for (employment_id, earning_json) in rows {
-        let earning: Earning = serde_json::from_value(earning_json)
-            .expect("payroll_run_earning.earning_json is always a serialized Earning");
+        let earning: EarningInstruction = serde_json::from_value(earning_json)
+            .expect("payroll_run_earning.earning_json is always a serialized EarningInstruction");
         by_member.entry(employment_id).or_default().push(earning);
     }
     Ok(by_member)
@@ -202,7 +202,7 @@ pub(crate) async fn assemble_and_calculate(
     employment_id: &EmploymentId,
     period: PayPeriod,
     schedule: PaySchedule,
-    earnings: Vec<Earning>,
+    earnings: Vec<EarningInstruction>,
     rules: &PayrollRules,
 ) -> Result<(PayrollInput, PayrollCalculation), PayrollAppError> {
     let employment = get_employment_snapshot_conn(tx, employment_id, period.end()).await?;

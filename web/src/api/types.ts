@@ -228,11 +228,13 @@ export interface PayrollRunsResponse {
   payrollRuns: PayrollRunSummaryDto[];
 }
 
-export type EarningKind = 'basicPay' | 'taxableAllowance';
+export type EarningKind = 'taxableAllowance';
 
 export interface EarningLineDto {
   kind: EarningKind;
   amountCents: number;
+  /** Null only for unlabelled lines preserved from a version-1 snapshot. */
+  label: string | null;
 }
 
 /**

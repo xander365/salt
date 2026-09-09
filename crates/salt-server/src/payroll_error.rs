@@ -234,11 +234,6 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
                 "employmentId": employment_id.to_string(),
             })),
         ),
-        PayrollAppError::BasicPayCannotBeSetAsAnEarning => Classification::Mapped(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "basic_pay_cannot_be_set_as_an_earning",
-            None,
-        ),
         // §0.28: the client that lost a Finalize response reads this code
         // and shows the success that already happened, so `details` names
         // every `FinalizedPayroll` the run produced. `finalizedPayrollId`
@@ -763,7 +758,6 @@ fn classify_payroll_error(err: &PayrollError) -> (StatusCode, &'static str, Opti
         PayrollError::EmploymentDoesNotOverlapPeriod => {
             (unprocessable, "employment_does_not_overlap_period", None)
         }
-        PayrollError::DuplicateBasicPayLine => (unprocessable, "duplicate_basic_pay_line", None),
         PayrollError::PriorPayeExceedsRecalculatedLiability => (
             unprocessable,
             "prior_paye_exceeds_recalculated_liability",
@@ -969,11 +963,11 @@ mod tests {
     use axum::response::IntoResponse;
     use chrono::NaiveDate;
     use payroll::{
-        CompensationTerms, Earning, EmployerId, EmploymentId, EmploymentSnapshot, Money, PayPeriod,
-        PaySchedule, PayeTableId, PayrollCalculation, PayrollInput, PayrollRules, PeriodEndDay,
-        PersonId, PersonReference, PriorEmployment, PriorEmploymentFigures, SscRulesId, TaxYear,
-        UnsupportedDeductionKinds, UnsupportedDeductionStatus, YearToDateContext, calculate,
-        ruleset_for,
+        CompensationTerms, EarningInstruction, EmployerId, EmploymentId, EmploymentSnapshot, Money,
+        PayPeriod, PaySchedule, PayeTableId, PayrollCalculation, PayrollInput, PayrollRules,
+        PeriodEndDay, PersonId, PersonReference, PriorEmployment, PriorEmploymentFigures,
+        SscRulesId, TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+        YearToDateContext, calculate, ruleset_for,
     };
     use payroll_app::{DatabaseConfig, FinalizedPayrollId, OperatorId, PayrollRunId, SaltDatabase};
 
@@ -995,7 +989,7 @@ mod tests {
     /// but with its own earning lines, so a test can hold two inputs that
     /// genuinely differ. `PayrollInput`'s fields are private, which is the
     /// point: only its constructor builds one.
-    fn an_input_with_earnings(earnings: Vec<Earning>) -> PayrollInput {
+    fn an_input_with_earnings(earnings: Vec<EarningInstruction>) -> PayrollInput {
         let period = period();
         let compensation_terms =
             CompensationTerms::new(period.start(), None, Money::from_cents(1_500_000).unwrap())
@@ -1354,16 +1348,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn basic_pay_cannot_be_set_as_an_earning() {
-        check(
-            PayrollAppError::BasicPayCannotBeSetAsAnEarning,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "basic_pay_cannot_be_set_as_an_earning",
-            None,
-        );
-    }
-
     /// #49's rule that a raw frozen snapshot is never a response body
     /// reaches the `message` too: the mismatch `Display` diffs the frozen
     /// `PayrollInput` field by field, and none of those field names may
@@ -1372,9 +1356,10 @@ mod tests {
     #[tokio::test]
     async fn a_finalization_mismatch_never_spells_out_the_frozen_snapshot() {
         let (approved, _, _) = a_calculable_input_rules_and_calculation();
-        let current = an_input_with_earnings(vec![Earning::TaxableAllowance(
-            Money::from_cents(50_000).unwrap(),
-        )]);
+        let current = an_input_with_earnings(vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(50_000).unwrap(),
+            label: None,
+        }]);
         assert_ne!(approved, current, "the two inputs must actually differ");
 
         let api_err: ApiError = PayrollAppError::FinalizationInputMismatch {
@@ -1885,15 +1870,6 @@ mod tests {
         check_payroll_error(
             PayrollError::EmploymentDoesNotOverlapPeriod,
             "employment_does_not_overlap_period",
-            None,
-        );
-    }
-
-    #[test]
-    fn duplicate_basic_pay_line() {
-        check_payroll_error(
-            PayrollError::DuplicateBasicPayLine,
-            "duplicate_basic_pay_line",
             None,
         );
     }

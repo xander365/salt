@@ -760,7 +760,7 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             &employment_id,
             &cookie,
             true,
-            json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 20_000_i64 }] }),
+            json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 20_000_i64, "label": "standby" }] }),
         ))
         .await
         .unwrap();

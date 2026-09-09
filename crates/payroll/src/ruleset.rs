@@ -516,7 +516,10 @@ mod tests {
 
             let mut earnings = vec![Earning::BasicPay(case.basic_pay)];
             if let Some(allowance) = case.taxable_allowance {
-                earnings.push(Earning::TaxableAllowance(allowance));
+                earnings.push(Earning::TaxableAllowance {
+                    amount: allowance,
+                    label: None,
+                });
             }
             let basic_wage = RemunerationBases::accumulate(&earnings)
                 .unwrap()

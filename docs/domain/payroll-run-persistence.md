@@ -420,12 +420,14 @@ that period's snapshot. Corrections follow §6.5.
 ```text
 PayrollRunEarning
 - PayrollRunId, EmploymentId, line
-- the classified Earning
+- the EarningInstruction: TaxableAllowance amount and human label
 ```
 
 **Run-scoped**, because that is what an allowance is: a fact about paying this
 Employment for this period. `BasicPay` is never here — `calculate` adds it from
-the `CompensationTerms` and refuses a second one (`calculation.rs:37`).
+the `CompensationTerms`, and the input type cannot express a second one. New
+instructions require a non-blank human label; the optional label in the
+deserialization shape exists only to preserve unlabelled version-1 history.
 
 **Absence means no additional earnings, and that is a complete statement.** This
 is a deliberate asymmetry with §4.5b and §4.5c, and the reason is the difference
@@ -1098,7 +1100,7 @@ FinalizedPayroll
 
 - PayeTableId, SscRulesId
 - salt_version
-- snapshot_schema_version           integer, 1 or 2 (issue #73)
+- snapshot_schema_version           integer, 1 or 2 (issue #74)
 
 - employer_particulars_json         JSONB, nullable (issue #73)
 - person_particulars_json           JSONB, nullable (issue #73)
@@ -1131,18 +1133,15 @@ is a legitimate state, not a defect.
 **A reader keys presence, never the version integer.** "Are the frozen
 particulars present" is answered by testing the column itself (`IS NULL` or,
 in Rust, matching on `Option`), never by comparing `snapshot_schema_version`
-to 2. Version 2 is the shape this entire milestone writes; later tickets in
-the same milestone add further optional fields inside version 2 rather than
-bumping again, so a version-keyed presence check would stop being honest the
-day the first of those lands. The version integer keeps exactly the one job
-§9.1 always gave it: naming which decoder reads `payroll_input_json` and
-`payroll_calculation_json`. Both 1 and 2 share the same decoder — the bump
-added sibling columns, it never reshaped either blob — so
-`calculation_from_snapshot` and `prepopulate_earnings` both check a row's
+to 2. Version 2 is the first shape with the sibling particulars columns and
+the current labelled earning shape. The version integer keeps exactly the one
+job §9.1 always gave it: naming which decoder reads `payroll_input_json` and
+`payroll_calculation_json`. Versions 1 and 2 share the current decoder because
+it accepts both the old scalar allowance and the new labelled allowance shape,
+so `calculation_from_snapshot` and `prepopulate_earnings` check a row's
 version against the *set* of versions their decoder reads
 (`KNOWN_JSON_SNAPSHOT_VERSIONS = {1, 2}`), not against
-`SNAPSHOT_SCHEMA_VERSION` (the version this build currently *writes*) — a
-target finalized at version 1 is exactly as readable as one finalized at 2.
+`SNAPSHOT_SCHEMA_VERSION` (the version this build currently *writes*).
 
 **PersonParticulars always freezes something.** `full_name` is set the
 moment `create_employment` creates the Person and is never absent, so
@@ -1203,7 +1202,8 @@ types.
 
 **There are no in-place JSON migrations, ever.** This is forced, not chosen: the
 application has no `UPDATE` grant on the table. A shape change means new rows
-carry version 2 and readers branch on the version.
+carry the next schema version and readers preserve the old shape through a
+compatible decoder or an explicit version-specific arm.
 
 ### 9.2 SaltVersion
 
@@ -1593,3 +1593,4 @@ The result is testable entirely from Rust plus PostgreSQL.
 | 40 | A Correction run's earnings are pre-populated from the reversed snapshot, degrading to empty when the snapshot schema is no longer readable |
 | 41 | Editing a `Calculated` run's earnings or membership is accepted and reopens it as `Draft`; `Finalized` is the one absolute refusal |
 | 42 | `EmployerParticulars`, `PersonParticulars` and `PayslipTemplateVersion` freeze onto `FinalizedPayroll` at version 2; all three columns are nullable forever and never backfilled, and a reader keys their presence, never `snapshot_schema_version` (§9.0, issue #73) |
+| 43 | Labelled taxable allowance instructions are separate from calculator output lines; BasicPay cannot be expressed as input, and version-1 scalar allowance snapshots remain readable as unlabelled (§4.5d, issue #74) |

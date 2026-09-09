@@ -4,13 +4,9 @@
 // the one an Operator just typed — editing twice this way can never leave a
 // stale line behind (issue #65's own first acceptance criterion).
 //
-// The whole list this form sends is every `taxableAllowance` line it holds,
-// and that is the whole of what a member's Earnings can be: `basicPay` is
-// derived from CompensationTerms, `set_run_earnings` refuses a request
-// carrying one, and nothing therefore ever stores one for a member to read
-// back (`crates/payroll-app/src/payroll_run.rs`'s own `set_run_earnings`).
-// Echoing a `basicPay` line back into the `PUT` would not preserve it — it
-// would guarantee the save was refused.
+// The whole list this form sends is every labelled `taxableAllowance` line it
+// holds, and that is the whole of what a member's earning instructions can
+// be. Basic pay is derived from CompensationTerms and cannot be entered here.
 //
 // This form does no arithmetic, previews no PAYE and recomputes no net pay
 // when an allowance is typed (§0's Further Notes) — it sends amounts and
@@ -49,9 +45,6 @@ function earningsFailureMessage(caught: unknown): string {
     case 'employment_not_an_active_run_member':
       return 'This member is no longer part of this run. Reload the page.';
 
-    case 'basic_pay_cannot_be_set_as_an_earning':
-      return 'Basic pay is set from Pay on the Employment screen, not here.';
-
     default:
       return 'Something went wrong. Please try again.';
   }
@@ -73,6 +66,13 @@ interface LineError {
   message: string;
 }
 
+interface AllowanceDraft {
+  amount: string;
+  label: string;
+}
+
+const MAX_LABEL_LENGTH = 100;
+
 export function EarningsForm({
   payrollRunId,
   employmentId,
@@ -89,7 +89,10 @@ export function EarningsForm({
   const [allowances, setAllowances] = useState(() =>
     earnings
       .filter((line) => line.kind === 'taxableAllowance')
-      .map((line) => safeAmountText(line.amountCents)),
+      .map((line) => ({
+        amount: safeAmountText(line.amountCents),
+        label: line.label ?? '',
+      })),
   );
   const [lineError, setLineError] = useState<LineError | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +106,7 @@ export function EarningsForm({
   }
 
   function addAllowance() {
-    setAllowances((prev) => [...prev, '']);
+    setAllowances((prev) => [...prev, { amount: '', label: '' }]);
     edited();
   }
 
@@ -112,9 +115,11 @@ export function EarningsForm({
     edited();
   }
 
-  function editAllowance(index: number, value: string) {
+  function editAllowance(index: number, field: keyof AllowanceDraft, value: string) {
     setAllowances((prev) =>
-      prev.map((amount, candidate) => (candidate === index ? value : amount)),
+      prev.map((allowance, candidate) =>
+        candidate === index ? { ...allowance, [field]: value } : allowance,
+      ),
     );
     edited();
   }
@@ -128,9 +133,22 @@ export function EarningsForm({
     setError(null);
     setSaved(false);
 
-    const amountsCents: number[] = [];
-    for (const [index, amount] of allowances.entries()) {
-      const cents = parseCentsInput(amount);
+    const request: EarningLineDto[] = [];
+    for (const [index, allowance] of allowances.entries()) {
+      const label = allowance.label.trim();
+      if (label.length === 0) {
+        setLineError({ index, message: 'Enter a label for this taxable allowance.' });
+        return;
+      }
+      if (Array.from(label).length > MAX_LABEL_LENGTH) {
+        setLineError({
+          index,
+          message: `Use ${MAX_LABEL_LENGTH} characters or fewer for the allowance label.`,
+        });
+        return;
+      }
+
+      const cents = parseCentsInput(allowance.amount);
       if (cents === null) {
         setLineError({
           index,
@@ -138,22 +156,20 @@ export function EarningsForm({
         });
         return;
       }
-      amountsCents.push(cents);
+      request.push({ kind: 'taxableAllowance', amountCents: cents, label });
     }
     setLineError(null);
 
     // The whole list, every time (issue #65's own first acceptance
     // criterion): `PUT` replaces what is stored, so a line an Operator
     // removed is gone precisely because this body does not carry it.
-    const request: EarningLineDto[] = amountsCents.map((amountCents) => ({
-      kind: 'taxableAllowance' as const,
-      amountCents,
-    }));
     const changed =
       request.length !== earnings.length ||
       request.some(
         (line, index) =>
-          line.kind !== earnings[index]?.kind || line.amountCents !== earnings[index]?.amountCents,
+          line.kind !== earnings[index]?.kind ||
+          line.amountCents !== earnings[index]?.amountCents ||
+          line.label !== earnings[index]?.label,
       );
 
     try {
@@ -173,24 +189,38 @@ export function EarningsForm({
         <p className="text-sm text-muted-foreground">No taxable allowances on this line.</p>
       ) : (
         <ul className="flex flex-col gap-2">
-          {allowances.map((amount, index) => {
-            const inputId = `${employmentId}-allowance-${index}`;
+          {allowances.map((allowance, index) => {
+            const labelId = `${employmentId}-allowance-label-${index}`;
+            const amountId = `${employmentId}-allowance-amount-${index}`;
             const invalid = lineError !== null && lineError.index === index;
             return (
               <li key={index} className="flex flex-col gap-1">
-                <div className="flex items-end gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                   <div className="flex flex-col gap-1.5">
-                    <Label htmlFor={inputId}>Taxable allowance</Label>
+                    <Label htmlFor={labelId}>Allowance label</Label>
                     <Input
-                      id={inputId}
+                      id={labelId}
+                      type="text"
+                      placeholder="e.g. standby"
+                      className="w-48"
+                      value={allowance.label}
+                      aria-invalid={invalid || undefined}
+                      aria-describedby={invalid ? errorId : undefined}
+                      onChange={(event) => editAllowance(index, 'label', event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor={amountId}>Amount</Label>
+                    <Input
+                      id={amountId}
                       type="text"
                       inputMode="decimal"
                       placeholder="0.00"
                       className="w-32"
-                      value={amount}
+                      value={allowance.amount}
                       aria-invalid={invalid || undefined}
                       aria-describedby={invalid ? errorId : undefined}
-                      onChange={(event) => editAllowance(index, event.target.value)}
+                      onChange={(event) => editAllowance(index, 'amount', event.target.value)}
                     />
                   </div>
                   <Button

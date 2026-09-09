@@ -5,8 +5,8 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    Earning, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment, TaxYear,
-    UnsupportedDeductionStatus,
+    EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment,
+    TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
     EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayrollAppError, PayrollRunId,
@@ -993,7 +993,10 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
         &db,
         &ordinary_run_id,
         &employment_id,
-        vec![Earning::TaxableAllowance(Money::from_cents(20000).unwrap())],
+        vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(20000).unwrap(),
+            label: None,
+        }],
     )
     .await
     .unwrap();
@@ -1039,7 +1042,11 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     .unwrap();
     assert_eq!(
         earning_json,
-        serde_json::to_value(Earning::TaxableAllowance(Money::from_cents(20000).unwrap())).unwrap()
+        serde_json::to_value(EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(20000).unwrap(),
+            label: None,
+        })
+        .unwrap()
     );
 }
 

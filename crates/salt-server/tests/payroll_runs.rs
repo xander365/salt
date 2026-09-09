@@ -565,8 +565,8 @@ async fn setting_earnings_replaces_the_whole_list() {
             true,
             serde_json::json!({
                 "earnings": [
-                    { "kind": "taxableAllowance", "amountCents": 5000 },
-                    { "kind": "taxableAllowance", "amountCents": 2500 },
+                    { "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" },
+                    { "kind": "taxableAllowance", "amountCents": 2500, "label": "travel" },
                 ],
             }),
         ))
@@ -595,7 +595,7 @@ async fn setting_earnings_replaces_the_whole_list() {
             &cookie,
             true,
             serde_json::json!({
-                "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000 }],
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "travel" }],
             }),
         ))
         .await
@@ -614,6 +614,7 @@ async fn setting_earnings_replaces_the_whole_list() {
     assert_eq!(earnings.len(), 1);
     assert_eq!(earnings[0]["kind"], "taxableAllowance");
     assert_eq!(earnings[0]["amountCents"], 1000);
+    assert_eq!(earnings[0]["label"], "travel");
 }
 
 #[tokio::test]
@@ -641,11 +642,9 @@ async fn setting_earnings_without_the_salt_request_header_is_refused() {
 }
 
 /// `calculate` derives `BasicPay` itself from `CompensationTerms`, so a
-/// `BasicPay` line in the request body reaches `set_run_earnings` and is
-/// refused there (issue #53's own Deep Instructions) — never pre-checked or
-/// silently dropped by the handler.
+/// `BasicPay` line is not part of the earning-instruction input shape.
 #[tokio::test]
-async fn a_basic_pay_line_is_refused() {
+async fn a_basic_pay_line_is_a_malformed_request() {
     let (cookie, employer_id) = an_authorized_operator().await;
     let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
     let run_id = create_run(&employer_id, &cookie).await;
@@ -665,12 +664,9 @@ async fn a_basic_pay_line_is_refused() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let json = body_json(response).await;
-    assert_eq!(
-        json["error"]["code"],
-        "basic_pay_cannot_be_set_as_an_earning"
-    );
+    assert_eq!(json["error"]["code"], "malformed_request");
 }
 
 #[tokio::test]
@@ -933,6 +929,7 @@ async fn an_earning_line_salt_cannot_represent_is_a_bad_request() {
         serde_json::json!({ "earnings": [{ "kind": "bonus", "amountCents": 1000 }] }),
         serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": -1 }] }),
         serde_json::json!({ "earnings": [{ "kind": "taxableAllowance" }] }),
+        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "  " }] }),
     ] {
         let response = router()
             .await
@@ -974,7 +971,7 @@ async fn a_malformed_earning_line_leaves_the_existing_lines_alone() {
             &cookie,
             true,
             serde_json::json!({
-                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000 }],
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
             }),
         ))
         .await
@@ -991,7 +988,7 @@ async fn a_malformed_earning_line_leaves_the_existing_lines_alone() {
             true,
             serde_json::json!({
                 "earnings": [
-                    { "kind": "taxableAllowance", "amountCents": 1000 },
+                    { "kind": "taxableAllowance", "amountCents": 1000, "label": "travel" },
                     { "kind": "bonus", "amountCents": 1000 },
                 ],
             }),
@@ -1031,7 +1028,7 @@ async fn setting_no_earnings_at_all_clears_the_list() {
             &cookie,
             true,
             serde_json::json!({
-                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000 }],
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
             }),
         ))
         .await

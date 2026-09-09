@@ -4,7 +4,7 @@
 //! through the public API a later ticket calls, not raw SQL.
 
 use chrono::NaiveDate;
-use payroll::{DayOfMonth, Earning, EmploymentId, Money, PayPeriod, PeriodEndDay};
+use payroll::{DayOfMonth, EarningInstruction, EmploymentId, Money, PayPeriod, PeriodEndDay};
 use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunId, SaltDatabase, create_employer,
     create_employment, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
@@ -25,6 +25,13 @@ fn twenty_sixth_schedule() -> payroll::PaySchedule {
 /// 2026-01-26 to 2026-02-25, one of `twenty_sixth_schedule()`'s own periods.
 fn march_period() -> PayPeriod {
     PayPeriod::new(date(2026, 1, 26), date(2026, 2, 25)).unwrap()
+}
+
+fn allowance(cents: i64) -> EarningInstruction {
+    EarningInstruction::TaxableAllowance {
+        amount: Money::from_cents(cents).unwrap(),
+        label: None,
+    }
 }
 
 async fn an_employer(db: &SaltDatabase) -> payroll::EmployerId {
@@ -565,10 +572,7 @@ async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_
 async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
-    let earnings = vec![
-        Earning::TaxableAllowance(Money::from_cents(50_000).unwrap()),
-        Earning::TaxableAllowance(Money::from_cents(10_000).unwrap()),
-    ];
+    let earnings = vec![allowance(50_000), allowance(10_000)];
 
     set_run_earnings(&db, &run_id, &employment_id, earnings.clone())
         .await
@@ -587,11 +591,11 @@ async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     assert_eq!(rows[0].0, 0);
     assert_eq!(rows[1].0, 1);
     assert_eq!(
-        serde_json::from_value::<Earning>(rows[0].1.clone()).unwrap(),
+        serde_json::from_value::<EarningInstruction>(rows[0].1.clone()).unwrap(),
         earnings[0]
     );
     assert_eq!(
-        serde_json::from_value::<Earning>(rows[1].1.clone()).unwrap(),
+        serde_json::from_value::<EarningInstruction>(rows[1].1.clone()).unwrap(),
         earnings[1]
     );
 }
@@ -621,16 +625,9 @@ async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool
 async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
-    set_run_earnings(
-        &db,
-        &run_id,
-        &employment_id,
-        vec![Earning::TaxableAllowance(
-            Money::from_cents(50_000).unwrap(),
-        )],
-    )
-    .await
-    .unwrap();
+    set_run_earnings(&db, &run_id, &employment_id, vec![allowance(50_000)])
+        .await
+        .unwrap();
 
     set_run_earnings(&db, &run_id, &employment_id, Vec::new())
         .await
@@ -664,16 +661,9 @@ async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
         .await
         .unwrap();
 
-    set_run_earnings(
-        &db,
-        &run_id,
-        &employment_id,
-        vec![Earning::TaxableAllowance(
-            Money::from_cents(10_000).unwrap(),
-        )],
-    )
-    .await
-    .unwrap();
+    set_run_earnings(&db, &run_id, &employment_id, vec![allowance(10_000)])
+        .await
+        .unwrap();
 
     let status: String = sqlx::query_scalar("SELECT status FROM payroll_run WHERE id = $1::uuid")
         .bind(run_id.as_str())
@@ -693,15 +683,7 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = set_run_earnings(
-        &db,
-        &run_id,
-        &employment_id,
-        vec![Earning::TaxableAllowance(
-            Money::from_cents(10_000).unwrap(),
-        )],
-    )
-    .await;
+    let result = set_run_earnings(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
 
     assert_eq!(
         result,
@@ -713,75 +695,12 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_basic_pay_line_is_refused(pool: PgPool) {
-    let db = SaltDatabase::from_pool(pool.clone());
-    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
-
-    let result = set_run_earnings(
-        &db,
-        &run_id,
-        &employment_id,
-        vec![Earning::BasicPay(Money::from_cents(500_000).unwrap())],
-    )
-    .await;
-
-    assert_eq!(result, Err(PayrollAppError::BasicPayCannotBeSetAsAnEarning));
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM payroll_run_earning
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(run_id.as_str())
-    .bind(employment_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 0, "a refused BasicPay line must not be written");
-}
-
-#[sqlx::test]
-async fn a_basic_pay_line_among_others_is_refused_and_writes_nothing(pool: PgPool) {
-    let db = SaltDatabase::from_pool(pool.clone());
-    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
-
-    let result = set_run_earnings(
-        &db,
-        &run_id,
-        &employment_id,
-        vec![
-            Earning::TaxableAllowance(Money::from_cents(10_000).unwrap()),
-            Earning::BasicPay(Money::from_cents(500_000).unwrap()),
-        ],
-    )
-    .await;
-
-    assert_eq!(result, Err(PayrollAppError::BasicPayCannotBeSetAsAnEarning));
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM payroll_run_earning
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(run_id.as_str())
-    .bind(employment_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 0);
-}
-
-#[sqlx::test]
 async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_refused(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (employer_id, run_id, _) = a_run_with_one_member(&db).await;
     let outsider = an_employment(&db, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
-    let result = set_run_earnings(
-        &db,
-        &run_id,
-        &outsider,
-        vec![Earning::TaxableAllowance(
-            Money::from_cents(10_000).unwrap(),
-        )],
-    )
-    .await;
+    let result = set_run_earnings(&db, &run_id, &outsider, vec![allowance(10_000)]).await;
 
     assert_eq!(
         result,
@@ -803,15 +722,7 @@ async fn setting_earnings_for_a_removed_member_is_refused(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = set_run_earnings(
-        &db,
-        &run_id,
-        &employment_id,
-        vec![Earning::TaxableAllowance(
-            Money::from_cents(10_000).unwrap(),
-        )],
-    )
-    .await;
+    let result = set_run_earnings(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
 
     assert_eq!(
         result,

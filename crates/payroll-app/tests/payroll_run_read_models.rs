@@ -10,9 +10,9 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    DayOfMonth, Earning, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment,
-    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKind, UnsupportedDeductionKinds,
-    UnsupportedDeductionStatus,
+    DayOfMonth, EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay,
+    PriorEmployment, PriorEmploymentFigures, TaxYear, UnsupportedDeductionKind,
+    UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunBlocker, PayrollRunId, RunStatus, SaltDatabase,
@@ -214,8 +214,14 @@ async fn a_runs_detail_names_every_member_and_their_earning_lines(pool: PgPool) 
         &run_id,
         &employment_id,
         vec![
-            Earning::TaxableAllowance(Money::from_cents(5000).unwrap()),
-            Earning::TaxableAllowance(Money::from_cents(2500).unwrap()),
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(5000).unwrap(),
+                label: None,
+            },
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(2500).unwrap(),
+                label: None,
+            },
         ],
     )
     .await
@@ -235,8 +241,14 @@ async fn a_runs_detail_names_every_member_and_their_earning_lines(pool: PgPool) 
     assert_eq!(
         detail.members[0].earnings,
         vec![
-            Earning::TaxableAllowance(Money::from_cents(5000).unwrap()),
-            Earning::TaxableAllowance(Money::from_cents(2500).unwrap()),
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(5000).unwrap(),
+                label: None,
+            },
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(2500).unwrap(),
+                label: None,
+            },
         ]
     );
 }

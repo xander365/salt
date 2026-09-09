@@ -17,9 +17,9 @@ use crate::prior_employment::get_prior_employment_on;
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use chrono::NaiveDate;
 use payroll::{
-    Deduction, Earning, EmployerId, EmploymentId, Money, PayPeriod, PaySchedule,
-    PayrollCalculation, PayrollError, PriorEmployment, PriorEmploymentFigures, TaxYear,
-    UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    Deduction, Earning, EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod,
+    PaySchedule, PayrollCalculation, PayrollError, PriorEmployment, PriorEmploymentFigures,
+    TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 
 app_id! {
@@ -626,25 +626,14 @@ pub async fn remove_employment_from_run(
 /// question here to confirm-none the way `PriorEmployment` and
 /// `UnsupportedDeductionStatus` have one.
 ///
-/// A `BasicPay` line is refused. `calculate` derives `BasicPay` itself from
-/// the Employment's `CompensationTerms` — it is also the social security
-/// base — so a second one supplied here would silently double it.
-///
 /// An Employment that is not an *active* member of the run is refused too:
 /// one that was never proposed, and one that was removed with a reason.
 pub async fn set_run_earnings(
     db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
-    earnings: Vec<Earning>,
+    earnings: Vec<EarningInstruction>,
 ) -> Result<(), PayrollAppError> {
-    if earnings
-        .iter()
-        .any(|earning| matches!(earning, Earning::BasicPay(_)))
-    {
-        return Err(PayrollAppError::BasicPayCannotBeSetAsAnEarning);
-    }
-
     let mut tx = db.pool().begin().await?;
     lock_and_reopen_run(&mut tx, payroll_run_id).await?;
 
@@ -689,7 +678,8 @@ pub async fn set_run_earnings(
     for (index, earning) in earnings.iter().enumerate() {
         let line = i16::try_from(index)
             .expect("a payroll run holds far fewer than i16::MAX earning lines");
-        let earning_json = serde_json::to_value(earning).expect("Earning always serializes");
+        let earning_json =
+            serde_json::to_value(earning).expect("EarningInstruction always serializes");
         sqlx::query(
             "INSERT INTO payroll_run_earning (payroll_run_id, employment_id, line, earning_json)
              VALUES ($1::uuid, $2, $3, $4)",
@@ -873,15 +863,15 @@ impl PayrollFigures {
         let mut basic_pay = Money::ZERO;
         let mut taxable_allowances = Money::ZERO;
         for line in &calculation.earning_lines {
-            match *line {
+            match line {
                 Earning::BasicPay(amount) => {
                     basic_pay = basic_pay
-                        .checked_add(amount)
+                        .checked_add(*amount)
                         .expect("see from_calculation's own doc comment: cannot overflow here")
                 }
-                Earning::TaxableAllowance(amount) => {
+                Earning::TaxableAllowance { amount, .. } => {
                     taxable_allowances = taxable_allowances
-                        .checked_add(amount)
+                        .checked_add(*amount)
                         .expect("see from_calculation's own doc comment: cannot overflow here")
                 }
             }
@@ -933,7 +923,7 @@ pub struct PayrollRunMember {
     pub employment_id: EmploymentId,
     pub finalized_payroll_id: Option<FinalizedPayrollId>,
     pub full_name: String,
-    pub earnings: Vec<Earning>,
+    pub earnings: Vec<EarningInstruction>,
     pub blockers: Vec<PayrollRunBlocker>,
     pub figures: Option<PayrollFigures>,
 }
@@ -1031,8 +1021,9 @@ pub async fn get_payroll_run_detail(
     {
         let earnings = earning_jsons
             .map(|value| {
-                serde_json::from_value::<Vec<Earning>>(value)
-                    .expect("payroll_run_earning.earning_json always serializes an Earning")
+                serde_json::from_value::<Vec<EarningInstruction>>(value).expect(
+                    "payroll_run_earning.earning_json always serializes an EarningInstruction",
+                )
             })
             .unwrap_or_default();
         let figures = calculation_json.map(|value| {

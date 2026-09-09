@@ -29,7 +29,9 @@ pub use calculation::{
     Warning, calculate, validate_effective_from_is_a_period_start,
 };
 pub use deduction::{Deduction, StatutoryDeduction};
-pub use earning::Earning;
+pub use earning::{
+    Earning, EarningInstruction, EarningLabel, EarningLabelError, MAX_EARNING_LABEL_LENGTH,
+};
 pub use employment::{
     CompensationTerms, CompensationTermsError, EmployerId, EmploymentId, EmploymentSnapshot,
     PersonId, PersonReference, RawCompensationTerms,

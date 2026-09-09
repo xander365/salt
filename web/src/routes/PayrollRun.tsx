@@ -117,7 +117,7 @@ function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
         // The wire order is the stored order and there is no id to key on,
         // and this list is never reordered or edited — it is read-only.
         <li key={index}>
-          Taxable allowance <Money cents={line.amountCents} />
+          Taxable allowance — {line.label ?? 'unlabelled'} <Money cents={line.amountCents} />
         </li>
       ))}
     </ul>

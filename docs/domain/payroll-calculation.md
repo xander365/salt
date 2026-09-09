@@ -260,7 +260,25 @@ EmploymentSnapshot
 
 ### 5.2 Earnings
 
-**v1 supports exactly two Earning kinds:**
+The calculator keeps the input instruction separate from its output line:
+
+```text
+EarningInstruction (input)
+- TaxableAllowance(amount, label?)
+
+Earning (output)
+- BasicPay
+- TaxableAllowance(amount, label?)
+```
+
+`BasicPay` is derived from `CompensationTerms`, so a `PayrollInput` cannot
+express a duplicate BasicPay line. A new run request must supply a non-blank
+human label for every taxable allowance. The optional label exists only so
+version-1 history can be read honestly: those old scalar allowance lines had
+no label and are displayed as unlabelled. Labels do not participate in any
+calculation.
+
+**v1 supports exactly two Earning output kinds:**
 
 ```text
 Earning
