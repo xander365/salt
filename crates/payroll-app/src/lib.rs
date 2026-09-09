@@ -37,7 +37,10 @@ mod year_to_date;
 pub use action_log::{ActionLogEntryRecord, ActionType, list_action_log_entries_for_target};
 pub use bootstrap::{BootstrapOutcome, BootstrapPeriodEndDay, bootstrap};
 pub use calculate::{PayrollRunCalculationRefusal, calculate_payroll_run};
-pub use compensation_terms::{correct_compensation_terms, record_compensation_terms};
+pub use compensation_terms::{
+    correct_compensation_terms, record_compensation_terms,
+    record_compensation_terms_with_ordinary_hours,
+};
 pub use correction::{EarningPrePopulation, add_employment_to_correction_run};
 pub use database::{DatabaseConfig, SaltDatabase, ping};
 pub use employer::{

@@ -21,6 +21,7 @@ const SECTION_FOR_CODE: Record<PayrollRunBlockerCode, string> = {
   unsupported_deduction_status_unknown: 'unsupported-deductions',
   unsupported_deductions_present: 'unsupported-deductions',
   no_compensation_terms_in_force: 'compensation-terms',
+  ordinary_hours_not_recorded: 'compensation-terms',
 };
 
 function kindsFromDetails(details: unknown): string[] {
@@ -54,6 +55,9 @@ export function blockerSentence(blocker: PayrollRunBlockerDto): string {
 
     case 'no_compensation_terms_in_force':
       return 'Pay has not been recorded.';
+
+    case 'ordinary_hours_not_recorded':
+      return 'Ordinary hours per week have not been recorded.';
 
     // The five codes above are the contract (§0.31); a sixth reaching the
     // browser is a version skew this screen cannot describe better than

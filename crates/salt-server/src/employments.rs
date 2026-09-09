@@ -115,6 +115,7 @@ pub(crate) struct EmploymentDetailResponse {
     start_date: NaiveDate,
     end_date: Option<NaiveDate>,
     current_basic_pay_cents: Option<i64>,
+    current_ordinary_hours: Option<String>,
 }
 
 /// `GET /api/employers/{e}/employments/{em}`: the Employment's dates, its
@@ -144,5 +145,8 @@ pub(crate) async fn get_employment(
         start_date: detail.start_date,
         end_date: detail.end_date,
         current_basic_pay_cents: detail.current_basic_pay.map(|money| money.cents()),
+        current_ordinary_hours: detail
+            .current_ordinary_hours
+            .map(|hours| hours.as_decimal().to_string()),
     }))
 }

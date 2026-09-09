@@ -4,11 +4,13 @@
 //! `get_employment_detail`.
 
 use chrono::NaiveDate;
-use payroll::{DayOfMonth, Money, PeriodEndDay, PersonId};
+use payroll::{DayOfMonth, Money, OrdinaryHours, PeriodEndDay, PersonId};
 use payroll_app::{
     EmploymentPerson, PayrollAppError, SaltDatabase, create_employer, create_employment,
     get_employment_detail, list_employments_for_employer, record_compensation_terms,
+    record_compensation_terms_with_ordinary_hours,
 };
+use rust_decimal::Decimal;
 use sqlx::{PgPool, Row};
 
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -314,6 +316,43 @@ async fn detail_reads_dates_the_persons_full_name_and_current_pay(pool: PgPool) 
     assert_eq!(detail.start_date, date(2026, 1, 26));
     assert_eq!(detail.end_date, Some(date(2026, 6, 25)));
     assert_eq!(detail.current_basic_pay, Some(basic_pay));
+}
+
+#[sqlx::test]
+async fn detail_keeps_the_ordinary_hours_recorded_beside_pay_after_a_reload(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let (_, employment_id) = create_employment(
+        &db,
+        &employer_id,
+        EmploymentPerson::New("Ada Lovelace".to_string()),
+        date(2026, 1, 26),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    record_compensation_terms_with_ordinary_hours(
+        &db,
+        &employment_id,
+        date(2026, 1, 26),
+        Money::from_cents(500_000).unwrap(),
+        Some(OrdinaryHours::new(Decimal::new(4_050, 2)).unwrap()),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let detail = get_employment_detail(&db, &employer_id, &employment_id, date(2026, 2, 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.current_ordinary_hours.map(OrdinaryHours::as_decimal),
+        Some(Decimal::new(4_050, 2))
+    );
 }
 
 #[sqlx::test]

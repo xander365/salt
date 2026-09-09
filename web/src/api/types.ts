@@ -137,6 +137,7 @@ export interface EmploymentDetailResponse {
   startDate: string;
   endDate: string | null;
   currentBasicPayCents: number | null;
+  currentOrdinaryHours: string | null;
 }
 
 export interface PayPeriodDto {
@@ -154,6 +155,7 @@ export interface DivergingPeriodsResponse {
 export interface RecordCompensationTermsRequest {
   effectiveFrom: string;
   basicPayCents: number;
+  ordinaryHours: string;
   acknowledgedDivergingPeriods?: PayPeriodDto[];
   reason?: string;
 }
@@ -238,7 +240,7 @@ export interface EarningLineDto {
 }
 
 /**
- * The five blocker codes (§0.31) and no others — the run detail's own
+ * The six blocker codes (§0.31) and no others — the run detail's own
  * contract. A blocker carries no `message` at all, only `code` and
  * `details`: the sentence an Operator reads is a lookup keyed by `code`,
  * never a rendering of a server string that may be reworded (§0.23, issue
@@ -249,7 +251,8 @@ export type PayrollRunBlockerCode =
   | 'prior_employment_treatment_unconfirmed'
   | 'unsupported_deduction_status_unknown'
   | 'unsupported_deductions_present'
-  | 'no_compensation_terms_in_force';
+  | 'no_compensation_terms_in_force'
+  | 'ordinary_hours_not_recorded';
 
 export interface PayrollRunBlockerDto {
   code: PayrollRunBlockerCode;

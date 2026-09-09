@@ -1,7 +1,75 @@
 //! The Employment facts the calculator needs for one PayPeriod.
 
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+/// The weekly ordinary hours a monthly `BasicPay` covers.
+///
+/// This is deliberately a distinct exact-decimal value rather than a bare
+/// `Decimal`: it is an agreed contractual assumption for a future hourly
+/// rate, never hours worked or paid in a payroll period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Decimal", into = "Decimal")]
+pub struct OrdinaryHours(Decimal);
+
+/// Why an [`OrdinaryHours`] value cannot be recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrdinaryHoursError {
+    ZeroOrNegative,
+    MoreThanOneWeek,
+    MoreThanTwoDecimalPlaces,
+}
+
+impl std::fmt::Display for OrdinaryHoursError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroOrNegative => write!(f, "ordinary hours must be greater than zero"),
+            Self::MoreThanOneWeek => write!(f, "ordinary hours must not exceed 168 per week"),
+            Self::MoreThanTwoDecimalPlaces => {
+                write!(
+                    f,
+                    "ordinary hours must have no more than two decimal places"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for OrdinaryHoursError {}
+
+impl OrdinaryHours {
+    pub fn new(hours: Decimal) -> Result<Self, OrdinaryHoursError> {
+        if hours <= Decimal::ZERO {
+            return Err(OrdinaryHoursError::ZeroOrNegative);
+        }
+        if hours > Decimal::new(168, 0) {
+            return Err(OrdinaryHoursError::MoreThanOneWeek);
+        }
+        if hours.scale() > 2 {
+            return Err(OrdinaryHoursError::MoreThanTwoDecimalPlaces);
+        }
+        Ok(Self(hours))
+    }
+
+    pub fn as_decimal(self) -> Decimal {
+        self.0
+    }
+}
+
+impl TryFrom<Decimal> for OrdinaryHours {
+    type Error = OrdinaryHoursError;
+
+    fn try_from(hours: Decimal) -> Result<Self, Self::Error> {
+        Self::new(hours)
+    }
+}
+
+impl From<OrdinaryHours> for Decimal {
+    fn from(hours: OrdinaryHours) -> Self {
+        hours.0
+    }
+}
 
 use crate::money::Money;
 use crate::pay_period::PayPeriod;
@@ -94,6 +162,7 @@ pub struct CompensationTerms {
     effective_from: NaiveDate,
     effective_until: Option<NaiveDate>,
     basic_pay: Money,
+    ordinary_hours: Option<OrdinaryHours>,
 }
 
 /// The wire shape of `CompensationTerms`, validated on the way in by the
@@ -104,6 +173,8 @@ pub struct RawCompensationTerms {
     pub effective_from: NaiveDate,
     pub effective_until: Option<NaiveDate>,
     pub basic_pay: Money,
+    #[serde(default)]
+    pub ordinary_hours: Option<OrdinaryHours>,
 }
 
 impl CompensationTerms {
@@ -119,6 +190,7 @@ impl CompensationTerms {
             effective_from,
             effective_until,
             basic_pay,
+            ordinary_hours: None,
         })
     }
 
@@ -132,6 +204,17 @@ impl CompensationTerms {
 
     pub fn basic_pay(&self) -> Money {
         self.basic_pay
+    }
+
+    pub fn ordinary_hours(&self) -> Option<OrdinaryHours> {
+        self.ordinary_hours
+    }
+
+    /// Attaches the agreed weekly hours read from the effective-dated row.
+    /// `None` remains meaningful for historical rows Salt must not invent.
+    pub fn with_ordinary_hours(mut self, ordinary_hours: Option<OrdinaryHours>) -> Self {
+        self.ordinary_hours = ordinary_hours;
+        self
     }
 
     /// Whether these terms are in force for every day from `from` to `to`
@@ -159,6 +242,7 @@ impl From<CompensationTerms> for RawCompensationTerms {
             effective_from: terms.effective_from,
             effective_until: terms.effective_until,
             basic_pay: terms.basic_pay,
+            ordinary_hours: terms.ordinary_hours,
         }
     }
 }
@@ -289,6 +373,28 @@ mod tests {
         CompensationTerms::new(date(2025, 1, 1), None, Money::from_cents(500000).unwrap()).unwrap()
     }
 
+    #[test]
+    fn ordinary_hours_are_exact_positive_weekly_hours() {
+        use rust_decimal_macros::dec;
+
+        assert_eq!(
+            OrdinaryHours::new(dec!(40.005)),
+            Err(OrdinaryHoursError::MoreThanTwoDecimalPlaces)
+        );
+        assert_eq!(
+            OrdinaryHours::new(dec!(0)),
+            Err(OrdinaryHoursError::ZeroOrNegative)
+        );
+        assert_eq!(
+            OrdinaryHours::new(dec!(168.01)),
+            Err(OrdinaryHoursError::MoreThanOneWeek)
+        );
+        assert_eq!(
+            OrdinaryHours::new(dec!(40.00)).unwrap().as_decimal(),
+            dec!(40.00)
+        );
+    }
+
     fn snapshot() -> EmploymentSnapshot {
         EmploymentSnapshot::new(
             EmploymentId::new("emp-1"),
@@ -326,6 +432,7 @@ mod tests {
             effective_from: date(2025, 3, 1),
             effective_until: Some(date(2025, 1, 1)),
             basic_pay: Money::ZERO,
+            ordinary_hours: None,
         })
         .unwrap();
         assert!(serde_json::from_str::<CompensationTerms>(&json).is_err());

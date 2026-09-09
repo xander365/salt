@@ -13,6 +13,7 @@ use sqlx::PgPool;
 /// table that already has rows in any running deployment.
 const THE_NAME_MIGRATION: &str = "0027_an_employer_has_a_name.sql";
 const THE_PERSON_MIGRATION: &str = "0031_person.sql";
+const THE_ORDINARY_HOURS_MIGRATION: &str = "0035_compensation_terms_ordinary_hours.sql";
 
 /// Every migration, as `(file name, SQL)`, in the order the migrator applies
 /// them. The version prefixes are zero-padded to a fixed width, so sorting the
@@ -43,6 +44,52 @@ fn migrations_in_order() -> Vec<(String, String)> {
         dir.display()
     );
     migrations
+}
+
+/// A historical terms row names its BasicPay but not the weekly hours it was
+/// agreed to cover. The upgrade must preserve that honest absence rather than
+/// fabricating a conventional 40-hour week.
+#[sqlx::test(migrations = false)]
+async fn historical_compensation_terms_are_not_backfilled_with_ordinary_hours(pool: PgPool) {
+    let migrations = migrations_in_order();
+    let ordinary_hours_migration = migrations
+        .iter()
+        .position(|(name, _)| name == THE_ORDINARY_HOURS_MIGRATION)
+        .unwrap_or_else(|| {
+            panic!("this test names {THE_ORDINARY_HOURS_MIGRATION}, which no longer exists")
+        });
+
+    for migration in &migrations[..ordinary_hours_migration] {
+        apply(&pool, migration).await;
+    }
+
+    sqlx::raw_sql(
+        "INSERT INTO employer (id, name, period_end_day_kind, period_end_day_value, created_by)
+         VALUES ('employer-1', 'Employer', 'day', 25, 'actor');
+         INSERT INTO person (id, employer_id, full_name, created_by)
+         VALUES ('person-1', 'employer-1', 'Historical Person', 'actor');
+         INSERT INTO employment (id, employer_id, person_id, start_date, created_by)
+         VALUES ('employment-1', 'employer-1', 'person-1', '2026-01-26', 'actor');
+         INSERT INTO compensation_terms (employment_id, effective_from, basic_pay, created_by)
+         VALUES ('employment-1', '2026-01-26', 500000, 'actor')",
+    )
+    .execute(&pool)
+    .await
+    .expect("record a CompensationTerms row under the pre-hours schema");
+
+    apply(&pool, &migrations[ordinary_hours_migration]).await;
+
+    let hours: Option<rust_decimal::Decimal> = sqlx::query_scalar(
+        "SELECT ordinary_hours FROM compensation_terms WHERE employment_id = 'employment-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("the historical CompensationTerms row remains readable after upgrade");
+    assert_eq!(hours, None, "the migration must not invent ordinary hours");
+
+    for migration in &migrations[ordinary_hours_migration + 1..] {
+        apply(&pool, migration).await;
+    }
 }
 
 /// Applies one migration. `raw_sql` is what carries a file holding several

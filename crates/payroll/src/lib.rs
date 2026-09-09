@@ -34,7 +34,7 @@ pub use earning::{
 };
 pub use employment::{
     CompensationTerms, CompensationTermsError, EmployerId, EmploymentId, EmploymentSnapshot,
-    PersonId, PersonReference, RawCompensationTerms,
+    OrdinaryHours, OrdinaryHoursError, PersonId, PersonReference, RawCompensationTerms,
 };
 pub use money::{Money, MoneyError, round_half_up};
 pub use pay_period::{PayPeriod, PayPeriodError, RawPayPeriod};

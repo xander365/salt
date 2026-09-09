@@ -4,9 +4,10 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, PersonId,
-    PersonReference,
+    CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, OrdinaryHours,
+    PersonId, PersonReference,
 };
+use rust_decimal::Decimal;
 use sqlx::{Acquire, PgConnection, Postgres};
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
@@ -187,6 +188,7 @@ pub struct EmploymentDetail {
     pub start_date: NaiveDate,
     pub end_date: Option<NaiveDate>,
     pub current_basic_pay: Option<Money>,
+    pub current_ordinary_hours: Option<OrdinaryHours>,
 }
 
 /// Confirms `employment_id` belongs to `employer_id`, refusing exactly like a
@@ -228,17 +230,24 @@ pub async fn get_employment_detail(
     employment_id: &EmploymentId,
     as_of: NaiveDate,
 ) -> Result<EmploymentDetail, PayrollAppError> {
-    type Row = (String, String, NaiveDate, Option<NaiveDate>, Option<i64>);
+    type Row = (
+        String,
+        String,
+        NaiveDate,
+        Option<NaiveDate>,
+        Option<i64>,
+        Option<Decimal>,
+    );
 
     let row: Option<Row> = sqlx::query_as(
         "SELECT person.full_name, employment.person_id, employment.start_date,
-                employment.end_date, in_force.basic_pay
+                employment.end_date, in_force.basic_pay, in_force.ordinary_hours
          FROM employment
          JOIN person
            ON person.id = employment.person_id
           AND person.employer_id = employment.employer_id
          LEFT JOIN LATERAL (
-             SELECT basic_pay
+             SELECT basic_pay, ordinary_hours
              FROM compensation_terms
              WHERE employment_id = employment.id AND effective_from <= $3
              ORDER BY effective_from DESC
@@ -252,7 +261,7 @@ pub async fn get_employment_detail(
     .fetch_optional(db.pool())
     .await?;
 
-    let (full_name, person_id, start_date, end_date, basic_pay) =
+    let (full_name, person_id, start_date, end_date, basic_pay, ordinary_hours) =
         row.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
 
     Ok(EmploymentDetail {
@@ -264,6 +273,11 @@ pub async fn get_employment_detail(
         current_basic_pay: basic_pay.map(|cents| {
             Money::from_cents(cents).expect(
                 "compensation_terms.basic_pay CHECK: the column holds no negative amount, so it is a Money",
+            )
+        }),
+        current_ordinary_hours: ordinary_hours.map(|hours| {
+            OrdinaryHours::new(hours).expect(
+                "compensation_terms.ordinary_hours CHECK: non-null values are positive weekly hours",
             )
         }),
     })
@@ -396,6 +410,7 @@ pub(crate) async fn get_employment_snapshot_conn(
         bool,
         Option<NaiveDate>,
         Option<i64>,
+        Option<Decimal>,
         Option<NaiveDate>,
     );
 
@@ -407,13 +422,14 @@ pub(crate) async fn get_employment_snapshot_conn(
                 employment.is_void,
                 in_force.effective_from,
                 in_force.basic_pay,
+                in_force.ordinary_hours,
                 (SELECT MIN(later.effective_from)
                  FROM compensation_terms later
                  WHERE later.employment_id = employment.id
                    AND later.effective_from > in_force.effective_from)
          FROM employment
          LEFT JOIN LATERAL (
-             SELECT effective_from, basic_pay
+             SELECT effective_from, basic_pay, ordinary_hours
              FROM compensation_terms
              WHERE employment_id = employment.id AND effective_from <= $2
              ORDER BY effective_from DESC
@@ -426,8 +442,17 @@ pub(crate) async fn get_employment_snapshot_conn(
     .fetch_optional(&mut *conn)
     .await?;
 
-    let (employer_id, person_id, start_date, end_date, is_void, effective_from, basic_pay, next) =
-        row.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
+    let (
+        employer_id,
+        person_id,
+        start_date,
+        end_date,
+        is_void,
+        effective_from,
+        basic_pay,
+        ordinary_hours,
+        next,
+    ) = row.ok_or_else(|| PayrollAppError::EmploymentNotFound(employment_id.clone()))?;
 
     if is_void {
         return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
@@ -446,7 +471,12 @@ pub(crate) async fn get_employment_snapshot_conn(
         "compensation_terms.basic_pay CHECK: the column holds no negative amount, so it is a Money",
     );
     let compensation_terms = CompensationTerms::new(effective_from, effective_until, basic_pay)
-        .expect("effective_until, when present, is a later effective_from minus one day");
+        .expect("effective_until, when present, is a later effective_from minus one day")
+        .with_ordinary_hours(ordinary_hours.map(|hours| {
+            OrdinaryHours::new(hours).expect(
+                "compensation_terms.ordinary_hours CHECK: non-null values are positive weekly hours",
+            )
+        }));
 
     Ok(EmploymentSnapshot::new(
         employment_id.clone(),

@@ -16,7 +16,9 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
     "migrate",
     "chrono",
+    "rust_decimal",
 ] }
+rust_decimal = "1"
 uuid = { version = "1", features = ["v7"] }
 argon2 = "0.6.0"
 rand = "0.8"

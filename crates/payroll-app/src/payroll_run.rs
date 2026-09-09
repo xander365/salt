@@ -817,6 +817,10 @@ pub enum PayrollRunBlocker {
     UnsupportedDeductionsPresent { kinds: UnsupportedDeductionKinds },
     /// No `CompensationTerms` row is in force at the period end.
     NoCompensationTermsInForce,
+    /// A future hourly-rate earning needs the terms row's agreed weekly
+    /// ordinary hours. Salary-only runs deliberately do not inspect this:
+    /// legacy rows are unknown, not invalid.
+    OrdinaryHoursNotRecorded,
 }
 
 /// The figures §0.29 names for one member's current calculation: Basic Pay,

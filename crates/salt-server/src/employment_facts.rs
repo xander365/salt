@@ -24,10 +24,12 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, State};
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, Money, PayPeriod, PriorEmployment, PriorEmploymentFigures, TaxYear,
-    UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    EmployerId, EmploymentId, Money, OrdinaryHours, PayPeriod, PriorEmployment,
+    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::error::ApiError;
@@ -117,6 +119,7 @@ pub(crate) struct RecordedResponse {}
 pub(crate) struct RecordCompensationTermsRequest {
     effective_from: NaiveDate,
     basic_pay_cents: i64,
+    ordinary_hours: String,
     #[serde(default)]
     acknowledged_diverging_periods: Vec<PayPeriodDto>,
     #[serde(default)]
@@ -140,12 +143,17 @@ pub(crate) async fn record_compensation_terms(
 
     let basic_pay =
         Money::from_cents(request.basic_pay_cents).map_err(|_| ApiError::malformed_request())?;
+    let ordinary_hours = Decimal::from_str(&request.ordinary_hours)
+        .ok()
+        .and_then(|hours| OrdinaryHours::new(hours).ok())
+        .ok_or_else(ApiError::malformed_request)?;
 
-    let diverging_periods = payroll_app::record_compensation_terms(
+    let diverging_periods = payroll_app::record_compensation_terms_with_ordinary_hours(
         state.db(),
         &employment_id,
         request.effective_from,
         basic_pay,
+        Some(ordinary_hours),
         &acknowledged_diverging_periods,
         &request.reason,
         &context.actor(),

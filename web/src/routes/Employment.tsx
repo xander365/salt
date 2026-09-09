@@ -111,6 +111,8 @@ export function Employment() {
               <dd className="money">
                 <CurrentPay cents={employment.data.currentBasicPayCents} />
               </dd>
+              <dt className="text-muted-foreground">Ordinary hours per week</dt>
+              <dd className="tabular-nums">{employment.data.currentOrdinaryHours ?? '—'}</dd>
             </dl>
           </div>
 

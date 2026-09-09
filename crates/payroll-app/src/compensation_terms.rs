@@ -20,7 +20,9 @@ use crate::freeze::{
     diverging_periods_json, live_finalized_periods_in_span, require_acknowledgement_of,
 };
 use chrono::NaiveDate;
-use payroll::{EmploymentId, Money, PayPeriod, validate_effective_from_is_a_period_start};
+use payroll::{
+    EmploymentId, Money, OrdinaryHours, PayPeriod, validate_effective_from_is_a_period_start,
+};
 
 /// Records a `CompensationTerms` row effective from `effective_from`. Refused
 /// as a domain refusal, not a database error, when `effective_from` is not a
@@ -74,6 +76,33 @@ pub async fn record_compensation_terms(
     employment_id: &EmploymentId,
     effective_from: NaiveDate,
     basic_pay: Money,
+    acknowledged_diverging_periods: &[PayPeriod],
+    reason: &str,
+    created_by: &str,
+) -> Result<Vec<PayPeriod>, PayrollAppError> {
+    record_compensation_terms_with_ordinary_hours(
+        db,
+        employment_id,
+        effective_from,
+        basic_pay,
+        None,
+        acknowledged_diverging_periods,
+        reason,
+        created_by,
+    )
+    .await
+}
+
+/// Records CompensationTerms with the agreed weekly ordinary hours where
+/// known. `None` is retained only for historical rows Salt cannot truthfully
+/// reconstruct; new operator-facing recording supplies `Some`.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_compensation_terms_with_ordinary_hours(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+    effective_from: NaiveDate,
+    basic_pay: Money,
+    ordinary_hours: Option<OrdinaryHours>,
     acknowledged_diverging_periods: &[PayPeriod],
     reason: &str,
     created_by: &str,
@@ -179,12 +208,14 @@ pub async fn record_compensation_terms(
     }
 
     sqlx::query(
-        "INSERT INTO compensation_terms (employment_id, effective_from, basic_pay, created_by)
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO compensation_terms
+             (employment_id, effective_from, basic_pay, ordinary_hours, created_by)
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(employment_id.as_str())
     .bind(effective_from)
     .bind(basic_pay.cents())
+    .bind(ordinary_hours.map(OrdinaryHours::as_decimal))
     .bind(created_by)
     .execute(&mut *tx)
     .await?;

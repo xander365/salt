@@ -875,6 +875,7 @@ pub(crate) fn blocker_code_and_details(
             })),
         ),
         PayrollRunBlocker::NoCompensationTermsInForce => ("no_compensation_terms_in_force", None),
+        PayrollRunBlocker::OrdinaryHoursNotRecorded => ("ordinary_hours_not_recorded", None),
     }
 }
 
@@ -2073,6 +2074,7 @@ mod tests {
                 kinds: some_kinds(),
             },
             PayrollRunBlocker::NoCompensationTermsInForce,
+            PayrollRunBlocker::OrdinaryHoursNotRecorded,
         ]
         .iter()
         .map(blocker_code_and_details)
@@ -2092,6 +2094,7 @@ mod tests {
                     Some(json!({ "kinds": ["approved_pension_fund", "provident_fund"] })),
                 ),
                 ("no_compensation_terms_in_force", None),
+                ("ordinary_hours_not_recorded", None),
             ]
         );
     }

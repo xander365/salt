@@ -53,19 +53,30 @@ function messageForRefusal(caught: unknown): string {
   }
 }
 
-/** The one field this form validates for shape, named the same way its
- * siblings name theirs. */
-type Field = 'basicPay';
+/** Parses weekly hours without floating point or rounding. */
+function parseOrdinaryHoursInput(raw: string): string | null {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(raw.trim());
+  if (match === null) {
+    return null;
+  }
+  const [, whole, fraction = ''] = match;
+  const hundredths = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
+  return hundredths > 0n && hundredths <= 16_800n ? raw.trim() : null;
+}
+
+type Field = 'basicPay' | 'ordinaryHours';
 
 export function CompensationTermsForm({ employmentId }: { employmentId: string }) {
   const recordCompensationTerms = useRecordCompensationTerms(employmentId);
   const [effectiveFrom, setEffectiveFrom] = useState('');
   const [basicPay, setBasicPay] = useState('');
+  const [ordinaryHours, setOrdinaryHours] = useState('');
   const [fieldError, setFieldError] = useState<FieldError<Field> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const effectiveFromId = useId();
   const basicPayId = useId();
+  const ordinaryHoursId = useId();
   const errorId = useId();
   const headingId = useId();
 
@@ -95,13 +106,27 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
       });
       return;
     }
+    const parsedOrdinaryHours = parseOrdinaryHoursInput(ordinaryHours);
+    if (parsedOrdinaryHours === null) {
+      setFieldError({
+        field: 'ordinaryHours',
+        message: 'Enter more than 0 and no more than 168 hours per week, with up to two decimal places.',
+      });
+      return;
+    }
     setFieldError(null);
 
-    const request: RecordCompensationTermsRequest = { effectiveFrom, basicPayCents };
+    const request: RecordCompensationTermsRequest = {
+      effectiveFrom,
+      basicPayCents,
+      ordinaryHours: parsedOrdinaryHours,
+    };
 
     try {
       await recordCompensationTerms.mutateAsync(request);
-      setSaved(`Pay of ${formatCents(basicPayCents)} recorded from ${effectiveFrom}.`);
+      setSaved(
+        `Pay of ${formatCents(basicPayCents)} for ${parsedOrdinaryHours} ordinary hours per week recorded from ${effectiveFrom}.`,
+      );
     } catch (caught) {
       setError(messageForRefusal(caught));
     }
@@ -145,6 +170,22 @@ export function CompensationTermsForm({ employmentId }: { employmentId: string }
             value={basicPay}
             onChange={(event) => {
               setBasicPay(event.target.value);
+              edited();
+            }}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={ordinaryHoursId}>Ordinary hours per week</Label>
+          <Input
+            id={ordinaryHoursId}
+            type="text"
+            inputMode="decimal"
+            placeholder="40.00"
+            required
+            {...fieldErrorProps(fieldError, 'ordinaryHours', errorId)}
+            value={ordinaryHours}
+            onChange={(event) => {
+              setOrdinaryHours(event.target.value);
               edited();
             }}
           />
