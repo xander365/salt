@@ -265,10 +265,12 @@ The calculator keeps the input instruction separate from its output line:
 ```text
 EarningInstruction (input)
 - TaxableAllowance(amount, label?)
+- Overtime(hours, multiplier, label?)
 
 Earning (output)
 - BasicPay
 - TaxableAllowance(amount, label?)
+- Overtime(amount, trace, label?)
 ```
 
 `BasicPay` is derived from `CompensationTerms`, so a `PayrollInput` cannot
@@ -278,22 +280,26 @@ version-1 history can be read honestly: those old scalar allowance lines had
 no label and are displayed as unlabelled. Labels do not participate in any
 calculation.
 
-**v1 supports exactly two Earning output kinds:**
+**v1 supports exactly three Earning output kinds:**
 
 ```text
 Earning
 - BasicPay
 - TaxableAllowance
+- Overtime
 ```
 
 | | SSC base | PAYE base | Gross |
 |---|---|---|---|
 | BasicPay | yes | yes | yes |
 | TaxableAllowance | no | yes | yes |
+| Overtime | no | yes | yes |
+
+`Overtime`'s exclusion from the SSC base is **settled law, not a Salt choice**: the Social Security General Regulations define `basic wage` as remuneration for ordinary work and exclude overtime from it (`statutory-conformance.md` §3.3). What *is* a Salt choice is the divisor that prices it — `BasicPay x 12 / 52 / OrdinaryHours`, stamped `SC-OPEN-6`, `NEEDS CONFIRMATION` (§5.10 there, ADR-0022). An overtime instruction carries hours and a multiplier and no amount: Salt computes the money, and the multiplier (1.5 or 2.0, a closed set) is the classification. There is exactly one rounding, at the line; the derived rate is exact and never rounded.
 
 **Superseded (statutory conformance §5.3).** `NonTaxableAllowance` is **removed**, not renamed. Allowances are not generically tax-free: Schedule 2 includes them in remuneration, and NamRA Practice Note 1 of 2024 makes travel and subsistence non-PAYE only on qualifying facts, up to UN rates or a prescribed kilometre rate that has not been announced. A user-facing "non-taxable" box could not be filled in correctly by anyone. Legal classification is a separate seam upstream of the calculator, which only ever receives Earnings already classified.
 
-Overtime, night work, Sunday work, public holiday work, commission, and bonus are refused in v1 and added later. A single `taxable: bool` flag is explicitly rejected as too weak.
+**Superseded in part (issue #76, ADR-0022).** Overtime is no longer refused: it is an `Earning` kind of its own, entered as hours at a closed set of multipliers. Night work, Sunday work, public holiday work, commission, and bonus remain refused in v1 and are added later — a Sunday's overtime is entered as overtime at its multiplier with "Sunday overtime" as its label, and the label never affects money. A single `taxable: bool` flag is still explicitly rejected as too weak.
 
 ### 5.3 Benefits
 

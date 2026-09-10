@@ -265,6 +265,123 @@ async fn a_salary_only_run_ignores_historical_terms_without_ordinary_hours(pool:
     assert_eq!(calculation_json["gross_remuneration"], 1_500_000);
 }
 
+/// Issue #76: overtime is typed as hours at a multiplier and Salt produces
+/// the money. The fixture pays N$15,000 over 40 agreed weekly hours, so
+/// `15000 x 12 / 52 / 40 = 86.538461...` an hour, exact and unrounded.
+/// Twelve hours at 1.5 is `1,557.692307...`, rounded once at the line to
+/// N$1,557.69.
+///
+/// `salt_policy_*`, not `statutory_*`: the divisor is SC-OPEN-6 and awaits
+/// confirmation (ADR-0008).
+#[sqlx::test]
+async fn salt_policy_overtime_hours_are_priced_and_kept_out_of_the_social_security_base(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+    set_run_earnings(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![EarningInstruction::Overtime {
+            hours: payroll::OvertimeHours::new(rust_decimal::Decimal::new(12, 0)).unwrap(),
+            multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
+            label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
+        }],
+    )
+    .await
+    .unwrap();
+
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    assert_eq!(refusals, Vec::new());
+    let (_, _, calculation_json, _) = working_calculation_row(&pool, &run_id, &employment_id)
+        .await
+        .expect("an overtime run produces a calculation");
+
+    let overtime = &calculation_json["earning_lines"][1]["Overtime"];
+    assert_eq!(overtime["amount"], 155_769);
+    assert_eq!(overtime["label"], "Sunday overtime");
+    assert_eq!(overtime["trace"]["basic_pay"], 1_500_000);
+    assert_eq!(overtime["trace"]["policy"]["id"], "SalaryToHourlyDivisor");
+    assert_eq!(overtime["trace"]["policy"]["status"], "NeedsConfirmation");
+
+    assert_eq!(calculation_json["gross_remuneration"], 1_655_769);
+    assert_eq!(calculation_json["taxable_remuneration"], 1_655_769);
+    assert_eq!(
+        calculation_json["employee_social_security"]["trace"]["basic_pay"], 1_500_000,
+        "overtime must never reach the social security base"
+    );
+}
+
+/// The honest absence of `OrdinaryHours` stops being harmless the moment an
+/// overtime line needs a divisor. The member is refused rather than priced
+/// against a guessed constant.
+#[sqlx::test]
+async fn an_overtime_line_without_recorded_ordinary_hours_is_refused(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "historical-person",
+        Money::from_cents(1_500_000).unwrap(),
+    )
+    .await;
+    sqlx::query("UPDATE compensation_terms SET ordinary_hours = NULL WHERE employment_id = $1")
+        .bind(employment_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+    set_run_earnings(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![EarningInstruction::Overtime {
+            hours: payroll::OvertimeHours::new(rust_decimal::Decimal::new(12, 0)).unwrap(),
+            multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
+            label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
+        }],
+    )
+    .await
+    .unwrap();
+
+    let refusals = calculate_payroll_run(&db, &run_id, "calculator")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refusals,
+        vec![PayrollRunCalculationRefusal {
+            employment_id: employment_id.clone(),
+            refusal: PayrollAppError::Payroll(PayrollError::OrdinaryHoursNotRecorded),
+        }]
+    );
+    assert!(
+        working_calculation_row(&pool, &run_id, &employment_id)
+            .await
+            .is_none(),
+        "a refused member stores no calculation"
+    );
+}
+
 /// The whole loop an Employer actually walks: calculate, read the figures,
 /// spot a wrong Earning, fix it, calculate again. The correction reopens the
 /// run to `Draft` (§4.7) and the second calculation carries the new line.

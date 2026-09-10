@@ -297,7 +297,7 @@ uniqueness already makes a duplicate impossible, so what is owed is UX, not a
 mechanism.
 
 **0.29 Sensitive responses.** Hand-written finalized-payroll view DTOs carrying the
-nine figures, the period, the pay date and the SaltVersion. PAYE and SSC traces are
+ten figures, the period, the pay date and the SaltVersion. PAYE and SSC traces are
 a **separate endpoint**. Raw snapshot JSON is never a response body — the moment it
 is, its internal shape becomes a public contract.
 
@@ -639,7 +639,7 @@ Do not expand this design into:
 - tax-period reporting;
 - accounting export;
 - leave;
-- overtime;
+- overtime; — **superseded (issue #76, ADR-0022): overtime now ships**
 - bonuses;
 - loans;
 - voluntary deductions;

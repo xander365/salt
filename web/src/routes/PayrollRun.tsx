@@ -109,7 +109,7 @@ function blockerFixPath(
  * — the same reason Finalize and Calculate are both gone by this point. */
 function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
   if (earnings.length === 0) {
-    return <p className="text-sm text-muted-foreground">No taxable allowances on this line.</p>;
+    return <p className="text-sm text-muted-foreground">No earnings beyond basic pay.</p>;
   }
   return (
     <ul className="text-sm">
@@ -117,7 +117,18 @@ function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
         // The wire order is the stored order and there is no id to key on,
         // and this list is never reordered or edited — it is read-only.
         <li key={index}>
-          Taxable allowance — {line.label ?? 'unlabelled'} <Money cents={line.amountCents} />
+          {line.kind === 'taxableAllowance' ? (
+            <>
+              Taxable allowance — {line.label ?? 'unlabelled'} <Money cents={line.amountCents} />
+            </>
+          ) : (
+            // Hours and a multiplier, never money: the instruction is what
+            // was stored, and the money it produced is in the figures and
+            // in the workings on the finalized payslip.
+            <>
+              Overtime — {line.label ?? 'unlabelled'}: {line.hours} hours &times; {line.multiplier}
+            </>
+          )}
         </li>
       ))}
     </ul>

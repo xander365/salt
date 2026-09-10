@@ -230,14 +230,34 @@ export interface PayrollRunsResponse {
   payrollRuns: PayrollRunSummaryDto[];
 }
 
-export type EarningKind = 'taxableAllowance';
+export type EarningKind = 'taxableAllowance' | 'overtime';
 
-export interface EarningLineDto {
-  kind: EarningKind;
+/** A taxable allowance: money an Operator decided. */
+export interface TaxableAllowanceLineDto {
+  kind: 'taxableAllowance';
   amountCents: number;
   /** Null only for unlabelled lines preserved from a version-1 snapshot. */
   label: string | null;
 }
+
+/**
+ * Overtime: hours at a multiplier, with **no amount** — Salt prices it from
+ * the Employment's own pay and ordinary hours (ADR-0022). `hours` and
+ * `multiplier` are decimal strings, never numbers, so no figure passes
+ * through a JSON float.
+ *
+ * The multiplier set is closed at `'1.5'` and `'2'`. Whether those are the
+ * correct and only statutory factors in Namibia is `Q-OPEN-8` and is not
+ * verified — nothing on screen may present them as law.
+ */
+export interface OvertimeLineDto {
+  kind: 'overtime';
+  hours: string;
+  multiplier: string;
+  label: string | null;
+}
+
+export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
 
 /**
  * The six blocker codes (§0.31) and no others — the run detail's own
@@ -259,11 +279,15 @@ export interface PayrollRunBlockerDto {
   details: unknown;
 }
 
-/** The nine figures §0.29 names for a member's current calculation, cents-exact
- * (INV-001). `null` until the run has been calculated at least once. */
+/** The ten figures §0.29 names for a member's current calculation, cents-exact
+ * (INV-001). `null` until the run has been calculated at least once.
+ * `overtimeCents` is its own figure and never folded into
+ * `taxableAllowancesCents`: overtime feeds PAYE and gross but never the
+ * social security base. */
 export interface FiguresDto {
   basicPayCents: number;
   taxableAllowancesCents: number;
+  overtimeCents: number;
   grossCents: number;
   taxableRemunerationCents: number;
   payeCents: number;
@@ -314,7 +338,7 @@ export interface FinalizePayrollRunResponse {
 
 // `GET /api/employers/{e}/finalized-payroll/{f}`
 // (`crates/salt-server/src/finalized_payroll.rs`, issue #57/#66, §0.29): one
-// immutable finalized payroll — the same nine figures a working run's own
+// immutable finalized payroll — the same ten figures a working run's own
 // detail carries, plus the period, the pay date and the SaltVersion that
 // produced them. Never the raw frozen snapshot (§0.29).
 //
@@ -389,8 +413,36 @@ export interface SscTraceDto {
   ceilingCents: number;
 }
 
+/**
+ * One overtime line's workings. Every figure needed to redo
+ * `basicPay x 12 / 52 / ordinaryHours x hours x multiplier` by hand.
+ *
+ * `derivedHourlyRate` is the exact unrounded rate as a decimal string, not
+ * cents: it is intermediate arithmetic and is never rounded. The single
+ * rounding on the line produced `amountCents`.
+ *
+ * `policyReference` and `policyStatus` are wire *codes*, like `clamp` — the
+ * words an Operator reads are this app's, never the server's. What they must
+ * never be rendered as is law.
+ */
+export interface OvertimeTraceDto {
+  amountCents: number;
+  label: string | null;
+  basicPayCents: number;
+  ordinaryHours: string;
+  monthsPerYear: string;
+  weeksPerYear: string;
+  derivedHourlyRate: string;
+  hours: string;
+  multiplier: string;
+  policyReference: string;
+  policyStatus: string;
+}
+
 export interface FinalizedPayrollTracesResponse {
   paye: PayeTraceDto;
   employeeSsc: SscTraceDto;
   employerSsc: SscTraceDto;
+  /** One entry per overtime line; empty for a salary-only payroll. */
+  overtime: OvertimeTraceDto[];
 }

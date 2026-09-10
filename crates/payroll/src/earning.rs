@@ -1,9 +1,12 @@
 //! `Earning`: one classified line of money owed for the period, and the
 //! three statutory bases those lines feed.
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize, de::Error as DeError};
 
+use crate::employment::OrdinaryHours;
 use crate::money::{Money, MoneyError};
+use crate::salt_policy::SaltPolicyStamp;
 
 /// The maximum number of Unicode scalar values an `EarningLabel` may carry.
 /// Labels are for humans, so the bound protects storage and display without
@@ -82,6 +85,197 @@ impl std::fmt::Display for EarningLabel {
     }
 }
 
+/// The largest number of overtime hours one line may carry. A pay period is
+/// at most 31 days, so 744 is every hour in the longest period there is:
+/// past that the figure is a typing mistake, not overtime. The bound exists
+/// to keep a slipped decimal point out of the payroll rather than to state
+/// any rule about working time — the Labour Act's own overtime limits are
+/// the T&A system's business, not Salt's (D14).
+pub const MAX_OVERTIME_HOURS: Decimal = Decimal::from_parts(744, 0, 0, false, 0);
+
+/// Why an [`OvertimeHours`] value cannot be recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OvertimeHoursError {
+    /// Zero or fewer hours. Zero overtime is expressed by having no
+    /// overtime line at all, never by a line claiming nothing happened.
+    ZeroOrNegative,
+    /// More than [`MAX_OVERTIME_HOURS`] on one line.
+    MoreThanAWholePeriod { maximum: Decimal },
+    /// Finer than a hundredth of an hour.
+    MoreThanTwoDecimalPlaces,
+}
+
+impl std::fmt::Display for OvertimeHoursError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroOrNegative => write!(f, "overtime hours must be greater than zero"),
+            Self::MoreThanAWholePeriod { maximum } => {
+                write!(f, "overtime hours must not exceed {maximum} on one line")
+            }
+            Self::MoreThanTwoDecimalPlaces => {
+                write!(
+                    f,
+                    "overtime hours must have no more than two decimal places"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for OvertimeHoursError {}
+
+/// Hours actually worked at one overtime multiplier in one PayPeriod.
+///
+/// A distinct type from [`OrdinaryHours`], and deliberately not
+/// interchangeable with it: `OrdinaryHours` is a contractual weekly
+/// assumption used to derive a rate, while this is hours a person worked
+/// and is being paid for. Confusing the two would price overtime off the
+/// wrong number, so the compiler is made to keep them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Decimal", into = "Decimal")]
+pub struct OvertimeHours(Decimal);
+
+impl OvertimeHours {
+    pub fn new(hours: Decimal) -> Result<Self, OvertimeHoursError> {
+        if hours <= Decimal::ZERO {
+            return Err(OvertimeHoursError::ZeroOrNegative);
+        }
+        if hours > MAX_OVERTIME_HOURS {
+            return Err(OvertimeHoursError::MoreThanAWholePeriod {
+                maximum: MAX_OVERTIME_HOURS,
+            });
+        }
+        if hours.scale() > 2 {
+            return Err(OvertimeHoursError::MoreThanTwoDecimalPlaces);
+        }
+        Ok(Self(hours))
+    }
+
+    pub fn as_decimal(self) -> Decimal {
+        self.0
+    }
+}
+
+impl TryFrom<Decimal> for OvertimeHours {
+    type Error = OvertimeHoursError;
+
+    fn try_from(hours: Decimal) -> Result<Self, Self::Error> {
+        Self::new(hours)
+    }
+}
+
+impl From<OvertimeHours> for Decimal {
+    fn from(hours: OvertimeHours) -> Decimal {
+        hours.0
+    }
+}
+
+/// Why an [`OvertimeMultiplier`] could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OvertimeMultiplierError {
+    /// A factor outside the closed set. Carries what was supplied so the
+    /// refusal can say which number was refused, not merely that one was.
+    Unsupported { supplied: Decimal },
+}
+
+impl std::fmt::Display for OvertimeMultiplierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported { supplied } => write!(
+                f,
+                "overtime multiplier {supplied} is not supported; Salt supports 1.5 and 2 only"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OvertimeMultiplierError {}
+
+/// The overtime factor, which **is** the classification (D19). An `enum`
+/// and not a `Decimal` field, because the set is closed at 1.5 and 2.0
+/// (D31): a third factor is a code change and a deliberate decision,
+/// exactly as a third [`Earning`] kind is, and must never become a
+/// configuration value an Operator can type.
+///
+/// Whether 1.5 and 2.0 are the correct and only statutory factors in
+/// Namibia is `Q-OPEN-8` — assumed from the owner's practice and not
+/// verified from any statute. Nothing here may present them as law.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Decimal", into = "Decimal")]
+pub enum OvertimeMultiplier {
+    /// Time and a half.
+    OneAndAHalf,
+    /// Double time.
+    Double,
+}
+
+impl OvertimeMultiplier {
+    pub fn as_decimal(self) -> Decimal {
+        match self {
+            OvertimeMultiplier::OneAndAHalf => Decimal::from_parts(15, 0, 0, false, 1),
+            OvertimeMultiplier::Double => Decimal::from_parts(2, 0, 0, false, 0),
+        }
+    }
+}
+
+impl TryFrom<Decimal> for OvertimeMultiplier {
+    type Error = OvertimeMultiplierError;
+
+    /// Compared by value, not by representation: `1.50`, `1.5` and `1.500`
+    /// are the same factor, and a trailing zero an Operator typed must not
+    /// decide whether their overtime is accepted.
+    fn try_from(multiplier: Decimal) -> Result<Self, Self::Error> {
+        if multiplier == OvertimeMultiplier::OneAndAHalf.as_decimal() {
+            Ok(OvertimeMultiplier::OneAndAHalf)
+        } else if multiplier == OvertimeMultiplier::Double.as_decimal() {
+            Ok(OvertimeMultiplier::Double)
+        } else {
+            Err(OvertimeMultiplierError::Unsupported {
+                supplied: multiplier,
+            })
+        }
+    }
+}
+
+impl From<OvertimeMultiplier> for Decimal {
+    fn from(multiplier: OvertimeMultiplier) -> Decimal {
+        multiplier.as_decimal()
+    }
+}
+
+/// Every figure behind one overtime line, so an Operator can check the
+/// money by hand. Structured data, like [`crate::PayeTrace`] and
+/// [`crate::SscTrace`] — no free-text formula strings, and the
+/// `SaltPolicy` mark is carried as a [`SaltPolicyStamp`] so the screen
+/// renders the sentence rather than the calculator emitting one.
+///
+/// `basic_pay` is the **contractual** figure from `CompensationTerms`,
+/// never the prorated one: a person's hourly rate does not fall because
+/// they joined mid-month. That choice is part of SC-OPEN-6 and is stamped
+/// with it.
+///
+/// `derived_hourly_rate` is exact and unrounded, like
+/// `PayeTrace::year_to_date_tax_owed`. There is exactly one rounding on an
+/// overtime line and it happens at the line, through the Salt rounding
+/// policy — never on the rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OvertimeTrace {
+    pub basic_pay: Money,
+    pub ordinary_hours: OrdinaryHours,
+    /// The `12` in `BasicPay x 12 / 52 / OrdinaryHours`. Carried as data,
+    /// not as a literal in a sentence, so the workings show the divisor
+    /// the figure was actually derived with.
+    pub months_per_year: Decimal,
+    /// The `52`.
+    pub weeks_per_year: Decimal,
+    pub derived_hourly_rate: Decimal,
+    pub hours: OvertimeHours,
+    pub multiplier: OvertimeMultiplier,
+    /// SC-OPEN-6, `NEEDS CONFIRMATION`. Salt chose this divisor; no
+    /// regulator prescribed it.
+    pub policy: SaltPolicyStamp,
+}
+
 /// One earning instruction supplied to the calculator. `BasicPay` is absent
 /// by construction: it is derived from the Employment's CompensationTerms,
 /// so an input can never express a duplicate BasicPay line.
@@ -95,18 +289,25 @@ pub enum EarningInstruction {
         amount: Money,
         label: Option<EarningLabel>,
     },
+    /// Hours at a fixed multiplier (D14, ADR-0022). No amount: Salt derives
+    /// the money from the Employment's own `BasicPay` and `OrdinaryHours`,
+    /// which is the whole point of typing hours rather than a figure worked
+    /// out in a spreadsheet.
+    Overtime {
+        hours: OvertimeHours,
+        multiplier: OvertimeMultiplier,
+        label: Option<EarningLabel>,
+    },
 }
 
 impl EarningInstruction {
-    pub fn amount(&self) -> Money {
-        match self {
-            Self::TaxableAllowance { amount, .. } => *amount,
-        }
-    }
-
+    /// There is deliberately no `amount()` here. An overtime instruction
+    /// carries hours, not money, so no total function from an instruction
+    /// to a `Money` exists — the money appears only on the calculated
+    /// [`Earning`] line.
     pub fn label(&self) -> Option<&EarningLabel> {
         match self {
-            Self::TaxableAllowance { label, .. } => label.as_ref(),
+            Self::TaxableAllowance { label, .. } | Self::Overtime { label, .. } => label.as_ref(),
         }
     }
 }
@@ -127,6 +328,16 @@ pub enum Earning {
         /// label, but history must not be given an invented one.
         label: Option<EarningLabel>,
     },
+    /// Overtime, already priced. `amount` is the one rounded figure on the
+    /// line; `trace` holds every input it was derived from, including the
+    /// unrounded hourly rate and the `SaltPolicy` stamp on the divisor.
+    Overtime {
+        amount: Money,
+        trace: OvertimeTrace,
+        /// The free-text reason ("Sunday overtime"). Never read by any
+        /// arithmetic: the multiplier is the classification, not this.
+        label: Option<EarningLabel>,
+    },
 }
 
 impl Earning {
@@ -134,6 +345,7 @@ impl Earning {
         match self {
             Earning::BasicPay(amount) => *amount,
             Earning::TaxableAllowance { amount, .. } => *amount,
+            Earning::Overtime { amount, .. } => *amount,
         }
     }
 }
@@ -159,10 +371,35 @@ impl RawTaxableAllowance {
     }
 }
 
+/// The wire shape of a calculated [`Earning`]. Separate from
+/// [`RawEarningInstruction`] below because the two genuinely differ now:
+/// an overtime *line* carries money and workings, an overtime *instruction*
+/// carries hours. One shared raw type would have to make every field
+/// optional and could no longer refuse either half's nonsense.
 #[derive(Debug, Deserialize)]
 enum RawEarning {
     BasicPay(Money),
     TaxableAllowance(RawTaxableAllowance),
+    Overtime {
+        amount: Money,
+        trace: OvertimeTrace,
+        label: Option<EarningLabel>,
+    },
+}
+
+/// The wire shape of an [`EarningInstruction`]. `BasicPay` appears here
+/// only so it can be refused by name rather than as an unknown variant, and
+/// its payload is ignored: the refusal is on the *kind*, so it must not
+/// depend on the amount beside it being well formed.
+#[derive(Debug, Deserialize)]
+enum RawEarningInstruction {
+    BasicPay(serde::de::IgnoredAny),
+    TaxableAllowance(RawTaxableAllowance),
+    Overtime {
+        hours: OvertimeHours,
+        multiplier: OvertimeMultiplier,
+        label: Option<EarningLabel>,
+    },
 }
 
 impl<'de> Deserialize<'de> for Earning {
@@ -176,6 +413,15 @@ impl<'de> Deserialize<'de> for Earning {
                 let (amount, label) = raw.into_parts();
                 Ok(Self::TaxableAllowance { amount, label })
             }
+            RawEarning::Overtime {
+                amount,
+                trace,
+                label,
+            } => Ok(Self::Overtime {
+                amount,
+                trace,
+                label,
+            }),
         }
     }
 }
@@ -185,14 +431,23 @@ impl<'de> Deserialize<'de> for EarningInstruction {
     where
         D: serde::Deserializer<'de>,
     {
-        match RawEarning::deserialize(deserializer)? {
-            RawEarning::BasicPay(_) => Err(D::Error::custom(
+        match RawEarningInstruction::deserialize(deserializer)? {
+            RawEarningInstruction::BasicPay(_) => Err(D::Error::custom(
                 "BasicPay cannot be supplied as an earning instruction",
             )),
-            RawEarning::TaxableAllowance(raw) => {
+            RawEarningInstruction::TaxableAllowance(raw) => {
                 let (amount, label) = raw.into_parts();
                 Ok(Self::TaxableAllowance { amount, label })
             }
+            RawEarningInstruction::Overtime {
+                hours,
+                multiplier,
+                label,
+            } => Ok(Self::Overtime {
+                hours,
+                multiplier,
+                label,
+            }),
         }
     }
 }
@@ -253,6 +508,16 @@ impl RemunerationBases {
                     bases.taxable = bases.taxable.checked_add(*amount)?;
                     bases.gross = bases.gross.checked_add(*amount)?;
                 }
+                // Overtime's exclusion from the social security base is
+                // settled law, not a Salt choice: the Social Security
+                // General Regulations define `basic wage` as remuneration
+                // for ordinary work and exclude overtime from it
+                // (`docs/domain/statutory-conformance.md` §3.3). It feeds
+                // PAYE and gross like any other taxable pay.
+                Earning::Overtime { amount, .. } => {
+                    bases.taxable = bases.taxable.checked_add(*amount)?;
+                    bases.gross = bases.gross.checked_add(*amount)?;
+                }
             }
         }
 
@@ -284,6 +549,22 @@ mod tests {
 
     fn money(amount: rust_decimal::Decimal) -> Money {
         Money::from_decimal(amount).unwrap()
+    }
+
+    /// Workings for one overtime line, so the accumulator and the
+    /// serialization tests have a whole `Earning::Overtime` to work with.
+    /// The figures are the running example: N$12,000 over 40 weekly hours.
+    fn a_trace() -> OvertimeTrace {
+        OvertimeTrace {
+            basic_pay: money(dec!(12000.00)),
+            ordinary_hours: OrdinaryHours::new(dec!(40)).unwrap(),
+            months_per_year: dec!(12),
+            weeks_per_year: dec!(52),
+            derived_hourly_rate: dec!(12000.00) * dec!(12) / dec!(52) / dec!(40),
+            hours: OvertimeHours::new(dec!(12)).unwrap(),
+            multiplier: OvertimeMultiplier::OneAndAHalf,
+            policy: SaltPolicyStamp::SALARY_TO_HOURLY_DIVISOR,
+        }
     }
 
     #[test]
@@ -367,6 +648,118 @@ mod tests {
             RemunerationBases::accumulate(&lines),
             Err(MoneyError::Overflow)
         );
+    }
+
+    // ---- Overtime (issue #76, ADR-0022) -----------------------------------
+
+    #[test]
+    fn an_overtime_line_feeds_paye_and_gross_but_never_the_social_security_base() {
+        let bases = RemunerationBases::accumulate(&[Earning::Overtime {
+            amount: money(dec!(1246.15)),
+            trace: a_trace(),
+            label: None,
+        }])
+        .unwrap();
+
+        assert_eq!(bases.social_security(), Money::ZERO);
+        assert_eq!(bases.taxable(), money(dec!(1246.15)));
+        assert_eq!(bases.gross(), money(dec!(1246.15)));
+    }
+
+    #[test]
+    fn a_multiplier_outside_the_closed_set_is_refused_with_a_stated_reason() {
+        let refusal = OvertimeMultiplier::try_from(dec!(1.75)).unwrap_err();
+
+        assert_eq!(
+            refusal,
+            OvertimeMultiplierError::Unsupported {
+                supplied: dec!(1.75)
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "overtime multiplier 1.75 is not supported; Salt supports 1.5 and 2 only"
+        );
+    }
+
+    #[test]
+    fn the_two_supported_multipliers_are_accepted_however_they_are_written() {
+        for written in [dec!(1.5), dec!(1.50), dec!(1.500)] {
+            assert_eq!(
+                OvertimeMultiplier::try_from(written),
+                Ok(OvertimeMultiplier::OneAndAHalf)
+            );
+        }
+        for written in [dec!(2), dec!(2.0), dec!(2.00)] {
+            assert_eq!(
+                OvertimeMultiplier::try_from(written),
+                Ok(OvertimeMultiplier::Double)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_or_negative_overtime_hours_are_refused() {
+        assert_eq!(
+            OvertimeHours::new(dec!(0)),
+            Err(OvertimeHoursError::ZeroOrNegative)
+        );
+        assert_eq!(
+            OvertimeHours::new(dec!(-0.25)),
+            Err(OvertimeHoursError::ZeroOrNegative)
+        );
+    }
+
+    #[test]
+    fn overtime_hours_are_bounded_and_cents_exact() {
+        assert_eq!(
+            OvertimeHours::new(MAX_OVERTIME_HOURS + dec!(0.01)),
+            Err(OvertimeHoursError::MoreThanAWholePeriod {
+                maximum: MAX_OVERTIME_HOURS
+            })
+        );
+        assert_eq!(
+            OvertimeHours::new(dec!(1.005)),
+            Err(OvertimeHoursError::MoreThanTwoDecimalPlaces)
+        );
+        assert!(OvertimeHours::new(MAX_OVERTIME_HOURS).is_ok());
+    }
+
+    #[test]
+    fn an_overtime_instruction_and_line_round_trip() {
+        let instruction = EarningInstruction::Overtime {
+            hours: OvertimeHours::new(dec!(12)).unwrap(),
+            multiplier: OvertimeMultiplier::OneAndAHalf,
+            label: Some(EarningLabel::new("Sunday overtime").unwrap()),
+        };
+        let json = serde_json::to_string(&instruction).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EarningInstruction>(&json).unwrap(),
+            instruction
+        );
+
+        let line = Earning::Overtime {
+            amount: money(dec!(1246.15)),
+            trace: a_trace(),
+            label: Some(EarningLabel::new("Sunday overtime").unwrap()),
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        assert_eq!(serde_json::from_str::<Earning>(&json).unwrap(), line);
+    }
+
+    /// An instruction carries hours; a line carries money. Reading one
+    /// shape as the other must fail rather than silently lose the money or
+    /// invent it.
+    #[test]
+    fn an_overtime_line_is_not_readable_as_an_overtime_instruction() {
+        let line = serde_json::to_value(Earning::Overtime {
+            amount: money(dec!(1246.15)),
+            trace: a_trace(),
+            label: None,
+        })
+        .unwrap();
+
+        assert!(serde_json::from_value::<EarningInstruction>(line).is_err());
     }
 
     #[test]

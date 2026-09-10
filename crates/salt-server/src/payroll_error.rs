@@ -822,6 +822,9 @@ fn classify_payroll_error(err: &PayrollError) -> (StatusCode, &'static str, Opti
                     .collect::<Vec<_>>(),
             })),
         ),
+        PayrollError::OrdinaryHoursNotRecorded => {
+            (unprocessable, "ordinary_hours_not_recorded", None)
+        }
         PayrollError::PriorEmploymentUnknown => (unprocessable, "prior_employment_unknown", None),
         // Named for the refusal's own meaning, not for the Rust variant
         // (issue #50's Deep Instructions): the figures being *present* is
@@ -2000,6 +2003,15 @@ mod tests {
             PayrollError::UnsupportedDeductionsPresent { kinds },
             "unsupported_deductions_present",
             Some(json!({ "kinds": ["approved_pension_fund", "provident_fund"] })),
+        );
+    }
+
+    #[test]
+    fn ordinary_hours_not_recorded() {
+        check_payroll_error(
+            PayrollError::OrdinaryHoursNotRecorded,
+            "ordinary_hours_not_recorded",
+            None,
         );
     }
 

@@ -60,7 +60,8 @@ pub use finalize::{
 };
 pub use finalized_payroll_read::{
     FinalizedEmployerParticulars, FinalizedPayrollDetail, FinalizedPayrollTraces,
-    FinalizedPersonParticulars, get_finalized_payroll_detail, get_finalized_payroll_traces,
+    FinalizedPersonParticulars, OvertimeLineTrace, get_finalized_payroll_detail,
+    get_finalized_payroll_traces,
 };
 pub use membership::{
     EmployerMembershipSnapshot, MembershipRole, MembershipStatus, active_membership_role,

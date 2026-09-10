@@ -11,12 +11,13 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::deduction::{Deduction, StatutoryDeduction};
-use crate::earning::{Earning, EarningInstruction, RemunerationBases};
-use crate::employment::EmploymentSnapshot;
+use crate::earning::{Earning, EarningInstruction, OvertimeTrace, RemunerationBases};
+use crate::employment::{CompensationTerms, EmploymentSnapshot, OrdinaryHours};
 use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
 use crate::pay_schedule::PaySchedule;
 use crate::rules::{BandContribution, PayeTableId, PayrollRules, SscClamp, SscRulesId};
+use crate::salt_policy::SaltPolicyStamp;
 use crate::tax_year::TaxYear;
 use crate::unsupported_deduction::{UnsupportedDeductionKinds, UnsupportedDeductionStatus};
 use crate::year_to_date::{
@@ -187,6 +188,13 @@ pub enum PayrollError {
     /// another Employer earlier in this tax year. An unasked question
     /// must never pass as a confirmed `None` (SC-OPEN-4).
     PriorEmploymentUnknown,
+    /// An overtime line was supplied, but the `CompensationTerms` row
+    /// covering the period records no `OrdinaryHours`. The divisor has no
+    /// value without it, and Salt will not invent one such as 173.33 — the
+    /// assumption is recorded per Employment precisely so it is visible and
+    /// dated (ADR-0022, SC-OPEN-6). Salary-only periods are unaffected: a
+    /// legacy row's missing hours are unknown, not invalid.
+    OrdinaryHoursNotRecorded,
     /// The Person had taxable employment with another Employer earlier
     /// in this tax year. How a new employer must treat those figures is
     /// unresolved (SC-OPEN-4), so `calculate` refuses rather than guess —
@@ -287,6 +295,12 @@ impl std::fmt::Display for PayrollError {
                 write!(
                     f,
                     "the employee has deductions Salt does not calculate: {kinds}"
+                )
+            }
+            PayrollError::OrdinaryHoursNotRecorded => {
+                write!(
+                    f,
+                    "overtime cannot be priced: the compensation terms covering this period record no ordinary hours"
                 )
             }
             PayrollError::PriorEmploymentUnknown => {
@@ -397,6 +411,13 @@ pub struct PayrollCalculation {
     pub net_pay: Money,
     pub warnings: Vec<Warning>,
 }
+
+/// The two halves of the SC-OPEN-6 divisor, named rather than written as
+/// literals inside the arithmetic: they are carried into every
+/// [`OvertimeTrace`] as data, so the workings show the divisor the figure
+/// was actually derived with rather than a sentence repeating it.
+const MONTHS_PER_YEAR: Decimal = Decimal::from_parts(12, 0, 0, false, 0);
+const WEEKS_PER_YEAR: Decimal = Decimal::from_parts(52, 0, 0, false, 0);
 
 pub fn calculate(
     input: &PayrollInput,
@@ -512,17 +533,58 @@ pub fn calculate(
         terms.basic_pay()
     };
 
-    // Every allowance the caller supplied is kept as its own line, in the
+    // The salary-to-hourly divisor (D18, ADR-0022): `BasicPay x 12 / 52 /
+    // OrdinaryHours`, taken from the **contractual** `BasicPay` and never
+    // the prorated one above — a person's hourly rate does not fall because
+    // they joined mid-month. The whole formula is Salt's own choice
+    // (SC-OPEN-6, `NEEDS CONFIRMATION`); no published Namibian rule
+    // prescribing a divisor was found, and nothing may describe it as law.
+    //
+    // The rate is exact and never rounded. There is exactly one rounding on
+    // an overtime line, and it happens at the line below, through the same
+    // `RoundingRule` seam every other money figure passes through
+    // (SC-OPEN-2).
+    // Every instruction the caller supplied is kept as its own line, in the
     // order given, after the derived `BasicPay` line. Lines of the same
-    // kind are never merged: a payslip has to be able to show each one.
+    // kind are never merged: a payslip has to be able to show each one, and
+    // two overtime lines at the same multiplier round independently rather
+    // than being summed and rounded once.
     let mut earning_lines = Vec::with_capacity(input.earnings.len() + 1);
     earning_lines.push(Earning::BasicPay(basic_pay));
-    earning_lines.extend(input.earnings.iter().map(|instruction| match instruction {
-        EarningInstruction::TaxableAllowance { amount, label } => Earning::TaxableAllowance {
-            amount: *amount,
-            label: label.clone(),
-        },
-    }));
+    for instruction in &input.earnings {
+        let line = match instruction {
+            EarningInstruction::TaxableAllowance { amount, label } => Earning::TaxableAllowance {
+                amount: *amount,
+                label: label.clone(),
+            },
+            EarningInstruction::Overtime {
+                hours,
+                multiplier,
+                label,
+            } => {
+                let (ordinary_hours, rate) = derive_hourly_rate(terms)?;
+                let unrounded = rate
+                    .checked_mul(hours.as_decimal())
+                    .and_then(|hourly| hourly.checked_mul(multiplier.as_decimal()))
+                    .ok_or(PayrollError::AmountOverflow)?;
+                Earning::Overtime {
+                    amount: rules.rounding_rule().apply(unrounded)?,
+                    trace: OvertimeTrace {
+                        basic_pay: terms.basic_pay(),
+                        ordinary_hours,
+                        months_per_year: MONTHS_PER_YEAR,
+                        weeks_per_year: WEEKS_PER_YEAR,
+                        derived_hourly_rate: rate,
+                        hours: *hours,
+                        multiplier: *multiplier,
+                        policy: SaltPolicyStamp::SALARY_TO_HOURLY_DIVISOR,
+                    },
+                    label: label.clone(),
+                }
+            }
+        };
+        earning_lines.push(line);
+    }
 
     // Gross, taxable, and the social security base are accumulated
     // separately from the same lines — never one summation filtered three
@@ -632,6 +694,34 @@ pub fn calculate(
     })
 }
 
+/// The SC-OPEN-6 derivation (D18, ADR-0022): `BasicPay x 12 / 52 /
+/// OrdinaryHours`, taken from the **contractual** `BasicPay` and never a
+/// prorated one — a person's hourly rate does not fall because they joined
+/// mid-month. The whole formula is Salt's own choice, `NEEDS CONFIRMATION`;
+/// no published Namibian rule prescribing a divisor was found, and nothing
+/// may describe it as law.
+///
+/// The rate is exact and is never rounded here. There is exactly one
+/// rounding on an overtime line and it happens at the line, through the
+/// `RoundingRule` seam every other money figure passes through (SC-OPEN-2).
+///
+/// Returns the `OrdinaryHours` it used alongside the rate, so the trace
+/// records the hours the figure was actually derived with rather than
+/// reading the terms row a second time and risking a different answer.
+fn derive_hourly_rate(terms: CompensationTerms) -> Result<(OrdinaryHours, Decimal), PayrollError> {
+    let ordinary_hours = terms
+        .ordinary_hours()
+        .ok_or(PayrollError::OrdinaryHoursNotRecorded)?;
+    let rate = terms
+        .basic_pay()
+        .as_decimal()
+        .checked_mul(MONTHS_PER_YEAR)
+        .and_then(|yearly| yearly.checked_div(WEEKS_PER_YEAR))
+        .and_then(|weekly| weekly.checked_div(ordinary_hours.as_decimal()))
+        .ok_or(PayrollError::AmountOverflow)?;
+    Ok((ordinary_hours, rate))
+}
+
 /// `PaySchedule::period_containing`, with its one calendar-edge failure
 /// turned into the refusal `calculate` reports. Named rather than
 /// inlined twice so both callers fail the same way.
@@ -669,7 +759,8 @@ pub fn validate_effective_from_is_a_period_start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::earning::EarningLabel;
+    use crate::earning::{EarningLabel, OvertimeHours, OvertimeMultiplier};
+    use crate::employment::OrdinaryHours;
     use crate::employment::{
         CompensationTerms, EmployerId, EmploymentId, PersonId, PersonReference,
     };
@@ -678,6 +769,7 @@ mod tests {
         EffectivePeriod, PayeBand, PayeTable, PayeTableId, RoundingRule, SscRulesId, SscRuleset,
     };
     use crate::ruleset::ruleset_for;
+    use crate::salt_policy::{SaltPolicyId, SaltPolicyStatus};
     use crate::unsupported_deduction::{UnsupportedDeductionKind, UnsupportedDeductionKinds};
     use crate::year_to_date::PeriodsElapsed;
     use chrono::NaiveDate;
@@ -699,6 +791,45 @@ mod tests {
             amount: money(amount),
             label: None,
         }
+    }
+
+    fn overtime(hours: Decimal, multiplier: Decimal) -> EarningInstruction {
+        EarningInstruction::Overtime {
+            hours: OvertimeHours::new(hours).unwrap(),
+            multiplier: OvertimeMultiplier::try_from(multiplier).unwrap(),
+            label: None,
+        }
+    }
+
+    /// `input_for` with overtime instructions and agreed weekly hours on
+    /// the compensation terms — the ordinary shape of an overtime period.
+    fn overtime_input(
+        basic_pay: Decimal,
+        ordinary_hours: Decimal,
+        instructions: Vec<EarningInstruction>,
+    ) -> PayrollInput {
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(basic_pay))
+            .unwrap()
+            .with_ordinary_hours(Some(OrdinaryHours::new(ordinary_hours).unwrap()));
+        PayrollInput::new(
+            snapshot(date(2025, 1, 1), None, terms),
+            test_period(),
+            instructions,
+            ytd(dec!(0), dec!(0), 1),
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        )
+    }
+
+    /// The one overtime line a scenario produced, with its workings.
+    fn only_overtime_line(calc: &PayrollCalculation) -> (Money, OvertimeTrace) {
+        let mut found = calc.earning_lines.iter().filter_map(|line| match line {
+            Earning::Overtime { amount, trace, .. } => Some((*amount, *trace)),
+            _ => None,
+        });
+        let line = found.next().expect("an overtime line was expected");
+        assert!(found.next().is_none(), "exactly one overtime line expected");
+        line
     }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -874,6 +1005,10 @@ mod tests {
                     taxable = taxable.checked_add(*amount).unwrap();
                     gross = gross.checked_add(*amount).unwrap();
                 }
+                Earning::Overtime { amount, .. } => {
+                    taxable = taxable.checked_add(*amount).unwrap();
+                    gross = gross.checked_add(*amount).unwrap();
+                }
             }
         }
         assert_eq!(
@@ -890,7 +1025,7 @@ mod tests {
         );
         assert_eq!(
             taxable, calc.taxable_remuneration,
-            "taxable must be BasicPay plus TaxableAllowance only"
+            "taxable must be BasicPay plus TaxableAllowance plus Overtime"
         );
         assert_eq!(
             ssc_base, calc.employee_social_security.trace.basic_pay,
@@ -2446,6 +2581,263 @@ mod tests {
             calculate(&input, &rules),
             Err(PayrollError::DeductionsExceedGrossRemuneration)
         );
+    }
+
+    // ---- Overtime (issue #76, ADR-0022) -----------------------------------
+    //
+    // The divisor these assert is Salt's own choice, SC-OPEN-6, and is
+    // `NEEDS CONFIRMATION`. Every test whose expected figure depends on it
+    // is therefore named `salt_policy_*` and none may be named `statutory_*`
+    // (ADR-0008): a `statutory_*` name means a literal published by a
+    // regulator and is citable as evidence, and no regulator published this.
+    // Tests of mechanics that hold whatever the divisor is are `algorithm_*`.
+
+    // 12,000 x 12 / 52 / 40 = 69.230769...  N$/hour, exactly and unrounded.
+    // Twelve hours at 1.5:  69.230769... x 12 x 1.5 = 1,246.153846... -> 1,246.15.
+    // Four hours at 2.0:    69.230769... x 4 x 2.0  =   553.846153... ->   553.85.
+    #[test]
+    fn salt_policy_overtime_is_hours_at_a_multiplier_priced_by_the_derived_hourly_rate() {
+        let input = overtime_input(
+            dec!(12000.00),
+            dec!(40),
+            vec![overtime(dec!(12), dec!(1.5)), overtime(dec!(4), dec!(2.0))],
+        );
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+        assert_invariants(&calc);
+
+        let amounts: Vec<Money> = calc
+            .earning_lines
+            .iter()
+            .filter_map(|line| match line {
+                Earning::Overtime { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(amounts, vec![money(dec!(1246.15)), money(dec!(553.85))]);
+    }
+
+    // Every figure an Operator needs to redo the sum by hand: BasicPay,
+    // OrdinaryHours, both halves of the divisor, the unrounded rate, the
+    // hours and the multiplier.
+    #[test]
+    fn salt_policy_the_overtime_workings_show_every_figure_behind_the_line() {
+        let input = overtime_input(
+            dec!(12000.00),
+            dec!(40),
+            vec![overtime(dec!(12), dec!(1.5))],
+        );
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+        let (amount, trace) = only_overtime_line(&calc);
+
+        assert_eq!(trace.basic_pay, money(dec!(12000.00)));
+        assert_eq!(trace.ordinary_hours.as_decimal(), dec!(40));
+        assert_eq!(trace.months_per_year, dec!(12));
+        assert_eq!(trace.weeks_per_year, dec!(52));
+        assert_eq!(trace.hours.as_decimal(), dec!(12));
+        assert_eq!(trace.multiplier, OvertimeMultiplier::OneAndAHalf);
+        // The rate is exact and unrounded — not 69.23.
+        assert_eq!(
+            trace.derived_hourly_rate,
+            dec!(12000.00) * dec!(12) / dec!(52) / dec!(40)
+        );
+        assert_ne!(trace.derived_hourly_rate, dec!(69.23));
+        assert_eq!(amount, money(dec!(1246.15)));
+    }
+
+    #[test]
+    fn salt_policy_the_overtime_workings_stamp_the_divisor_as_salt_policy_needing_confirmation() {
+        let input = overtime_input(
+            dec!(12000.00),
+            dec!(40),
+            vec![overtime(dec!(12), dec!(1.5))],
+        );
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+        let (_, trace) = only_overtime_line(&calc);
+
+        assert_eq!(trace.policy.id, SaltPolicyId::SalaryToHourlyDivisor);
+        assert_eq!(trace.policy.id.reference(), "SC-OPEN-6");
+        assert_eq!(trace.policy.status, SaltPolicyStatus::NeedsConfirmation);
+    }
+
+    #[test]
+    fn algorithm_overtime_feeds_gross_and_taxable_but_never_the_social_security_base() {
+        let input = overtime_input(
+            dec!(12000.00),
+            dec!(40),
+            vec![overtime(dec!(12), dec!(1.5))],
+        );
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(calc.gross_remuneration, money(dec!(13246.15)));
+        assert_eq!(calc.taxable_remuneration, money(dec!(13246.15)));
+        assert_eq!(
+            calc.employee_social_security.trace.basic_pay,
+            money(dec!(12000.00)),
+            "the social security base must be BasicPay alone"
+        );
+        assert_eq!(
+            calc.employer_social_security.trace.basic_pay,
+            money(dec!(12000.00))
+        );
+    }
+
+    // One rounding, at the line. Two lines at the same multiplier stay two
+    // lines and round independently — they are never summed first. At this
+    // rate one hour at 1.5 is 103.846153..., which rounds to 103.85 twice
+    // (207.70), where summing first would give 207.69.
+    #[test]
+    fn algorithm_two_overtime_lines_at_the_same_multiplier_round_independently() {
+        let input = overtime_input(
+            dec!(12000.00),
+            dec!(40),
+            vec![overtime(dec!(1), dec!(1.5)), overtime(dec!(1), dec!(1.5))],
+        );
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        let amounts: Vec<Money> = calc
+            .earning_lines
+            .iter()
+            .filter_map(|line| match line {
+                Earning::Overtime { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(amounts, vec![money(dec!(103.85)), money(dec!(103.85))]);
+
+        let merged = overtime_input(dec!(12000.00), dec!(40), vec![overtime(dec!(2), dec!(1.5))]);
+        let merged = calculate(&merged, &test_rules()).unwrap();
+        assert_eq!(only_overtime_line(&merged).0, money(dec!(207.69)));
+    }
+
+    // A joiner's BasicPay line is prorated; their hourly rate is not. The
+    // rate comes from the contractual figure on the CompensationTerms row,
+    // because a person's hourly rate does not fall because they joined
+    // mid-month. That choice is part of SC-OPEN-6.
+    #[test]
+    fn salt_policy_the_hourly_rate_comes_from_contractual_pay_not_the_prorated_figure() {
+        let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(12000.00)))
+            .unwrap()
+            .with_ordinary_hours(Some(OrdinaryHours::new(dec!(40)).unwrap()));
+        // Joins on the 16th of a 31-day calendar month: 16 of 31 days.
+        let input = PayrollInput::new(
+            snapshot(date(2026, 1, 16), None, terms),
+            PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap(),
+            vec![overtime(dec!(12), dec!(1.5))],
+            ytd(dec!(0), dec!(0), 1),
+            calendar_month_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+        let (amount, trace) = only_overtime_line(&calc);
+
+        assert_eq!(
+            calc.earning_lines[0],
+            Earning::BasicPay(money(dec!(6193.55))),
+            "BasicPay is still prorated"
+        );
+        assert_eq!(
+            trace.basic_pay,
+            money(dec!(12000.00)),
+            "the rate is derived from contractual pay, not the prorated line"
+        );
+        assert_eq!(amount, money(dec!(1246.15)));
+    }
+
+    #[test]
+    fn algorithm_overtime_without_recorded_ordinary_hours_is_refused() {
+        let terms = CompensationTerms::new(date(2025, 1, 26), None, money(dec!(12000.00))).unwrap();
+        let input = PayrollInput::new(
+            snapshot(date(2025, 1, 1), None, terms),
+            test_period(),
+            vec![overtime(dec!(12), dec!(1.5))],
+            ytd(dec!(0), dec!(0), 1),
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::OrdinaryHoursNotRecorded)
+        );
+    }
+
+    // A legacy row with no recorded hours still pays salary. Missing hours
+    // are unknown, not invalid, and only overtime needs them.
+    #[test]
+    fn algorithm_a_salary_only_period_does_not_need_recorded_ordinary_hours() {
+        let input = input_for(dec!(12000.00), ytd(dec!(0), dec!(0), 1));
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert_eq!(calc.gross_remuneration, money(dec!(12000.00)));
+    }
+
+    // No new rule for a within-period change: exactly one CompensationTerms
+    // row covers every day being paid, and it supplies both the pay and the
+    // hours for the whole period. A row dated mid-period is refused by the
+    // existing INV-014 message, and nothing about overtime changes that.
+    #[test]
+    fn salt_policy_an_ordinary_hours_change_dated_inside_a_period_is_refused_as_before() {
+        let terms = CompensationTerms::new(date(2026, 2, 10), None, money(dec!(12000.00)))
+            .unwrap()
+            .with_ordinary_hours(Some(OrdinaryHours::new(dec!(45)).unwrap()));
+        let input = PayrollInput::new(
+            snapshot(date(2025, 1, 1), None, terms),
+            test_period(),
+            vec![overtime(dec!(12), dec!(1.5))],
+            ytd(dec!(0), dec!(0), 1),
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::EffectiveFromNotAPeriodStart {
+                next_valid_effective_from: date(2026, 2, 26),
+            })
+        );
+    }
+
+    #[test]
+    fn algorithm_the_overtime_label_is_carried_and_never_changes_the_money() {
+        let labelled = PayrollInput::new(
+            overtime_input(dec!(12000.00), dec!(40), Vec::new())
+                .employment
+                .clone(),
+            test_period(),
+            vec![EarningInstruction::Overtime {
+                hours: OvertimeHours::new(dec!(12)).unwrap(),
+                multiplier: OvertimeMultiplier::OneAndAHalf,
+                label: Some(EarningLabel::new("Sunday overtime").unwrap()),
+            }],
+            ytd(dec!(0), dec!(0), 1),
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        );
+        let unlabelled = overtime_input(
+            dec!(12000.00),
+            dec!(40),
+            vec![overtime(dec!(12), dec!(1.5))],
+        );
+
+        let labelled = calculate(&labelled, &test_rules()).unwrap();
+        let unlabelled = calculate(&unlabelled, &test_rules()).unwrap();
+
+        assert!(matches!(
+            labelled.earning_lines[1],
+            Earning::Overtime { ref label, .. } if label.as_ref().unwrap().as_str() == "Sunday overtime"
+        ));
+        assert_eq!(
+            only_overtime_line(&labelled).0,
+            only_overtime_line(&unlabelled).0
+        );
+        assert_eq!(labelled.net_pay, unlabelled.net_pay);
     }
 
     #[test]

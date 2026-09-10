@@ -672,6 +672,134 @@ async fn a_basic_pay_line_is_a_malformed_request() {
     assert_eq!(json["error"]["code"], "malformed_request");
 }
 
+// Issue #76: overtime is typed as hours at a multiplier, never as money,
+// and reads back the same way. `amountCents` is deliberately absent from
+// both the request and the response — Salt derives the money.
+#[tokio::test]
+async fn overtime_is_set_and_read_back_as_hours_at_a_multiplier() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [
+                    { "kind": "overtime", "hours": "12", "multiplier": "1.5",
+                      "label": "  Sunday overtime  " },
+                    { "kind": "overtime", "hours": "4.5", "multiplier": "2",
+                      "label": "public holiday" },
+                ],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let earnings = detail["members"][0]["earnings"].as_array().unwrap();
+    assert_eq!(earnings.len(), 2);
+    assert_eq!(earnings[0]["kind"], "overtime");
+    assert_eq!(earnings[0]["hours"], "12");
+    assert_eq!(earnings[0]["multiplier"], "1.5");
+    assert_eq!(earnings[0]["label"], "Sunday overtime");
+    assert!(
+        earnings[0].get("amountCents").is_none(),
+        "an overtime instruction carries hours, never money"
+    );
+    assert_eq!(earnings[1]["hours"], "4.5");
+    assert_eq!(earnings[1]["multiplier"], "2");
+}
+
+// D31: the multiplier set is closed at 1.5 and 2.0. The body is well
+// formed, so this is not `malformed_request` — it is its own refusal with
+// its own stated reason and the supported set named.
+#[tokio::test]
+async fn an_overtime_multiplier_outside_the_closed_set_is_refused_with_a_stated_reason() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [{ "kind": "overtime", "hours": "12", "multiplier": "1.75",
+                               "label": "overtime" }],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "unsupported_overtime_multiplier");
+    assert_eq!(json["error"]["details"]["supplied"], "1.75");
+    assert_eq!(
+        json["error"]["details"]["supported"],
+        serde_json::json!(["1.5", "2"])
+    );
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("1.5 and 2"),
+        "the refusal must state which multipliers are supported"
+    );
+}
+
+#[tokio::test]
+async fn zero_or_negative_overtime_hours_are_refused() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    for hours in ["0", "-3"] {
+        let response = router()
+            .await
+            .oneshot(set_earnings_request(
+                &employer_id,
+                &run_id,
+                &employment_id,
+                &cookie,
+                true,
+                serde_json::json!({
+                    "earnings": [{ "kind": "overtime", "hours": hours, "multiplier": "1.5",
+                                   "label": "overtime" }],
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "hours {hours}"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "invalid_overtime_hours");
+        assert_eq!(json["error"]["details"]["supplied"], hours);
+    }
+}
+
 #[tokio::test]
 async fn an_employment_that_is_not_an_active_member_is_refused() {
     let (cookie, employer_id) = an_authorized_operator().await;

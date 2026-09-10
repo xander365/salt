@@ -20,6 +20,7 @@ mod pay_period;
 mod pay_schedule;
 mod rules;
 mod ruleset;
+mod salt_policy;
 mod tax_year;
 mod unsupported_deduction;
 mod year_to_date;
@@ -31,6 +32,8 @@ pub use calculation::{
 pub use deduction::{Deduction, StatutoryDeduction};
 pub use earning::{
     Earning, EarningInstruction, EarningLabel, EarningLabelError, MAX_EARNING_LABEL_LENGTH,
+    MAX_OVERTIME_HOURS, OvertimeHours, OvertimeHoursError, OvertimeMultiplier,
+    OvertimeMultiplierError, OvertimeTrace,
 };
 pub use employment::{
     CompensationTerms, CompensationTermsError, EmployerId, EmploymentId, EmploymentSnapshot,
@@ -49,6 +52,7 @@ pub use rules::{
     SscRuleset,
 };
 pub use ruleset::{paye_table_for, ruleset_for, ssc_rules_for};
+pub use salt_policy::{SaltPolicyId, SaltPolicyStamp, SaltPolicyStatus};
 pub use tax_year::TaxYear;
 pub use unsupported_deduction::{
     EmptyUnsupportedDeductionKinds, UnsupportedDeductionKind, UnsupportedDeductionKinds,

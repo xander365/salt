@@ -1,5 +1,5 @@
 // `GET /api/employers/{e}/finalized-payroll/{f}` (issue #66, parent #59 Spec
-// 3 of 3, §0.22/§0.29). One immutable finalized payroll: the nine figures,
+// 3 of 3, §0.22/§0.29). One immutable finalized payroll: the ten figures,
 // the period, the pay date and the SaltVersion. The same answer every time
 // it is read, because nothing about a `FinalizedPayroll` ever changes.
 

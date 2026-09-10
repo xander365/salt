@@ -605,7 +605,7 @@ fn finalized_traces_request(
 /// Acceptance: the whole ordinary payroll journey, in one place — sign in,
 /// create an Employment by name, record CompensationTerms, both
 /// declarations, create an Ordinary run, read its members, set a taxable
-/// allowance, calculate, read the nine figures, finalize, read the
+/// allowance, calculate, read the ten figures, finalize, read the
 /// finalized payroll back, read its traces. Deliberately one test, not a
 /// suite (issue #58's own Deep Instructions): its whole value is that the
 /// entire journey lives in one place.
@@ -786,7 +786,7 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
     let member = &calculated_body["members"][0];
     assert!(member["refusal"].is_null());
 
-    // Read the nine figures. Exactly nine, all cents-exact integers and
+    // Read the ten figures. Exactly ten, all cents-exact integers and
     // never a JSON float (INV-001, §0.29).
     let figures = &member["figures"];
     let mut figure_names: Vec<&str> = figures
@@ -804,12 +804,13 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             "employerSscCents",
             "grossCents",
             "netCents",
+            "overtimeCents",
             "payeCents",
             "taxableAllowancesCents",
             "taxableRemunerationCents",
             "totalDeductionsCents",
         ],
-        "the wire carries exactly the nine figures §0.29 names",
+        "the wire carries exactly the ten figures §0.29 names",
     );
     let cents = |field: &str| {
         figures[field]

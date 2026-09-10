@@ -40,13 +40,19 @@ use std::collections::HashMap;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, State};
+use axum::http::StatusCode;
 use chrono::NaiveDate;
-use payroll::{EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money};
+use payroll::{
+    EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money, OvertimeHours,
+    OvertimeMultiplier, OvertimeMultiplierError,
+};
 use payroll_app::{
     PayrollAppError, PayrollFigures, PayrollRunBlocker, PayrollRunDetail, RunStatus,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::str::FromStr;
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::employment_facts::{PayPeriodDto, RecordedResponse};
@@ -65,39 +71,138 @@ fn status_str(status: RunStatus) -> &'static str {
     }
 }
 
-/// One taxable allowance instruction on the wire:
-/// `{"kind": "taxableAllowance", "amountCents": 2000, "label": "standby allowance"}`.
+/// One earning instruction on the wire, tagged by `kind`:
+///
+/// - `{"kind": "taxableAllowance", "amountCents": 2000, "label": "standby allowance"}`
+/// - `{"kind": "overtime", "hours": "12", "multiplier": "1.5", "label": "Sunday overtime"}`
+///
+/// A tagged enum and not one flat shape with optional fields, because the
+/// two kinds genuinely carry different facts: an allowance is money an
+/// Operator decided, overtime is hours Salt prices itself (D14). A body
+/// naming a `kind` this enum does not have — `basicPay`, say — fails to
+/// deserialize and is a malformed request, which is exactly right: `BasicPay`
+/// is derived from `CompensationTerms` and can never be typed.
+///
+/// `hours` and `multiplier` are decimal strings, like `ordinaryHours` on the
+/// compensation-terms route, so no figure passes through a JSON float
+/// (INV-001).
+///
 /// Responses use a nullable label so a version-1 unlabelled allowance can be
 /// displayed honestly; a new request must provide a valid non-blank label.
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EarningLineDto {
-    kind: String,
-    amount_cents: i64,
-    label: Option<String>,
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum EarningLineDto {
+    #[serde(rename_all = "camelCase")]
+    TaxableAllowance {
+        amount_cents: i64,
+        label: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Overtime {
+        hours: String,
+        multiplier: String,
+        label: Option<String>,
+    },
+}
+
+/// An overtime multiplier outside the closed set of 1.5 and 2.0 (D31).
+/// Its own code rather than a bare `malformed_request`, because the body was
+/// well formed and the refusal has a reason worth stating: the set is closed
+/// and a third factor is a code change, not a number a caller may supply.
+/// `details` names what was sent and what is supported, so the refusal is
+/// actionable without the caller guessing.
+///
+/// Whether 1.5 and 2.0 are the correct and only statutory factors in Namibia
+/// is `Q-OPEN-8` and unverified — nothing here says they are law.
+fn unsupported_multiplier(refusal: OvertimeMultiplierError, supplied: &str) -> ApiError {
+    // Destructured rather than ignored, so a second `OvertimeMultiplierError`
+    // variant fails this build instead of silently reporting itself under
+    // this one code.
+    let OvertimeMultiplierError::Unsupported { .. } = refusal;
+    ApiError::payroll_refusal(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "unsupported_overtime_multiplier",
+        refusal.to_string(),
+        Some(serde_json::json!({
+            "supplied": supplied,
+            "supported": ["1.5", "2"],
+        })),
+    )
+}
+
+/// Overtime hours that are zero, negative, finer than a hundredth, or larger
+/// than a whole pay period. Its own code for the same reason as
+/// [`unsupported_multiplier`]: the body parsed, and the reason is worth
+/// stating rather than collapsing into "malformed".
+fn invalid_overtime_hours(message: String, supplied: &str) -> ApiError {
+    ApiError::payroll_refusal(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_overtime_hours",
+        message,
+        Some(serde_json::json!({ "supplied": supplied })),
+    )
+}
+
+/// A non-blank label is required on every new line. `None` is readable on the
+/// way out — a version-1 allowance really had none — but never writable.
+fn parse_label(label: Option<String>) -> Result<EarningLabel, ApiError> {
+    label
+        .ok_or_else(ApiError::malformed_request)
+        .and_then(|label| EarningLabel::new(label).map_err(|_| ApiError::malformed_request()))
 }
 
 fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
-    let amount = Money::from_cents(line.amount_cents).map_err(|_| ApiError::malformed_request())?;
-    if line.kind != "taxableAllowance" {
-        return Err(ApiError::malformed_request());
+    match line {
+        EarningLineDto::TaxableAllowance {
+            amount_cents,
+            label,
+        } => {
+            let amount =
+                Money::from_cents(amount_cents).map_err(|_| ApiError::malformed_request())?;
+            Ok(EarningInstruction::TaxableAllowance {
+                amount,
+                label: Some(parse_label(label)?),
+            })
+        }
+        EarningLineDto::Overtime {
+            hours,
+            multiplier,
+            label,
+        } => {
+            let hours_decimal =
+                Decimal::from_str(&hours).map_err(|_| ApiError::malformed_request())?;
+            let parsed_hours = OvertimeHours::new(hours_decimal)
+                .map_err(|refusal| invalid_overtime_hours(refusal.to_string(), &hours))?;
+            let multiplier_decimal =
+                Decimal::from_str(&multiplier).map_err(|_| ApiError::malformed_request())?;
+            let parsed_multiplier = OvertimeMultiplier::try_from(multiplier_decimal)
+                .map_err(|refusal| unsupported_multiplier(refusal, &multiplier))?;
+            Ok(EarningInstruction::Overtime {
+                hours: parsed_hours,
+                multiplier: parsed_multiplier,
+                label: Some(parse_label(label)?),
+            })
+        }
     }
-    let label = line
-        .label
-        .ok_or_else(ApiError::malformed_request)
-        .and_then(|label| EarningLabel::new(label).map_err(|_| ApiError::malformed_request()))?;
-    Ok(EarningInstruction::TaxableAllowance {
-        amount,
-        label: Some(label),
-    })
 }
 
 fn earning_to_dto(earning: EarningInstruction) -> EarningLineDto {
-    let EarningInstruction::TaxableAllowance { amount, label } = earning;
-    EarningLineDto {
-        kind: "taxableAllowance".to_string(),
-        amount_cents: amount.cents(),
-        label: label.map(|label| label.to_string()),
+    match earning {
+        EarningInstruction::TaxableAllowance { amount, label } => {
+            EarningLineDto::TaxableAllowance {
+                amount_cents: amount.cents(),
+                label: label.map(|label| label.to_string()),
+            }
+        }
+        EarningInstruction::Overtime {
+            hours,
+            multiplier,
+            label,
+        } => EarningLineDto::Overtime {
+            hours: hours.as_decimal().to_string(),
+            multiplier: multiplier.as_decimal().to_string(),
+            label: label.map(|label| label.to_string()),
+        },
     }
 }
 
@@ -227,10 +332,10 @@ fn blocker_to_dto(blocker: PayrollRunBlocker) -> BlockerDto {
     BlockerDto { code, details }
 }
 
-/// The nine figures §0.29 names for a member's current calculation — shared
+/// The ten figures §0.29 names for a member's current calculation — shared
 /// by a working run's own detail/calculate response and by
 /// [`crate::finalized_payroll`]'s finalized-payroll detail (issue #57), so
-/// the same nine names appear on the wire whether the run is `Calculated` or
+/// the same ten names appear on the wire whether the run is `Calculated` or
 /// already `Finalized`. Cents-exact integers on the wire, never a JSON float
 /// (INV-001).
 #[derive(Serialize)]
@@ -238,6 +343,7 @@ fn blocker_to_dto(blocker: PayrollRunBlocker) -> BlockerDto {
 pub(crate) struct FiguresDto {
     basic_pay_cents: i64,
     taxable_allowances_cents: i64,
+    overtime_cents: i64,
     gross_cents: i64,
     taxable_remuneration_cents: i64,
     paye_cents: i64,
@@ -251,6 +357,7 @@ pub(crate) fn figures_to_dto(figures: PayrollFigures) -> FiguresDto {
     FiguresDto {
         basic_pay_cents: figures.basic_pay.cents(),
         taxable_allowances_cents: figures.taxable_allowances.cents(),
+        overtime_cents: figures.overtime.cents(),
         gross_cents: figures.gross.cents(),
         taxable_remuneration_cents: figures.taxable_remuneration.cents(),
         paye_cents: figures.paye.cents(),

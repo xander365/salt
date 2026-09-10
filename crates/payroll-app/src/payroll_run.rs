@@ -818,17 +818,20 @@ pub enum PayrollRunBlocker {
     UnsupportedDeductionsPresent { kinds: UnsupportedDeductionKinds },
     /// No `CompensationTerms` row is in force at the period end.
     NoCompensationTermsInForce,
-    /// A future hourly-rate earning needs the terms row's agreed weekly
-    /// ordinary hours. Salary-only runs deliberately do not inspect this:
-    /// legacy rows are unknown, not invalid.
+    /// This member has an overtime line, and the `CompensationTerms` row in
+    /// force at the period end records no `OrdinaryHours` — so the divisor
+    /// the overtime would be priced by (ADR-0022, SC-OPEN-6) has no value.
+    /// Salary-only members deliberately do not raise this: a legacy row's
+    /// missing hours are unknown, not invalid.
     OrdinaryHoursNotRecorded,
 }
 
 /// The figures §0.29 names for one member's current calculation: Basic Pay,
-/// Taxable Allowances, Gross, Taxable Remuneration, PAYE, Employee SSC,
-/// Employer SSC, Total Deductions and Net — nine in all — read straight off
-/// a stored `PayrollCalculation` (issue #55, extended to nine by issue #57
-/// so a finalized read and a working one share one shape). `basic_pay` and
+/// Taxable Allowances, Overtime, Gross, Taxable Remuneration, PAYE,
+/// Employee SSC, Employer SSC, Total Deductions and Net — ten in all — read
+/// straight off a stored `PayrollCalculation` (issue #55, extended to nine
+/// by issue #57 so a finalized read and a working one share one shape, and
+/// to ten by issue #76 when Overtime became an earning kind of its own). `basic_pay` and
 /// `taxable_allowances` are summed from `earning_lines` here, once, because
 /// `calculate` itself never stores either as a bare total —
 /// `RemunerationBases` accumulates into three statutory bases, not per-kind
@@ -839,6 +842,11 @@ pub enum PayrollRunBlocker {
 pub struct PayrollFigures {
     pub basic_pay: Money,
     pub taxable_allowances: Money,
+    /// Every `Earning::Overtime` line's money, summed. Its own figure and
+    /// never folded into `taxable_allowances`: overtime feeds PAYE and
+    /// gross but never the social security base, so showing it inside a
+    /// figure that behaves differently would misstate what was paid.
+    pub overtime: Money,
     pub gross: Money,
     pub taxable_remuneration: Money,
     pub paye: Money,
@@ -867,6 +875,7 @@ impl PayrollFigures {
     pub(crate) fn from_calculation(calculation: &PayrollCalculation) -> Self {
         let mut basic_pay = Money::ZERO;
         let mut taxable_allowances = Money::ZERO;
+        let mut overtime = Money::ZERO;
         for line in &calculation.earning_lines {
             match line {
                 Earning::BasicPay(amount) => {
@@ -876,6 +885,11 @@ impl PayrollFigures {
                 }
                 Earning::TaxableAllowance { amount, .. } => {
                     taxable_allowances = taxable_allowances
+                        .checked_add(*amount)
+                        .expect("see from_calculation's own doc comment: cannot overflow here")
+                }
+                Earning::Overtime { amount, .. } => {
+                    overtime = overtime
                         .checked_add(*amount)
                         .expect("see from_calculation's own doc comment: cannot overflow here")
                 }
@@ -892,6 +906,7 @@ impl PayrollFigures {
         PayrollFigures {
             basic_pay,
             taxable_allowances,
+            overtime,
             gross: calculation.gross_remuneration,
             taxable_remuneration: calculation.taxable_remuneration,
             paye: calculation.paye.amount,
@@ -1039,7 +1054,7 @@ pub async fn get_payroll_run_detail(
             PayrollFigures::from_calculation(&calculation)
         });
         let employment_id = EmploymentId::new(employment_id);
-        let blockers = member_blockers(db, &employment_id, period).await?;
+        let blockers = member_blockers(db, &employment_id, period, &earnings).await?;
         members.push(PayrollRunMember {
             employment_id,
             finalized_payroll_id: finalized_payroll_id.map(FinalizedPayrollId::new),
@@ -1065,8 +1080,15 @@ pub async fn get_payroll_run_detail(
 /// (issue #54, §0.31). An empty list means ready.
 ///
 /// Order matches the read model's own listing: PriorEmployment, then
-/// UnsupportedDeductionStatus, then CompensationTerms. Each fact yields at
-/// most one blocker, so the list holds zero to three entries.
+/// UnsupportedDeductionStatus, then CompensationTerms, then the terms row's
+/// `OrdinaryHours`. Each fact yields at most one blocker, so the list holds
+/// zero to four entries.
+///
+/// `earnings` is read for one reason only: overtime is priced from the
+/// terms row's agreed weekly `OrdinaryHours` (ADR-0022), so a member with an
+/// overtime line and no recorded hours is blocked while a salary-only member
+/// with the same legacy row is ready. Missing hours are unknown, not
+/// invalid, and this is the whole of the difference.
 ///
 /// Only two other [`PayrollAppError`]s can reach the caller from here, and
 /// neither is one of the five standing-fact states this list may report, so
@@ -1080,6 +1102,7 @@ async fn member_blockers(
     db: &SaltDatabase,
     employment_id: &EmploymentId,
     period: PayPeriod,
+    earnings: &[EarningInstruction],
 ) -> Result<Vec<PayrollRunBlocker>, PayrollAppError> {
     let mut blockers = Vec::new();
 
@@ -1103,7 +1126,14 @@ async fn member_blockers(
     }
 
     match get_employment_snapshot_on(db.pool(), employment_id, period.end()).await {
-        Ok(_) => {}
+        Ok(snapshot) => {
+            let wants_overtime = earnings
+                .iter()
+                .any(|earning| matches!(earning, EarningInstruction::Overtime { .. }));
+            if wants_overtime && snapshot.compensation_terms().ordinary_hours().is_none() {
+                blockers.push(PayrollRunBlocker::OrdinaryHoursNotRecorded);
+            }
+        }
         Err(PayrollAppError::NoCompensationTermsInForce(_)) => {
             blockers.push(PayrollRunBlocker::NoCompensationTermsInForce)
         }

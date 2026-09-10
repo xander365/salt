@@ -627,6 +627,50 @@ async fn no_compensation_terms_blocks_with_no_compensation_terms_in_force(pool: 
     );
 }
 
+/// Issue #76: `OrdinaryHoursNotRecorded` depends on what the member is being
+/// paid, not on the terms row alone. The same historical row with no
+/// `OrdinaryHours` blocks a member who has overtime and does not block one
+/// who is on salary only — missing hours are unknown, not invalid.
+#[sqlx::test]
+async fn overtime_on_terms_without_ordinary_hours_blocks_but_salary_alone_does_not(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db, "Employer").await;
+    let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
+    a_fully_declared_employment(&db, &employment_id).await;
+    sqlx::query("UPDATE compensation_terms SET ordinary_hours = NULL WHERE employment_id = $1")
+        .bind(employment_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run_id = a_run(&db, &employer_id, february_period()).await;
+
+    let salary_only = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(salary_only.members[0].blockers, Vec::new());
+
+    set_run_earnings(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![EarningInstruction::Overtime {
+            hours: payroll::OvertimeHours::new(rust_decimal::Decimal::new(12, 0)).unwrap(),
+            multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
+            label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
+        }],
+    )
+    .await
+    .unwrap();
+
+    let with_overtime = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        with_overtime.members[0].blockers,
+        vec![PayrollRunBlocker::OrdinaryHoursNotRecorded]
+    );
+}
+
 /// The whole point of §0.31: nothing is persisted. Recording the missing
 /// fact and reading again clears the blocker from the page — the same
 /// connection never sees a stale opinion.

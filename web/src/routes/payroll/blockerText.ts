@@ -57,7 +57,7 @@ export function blockerSentence(blocker: PayrollRunBlockerDto): string {
       return 'Pay has not been recorded.';
 
     case 'ordinary_hours_not_recorded':
-      return 'Ordinary hours per week have not been recorded.';
+      return 'This member has overtime, and their ordinary hours per week have not been recorded.';
 
     // The six codes above are the contract (§0.31); a seventh reaching the
     // browser is a version skew this screen cannot describe better than

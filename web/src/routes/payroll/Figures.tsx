@@ -1,4 +1,4 @@
-// The nine figures §0.29 names, shared verbatim between a working run's own
+// The ten figures §0.29 names, shared verbatim between a working run's own
 // detail/calculate response (`PayrollRun.tsx`) and a finalized payroll's own
 // detail response (`FinalizedPayroll.tsx`, issue #66) — the same reason
 // `crates/salt-server/src/finalized_payroll.rs` reuses `payroll_runs.rs`'s
@@ -9,10 +9,11 @@ import { useId } from 'react';
 import type { FiguresDto } from '../../api/types';
 import { moneyDisplayText } from '../../money';
 
-/** The nine figures §0.29 names, in the order it names them. */
+/** The ten figures §0.29 names, in the order it names them. */
 const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
   { key: 'basicPayCents', label: 'Basic Pay' },
   { key: 'taxableAllowancesCents', label: 'Taxable Allowances' },
+  { key: 'overtimeCents', label: 'Overtime' },
   { key: 'grossCents', label: 'Gross' },
   { key: 'taxableRemunerationCents', label: 'Taxable Remuneration' },
   { key: 'payeCents', label: 'PAYE' },

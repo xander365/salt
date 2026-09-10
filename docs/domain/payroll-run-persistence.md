@@ -1543,6 +1543,10 @@ off-cycle payroll, the remuneration-classification UI, resolving SC-OPEN-1
 through SC-OPEN-5, workflow engines, repository frameworks, event sourcing, or
 microservices.
 
+**Superseded in part (issue #76, ADR-0022).** Overtime is now in scope and
+ships: it is an `Earning` kind entered as hours at a multiplier. Its divisor
+is a new open item, `SC-OPEN-6`. Everything else in this list stands.
+
 The result is testable entirely from Rust plus PostgreSQL.
 
 ---

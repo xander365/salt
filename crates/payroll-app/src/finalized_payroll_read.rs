@@ -1,6 +1,6 @@
 //! `GetFinalizedPayrollDetail` and `GetFinalizedPayrollTraces` (§0.29,
 //! §0.30; issue #57, parent #49 Spec 2 of 3): an Operator opens a payroll
-//! that has already been finalized and reads it back — the nine figures
+//! that has already been finalized and reads it back — the ten figures
 //! (§0.29, [`crate::PayrollFigures`]), the period, the pay date and the
 //! `SaltVersion` that produced them — without ever seeing the raw
 //! `payroll_calculation_json` snapshot [`crate::finalize`] freezes.
@@ -15,11 +15,14 @@
 //! Traces are deliberately a separate read model, and a separate route
 //! (§0.29's own words: "PAYE and SSC traces are a separate endpoint") —
 //! never inlined into the detail above "for convenience". The everyday
-//! finalized-payroll view stays the nine figures; the workings are an
+//! finalized-payroll view stays the ten figures; the workings are an
 //! explicit second call.
 
 use chrono::NaiveDate;
-use payroll::{EmployerId, EmploymentId, PayPeriod, PayeTrace, PayrollCalculation, SscTrace};
+use payroll::{
+    Earning, EarningLabel, EmployerId, EmploymentId, Money, OvertimeTrace, PayPeriod, PayeTrace,
+    PayrollCalculation, SscTrace,
+};
 
 use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
@@ -140,7 +143,7 @@ pub struct FinalizedPersonParticulars {
 }
 
 /// One `FinalizedPayroll` in full, for `GET
-/// /api/employers/{e}/finalized-payroll/{f}` (issue #57): the nine figures,
+/// /api/employers/{e}/finalized-payroll/{f}` (issue #57): the ten figures,
 /// the period, the pay date and the `SaltVersion` that produced them. Never
 /// the raw `payroll_input_json`, `payroll_rules_json` or
 /// `payroll_calculation_json` snapshot — §0.29's whole point is that a
@@ -281,6 +284,22 @@ pub struct FinalizedPayrollTraces {
     pub paye: PayeTrace,
     pub employee_social_security: SscTrace,
     pub employer_social_security: SscTrace,
+    /// One entry per `Earning::Overtime` line, in the order the calculation
+    /// produced them, so two lines at the same multiplier stay two rows of
+    /// workings — they were priced and rounded independently, and a merged
+    /// row would not add up (ADR-0022). Empty for a salary-only payroll.
+    pub overtime: Vec<OvertimeLineTrace>,
+}
+
+/// One overtime line's money beside the workings behind it, for the
+/// workings screen. `amount` travels with `trace` rather than being looked
+/// up from the figures: the figures carry the *total* overtime, and a
+/// person checking one line by hand needs that line's own figure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OvertimeLineTrace {
+    pub amount: Money,
+    pub label: Option<EarningLabel>,
+    pub trace: OvertimeTrace,
 }
 
 /// Reads one `FinalizedPayroll`'s traces back, scoped to `employer_id` in
@@ -310,10 +329,28 @@ pub async fn get_finalized_payroll_traces(
     let calculation =
         calculation_from_snapshot(&finalized_payroll_id, schema_version, calculation_json)?;
 
+    let overtime = calculation
+        .earning_lines
+        .iter()
+        .filter_map(|line| match line {
+            Earning::Overtime {
+                amount,
+                trace,
+                label,
+            } => Some(OvertimeLineTrace {
+                amount: *amount,
+                label: label.clone(),
+                trace: *trace,
+            }),
+            _ => None,
+        })
+        .collect();
+
     Ok(FinalizedPayrollTraces {
         paye: calculation.paye.trace,
         employee_social_security: calculation.employee_social_security.trace,
         employer_social_security: calculation.employer_social_security.trace,
+        overtime,
     })
 }
 

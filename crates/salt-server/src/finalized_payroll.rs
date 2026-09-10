@@ -1,7 +1,7 @@
 //! `GET /api/employers/{e}/finalized-payroll/{f}` and `GET
 //! /api/employers/{e}/finalized-payroll/{f}/traces` (issue #57, parent #49
 //! Spec 2 of 3). An Operator opens a payroll that has already been
-//! finalized and reads it back — the nine figures, the period, the pay
+//! finalized and reads it back — the ten figures, the period, the pay
 //! date and the version of Salt that produced them — so a question about a
 //! past month can be answered. The PAYE and social security workings are on
 //! their own endpoint, deliberately never inlined into the detail response
@@ -10,7 +10,7 @@
 //! Both DTOs below are hand-written (§0.29): neither ever serializes
 //! `payroll-app`'s stored `payroll_input_json`, `payroll_rules_json` or
 //! `payroll_calculation_json` straight onto the wire. `figures_to_dto`
-//! reuses [`crate::payroll_runs`]'s own DTO — the same nine names a working
+//! reuses [`crate::payroll_runs`]'s own DTO — the same ten names a working
 //! run's `GET`/`calculate` response already carries — so a figure looks the
 //! same whether the run is `Calculated` or already `Finalized`.
 //!
@@ -26,7 +26,8 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
-use payroll::{EmployerId, PayeTrace, SscClamp, SscTrace};
+use payroll::{EmployerId, PayeTrace, SaltPolicyStatus, SscClamp, SscTrace};
+use payroll_app::OvertimeLineTrace;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -110,7 +111,7 @@ pub(crate) struct FinalizedPayrollDetailResponse {
     payslip_template_version: Option<String>,
 }
 
-/// `GET /api/employers/{e}/finalized-payroll/{f}`: the nine figures, the
+/// `GET /api/employers/{e}/finalized-payroll/{f}`: the ten figures, the
 /// period, the pay date and the `SaltVersion` of one finalized payroll. An
 /// id belonging to another Employer is 404, indistinguishable from an
 /// unknown one (ADR-0017) — `payroll_app::get_finalized_payroll_detail`
@@ -226,12 +227,65 @@ fn ssc_trace_to_dto(trace: SscTrace) -> SscTraceDto {
     }
 }
 
+/// One overtime line's workings, hand-mapped from
+/// [`payroll_app::OvertimeLineTrace`] for the same reason [`PayeTraceDto`]
+/// is. Every figure an Operator needs to redo `BasicPay x 12 / 52 /
+/// OrdinaryHours x hours x multiplier` by hand, plus the stamp saying who
+/// chose the divisor.
+///
+/// `derivedHourlyRate` is the exact unrounded rate as a decimal string, not
+/// cents: it is intermediate arithmetic and is never rounded (ADR-0022).
+/// The one rounding on the line produced `amountCents`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OvertimeTraceDto {
+    amount_cents: i64,
+    label: Option<String>,
+    basic_pay_cents: i64,
+    ordinary_hours: String,
+    months_per_year: String,
+    weeks_per_year: String,
+    derived_hourly_rate: String,
+    hours: String,
+    multiplier: String,
+    /// `"SC-OPEN-6"` — the conformance record's own reference.
+    policy_reference: &'static str,
+    /// `"needs_confirmation"`. A wire *code*, like `clamp` above: the words
+    /// an Operator reads are the screen's, never a sentence this crate
+    /// writes. What it must never be rendered as is law.
+    policy_status: &'static str,
+}
+
+fn policy_status_str(status: SaltPolicyStatus) -> &'static str {
+    match status {
+        SaltPolicyStatus::NeedsConfirmation => "needs_confirmation",
+    }
+}
+
+fn overtime_trace_to_dto(line: OvertimeLineTrace) -> OvertimeTraceDto {
+    OvertimeTraceDto {
+        amount_cents: line.amount.cents(),
+        label: line.label.map(|label| label.to_string()),
+        basic_pay_cents: line.trace.basic_pay.cents(),
+        ordinary_hours: decimal_to_dto(line.trace.ordinary_hours.as_decimal()),
+        months_per_year: decimal_to_dto(line.trace.months_per_year),
+        weeks_per_year: decimal_to_dto(line.trace.weeks_per_year),
+        derived_hourly_rate: decimal_to_dto(line.trace.derived_hourly_rate),
+        hours: decimal_to_dto(line.trace.hours.as_decimal()),
+        multiplier: decimal_to_dto(line.trace.multiplier.as_decimal()),
+        policy_reference: line.trace.policy.id.reference(),
+        policy_status: policy_status_str(line.trace.policy.status),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FinalizedPayrollTracesResponse {
     paye: PayeTraceDto,
     employee_ssc: SscTraceDto,
     employer_ssc: SscTraceDto,
+    /// One entry per overtime line, empty for a salary-only payroll.
+    overtime: Vec<OvertimeTraceDto>,
 }
 
 /// `GET /api/employers/{e}/finalized-payroll/{f}/traces`: the PAYE and
@@ -253,5 +307,10 @@ pub(crate) async fn get_finalized_payroll_traces(
         paye: paye_trace_to_dto(traces.paye),
         employee_ssc: ssc_trace_to_dto(traces.employee_social_security),
         employer_ssc: ssc_trace_to_dto(traces.employer_social_security),
+        overtime: traces
+            .overtime
+            .into_iter()
+            .map(overtime_trace_to_dto)
+            .collect(),
     }))
 }

@@ -170,7 +170,7 @@ The consequence is §5.3: Salt v1 ships no user-facing "non-taxable" box at all.
 
 No Tier A source was found for any of the following. Each must be revisited when an answer arrives.
 
-Four of the five have a Salt policy attached in §5. **SC-OPEN-4 deliberately does not** — it has a refusal. Where Salt cannot even state what the rule would be, inventing a fifth unverified rule is worse than stopping.
+Five of the six have a Salt policy attached in §5. **SC-OPEN-4 deliberately does not** — it has a refusal. Where Salt cannot even state what the rule would be, inventing a fifth unverified rule is worse than stopping.
 
 | # | Question | Salt's response | Stamp |
 |---|---|---|---|
@@ -179,6 +179,7 @@ Four of the five have a Salt policy attached in §5. **SC-OPEN-4 deliberately do
 | SC-OPEN-3 | Do the SSC floor and ceiling apply in full to a part-month joiner or leaver? | Policy (§5.7) | `NEEDS SSC CONFIRMATION` |
 | SC-OPEN-4 | How must a new employer treat prior-employer remuneration and PAYE, and is a directive or certificate required first? | **Refusal** (§5.6) | `NEEDS NAMRA CONFIRMATION` |
 | SC-OPEN-5 | One older source (US SSA country profile, 2019) gives the SSC minimum earnings base as N$300, not N$500. Salt implements N$500, consistent with current reporting, the shipped code and the published N$4.50 minimum contribution. | Implemented as N$500 | `flagged` |
+| SC-OPEN-6 | What divisor converts a monthly salary to an hourly rate for overtime? No published Namibian rule prescribing one was found. | Policy (§5.10) | `NEEDS CONFIRMATION` |
 
 **SC-OPEN-1 is a real choice, not a gap.** Sage ships two methods for Namibia: **Normal Tax**, which annualises the current period, and **Average Tax**, which uses year-to-date income based on time worked. Salt implements a third shape (§5.1). The Income Tax Act anticipates deduction tables and methods prescribed by the Minister; it does not define Salt's formula. Nothing here entitles Salt to call its per-period arithmetic statutory.
 
@@ -215,7 +216,10 @@ The genuine hole is different, and §5.6 closes it: someone who already earned t
 ```text
 BasicPay
 TaxableAllowance
+Overtime
 ```
+
+`Overtime` was added by issue #76 (ADR-0022). It is priced from hours and a multiplier, never typed as money, and it feeds `GrossRemuneration` and `TaxableRemuneration` but **never** the social security base — that is §3.3 applied, settled law and not a Salt choice. The divisor that prices it *is* a Salt choice, and is §5.10.
 
 `NonTaxableAllowance` is removed, not renamed. It let a user tick "non-taxable" on a travel allowance without any of the legal qualifying facts (§3.6), and the prescribed kilometre rate is not even published yet.
 
@@ -328,13 +332,34 @@ statutory annual band arithmetic   (exact, unrounded)
             Money
 ```
 
+### 5.9 PAYE refunds
+
+Unchanged from ADR-0001. If a correction lowers recalculated year-to-date liability below PAYE already withheld, `calculate()` refuses rather than returning a refund or clamping to zero. Refunds are not modelled in this domain.
+
+### 5.10 Salary to hourly rate for overtime
+
+Overtime is typed as **hours at a multiplier** and priced by a rate Salt derives:
+
+```text
+DerivedHourlyRate = BasicPay x 12 / 52 / OrdinaryHours
+```
+
+`BasicPay` is the **contractual** figure on the `CompensationTerms` row, never the prorated one: a person's hourly rate does not fall because they joined mid-month. `OrdinaryHours` is the agreed weekly hours recorded on that same row.
+
+No published Namibian rule prescribing a divisor was found. The whole formula is Salt's decision and **must never be described as law**. Stamped SC-OPEN-6, `NEEDS CONFIRMATION`.
+
+`OrdinaryHours` is recorded per Employment precisely so the assumption is visible and dated, rather than hidden in a constant such as 173.33. An overtime line on a period whose terms row records no `OrdinaryHours` is **refused**; a salary-only period on that same row still pays, because missing hours are unknown, not invalid.
+
+The rate is exact and is never rounded. Hours and multiplier are applied at full precision, and there is exactly **one** rounding, at the line, through §5.8's seam. Two lines at the same multiplier stay two lines and round independently.
+
+The stamp travels as data, not prose: every `OvertimeTrace` carries a `SaltPolicyStamp` naming `SC-OPEN-6` and `NEEDS CONFIRMATION`, so the screen renders the sentence and the calculator emits no user-facing English.
+
+The multiplier set is closed at **1.5 and 2.0** (D31) and is an `enum`, not a configuration value. ⚠️ Whether those are the correct and only statutory factors in Namibia is **`Q-OPEN-8`** — assumed from the owner's practice, not verified. Recorded in ADR-0022.
+
 The seam is deliberately asymmetric: it takes `Money` and returns an exact unrounded value. Taxable remuneration is a monetary domain value and must stay non-negative and cents-exact at the public boundary rather than degrading to a bare decimal; the *result* cannot be `Money` for the reason above. The conversion happens inside, before the band arithmetic.
 
 Two consequences: changing the rounding policy must not invalidate a single statutory table test, and the calculator applies rounding only after statutory arithmetic has produced an exact value. There is still only one implementation of progressive-band arithmetic — the statutory seam is that same walk entered without threshold scaling, not a second copy.
 
-### 5.9 PAYE refunds
-
-Unchanged from ADR-0001. If a correction lowers recalculated year-to-date liability below PAYE already withheld, `calculate()` refuses rather than returning a refund or clamping to zero. Refunds are not modelled in this domain.
 
 ---
 
@@ -414,6 +439,7 @@ Any test of the form "this period's PAYE is X" belongs here, because the method 
 - `salt_policy_paye_*` — new starter in October; same-employer mid-year `OpeningBalance` adoption; a correction absorbed by the next period; `PriorEmployment::Unknown` refuses; `PriorEmployment::Some` refuses pending SC-OPEN-4, with the figures surviving into the error; `UnsupportedDeductionStatus::Unknown` refuses; `Present(kinds)` refuses and names them.
 - `salt_policy_ssc_*` — part-month joiner and leaver clamping to the full monthly floor and ceiling (SC-OPEN-3).
 - `salt_policy_rounding_*` — half-up at each statutory output (SC-OPEN-2).
+- `salt_policy_overtime_*` — anything whose figure depends on the salary-to-hourly divisor (SC-OPEN-6, §5.10): the derived rate, the money on a line, that the rate comes from contractual and not prorated pay, and that an `OrdinaryHours` change dated mid-period is refused by the existing rules. **Never `statutory_*`** — a `statutory_*` name means a literal published by a regulator and is citable as evidence under ADR-0008, and no regulator published this divisor. Overtime *mechanics* that hold whatever the divisor is — that two lines round independently, that a multiplier outside the closed set is refused, that overtime never reaches the social security base — are `algorithm_*`.
 - **Ruleset selection by period end date** — that a period straddling a rate change uses the entry covering its **end date**, for its whole length. The rule is ADR-0005's, stated by the product owner; no Namibian source prescribes it. What is statutory is the ceiling value and its instrument's effective date. How Salt maps a pay period onto that date is Salt policy, so a straddle test is `salt_policy_*` and may never be cited as evidence. The N$11,000-to-N$12,500 straddle across 1 September 2026 is the live example.
 
 ### `algorithm_*` — synthetic mechanics

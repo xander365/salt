@@ -1,5 +1,6 @@
-// The PAYE and social security workings behind a `FinalizedPayroll`'s
-// figures (issue #67, parent #59 Spec 3 of 3, §0.29). Kept behind a native
+// The overtime, PAYE and social security workings behind a
+// `FinalizedPayroll`'s figures (issue #67, parent #59 Spec 3 of 3, §0.29;
+// overtime added by issue #76). Kept behind a native
 // `<details>` disclosure on purpose: the finalized-payroll screen reads
 // exactly as it did before this issue while it is closed, and `<details>`/
 // `<summary>` are keyboard-operable and announce their expanded/collapsed
@@ -18,7 +19,13 @@
 
 import { useState } from 'react';
 import { ApiError } from '../api/client';
-import type { BandContributionDto, PayeTraceDto, SscClampDto, SscTraceDto } from '../api/types';
+import type {
+  BandContributionDto,
+  OvertimeTraceDto,
+  PayeTraceDto,
+  SscClampDto,
+  SscTraceDto,
+} from '../api/types';
 import { requestIdOf } from '../api/refusal';
 import { Money } from '../components/Money';
 import { FailedRequestState } from '../components/states/FailedRequestState';
@@ -185,6 +192,75 @@ function SscWorkings({ heading, trace }: { heading: string; trace: SscTraceDto }
   );
 }
 
+/**
+ * `policyStatus`'s wire codes as a sentence, the same way `clampText` treats
+ * `clamp` and for the same reason (§0.23): the code is the contract, the
+ * words are ours.
+ *
+ * This sentence is the acceptance criterion in issue #76 that matters most.
+ * The divisor is Salt's own choice — `SC-OPEN-6`, awaiting confirmation —
+ * and this screen must say so plainly. It must **never** describe it as law,
+ * and `default` returns the code itself rather than nothing so a status
+ * added on the server can never read as silent approval.
+ */
+function policyStatusText(reference: string, status: string): string {
+  switch (status) {
+    case 'needs_confirmation':
+      return `This divisor is Salt's own policy (${reference}), not Namibian law. It is awaiting confirmation.`;
+    default:
+      return `Salt policy ${reference}: ${status}.`;
+  }
+}
+
+function OvertimeWorkings({ trace, index }: { trace: OvertimeTraceDto; index: number }) {
+  const heading = trace.label ?? `Overtime line ${index + 1}`;
+  return (
+    <section aria-label={`${heading} workings`} className="flex flex-col gap-3">
+      <h3 className="text-base font-semibold">{heading}</h3>
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
+        <div>
+          <dt className="text-xs text-muted-foreground">Basic pay (contractual)</dt>
+          <dd className="money text-sm">
+            <Money cents={trace.basicPayCents} />
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Ordinary hours per week</dt>
+          <dd className="text-sm">{trace.ordinaryHours}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Divisor</dt>
+          <dd className="text-sm">
+            &times; {trace.monthsPerYear} &divide; {trace.weeksPerYear} &divide;{' '}
+            {trace.ordinaryHours}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Derived hourly rate (unrounded)</dt>
+          <dd className="money text-sm">{trace.derivedHourlyRate}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Hours</dt>
+          <dd className="text-sm">{trace.hours}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Multiplier</dt>
+          <dd className="text-sm">&times; {trace.multiplier}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Amount</dt>
+          <dd className="money text-sm">
+            <Money cents={trace.amountCents} />
+          </dd>
+        </div>
+      </dl>
+      <p className="text-sm text-muted-foreground">
+        {policyStatusText(trace.policyReference, trace.policyStatus)}
+      </p>
+    </section>
+  );
+}
+
 export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string }) {
   const [open, setOpen] = useState(false);
   const traces = useFinalizedPayrollTraces(finalizedPayrollId, open);
@@ -195,9 +271,7 @@ export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string })
       onToggle={(event) => setOpen(event.currentTarget.open)}
       className="rounded-xl border bg-card p-6 text-card-foreground shadow-sm"
     >
-      <summary className="cursor-pointer text-sm font-medium">
-        How PAYE and social security were worked out
-      </summary>
+      <summary className="cursor-pointer text-sm font-medium">How this pay was worked out</summary>
 
       <div className="mt-4 flex flex-col gap-6">
         {/* `role="status"` because this appears in answer to the Operator's
@@ -216,6 +290,14 @@ export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string })
 
         {traces.isSuccess && (
           <>
+            {/* Overtime first: it is the line an Operator is most often
+                checking by hand, and it is the only one whose figure rests
+                on an unconfirmed Salt policy. Each line keeps its own
+                section — the two were priced and rounded independently, and
+                a merged row would not add up. */}
+            {traces.data.overtime.map((trace, index) => (
+              <OvertimeWorkings key={index} trace={trace} index={index} />
+            ))}
             <PayeWorkings trace={traces.data.paye} />
             <SscWorkings heading="Employee social security" trace={traces.data.employeeSsc} />
             <SscWorkings heading="Employer social security" trace={traces.data.employerSsc} />

@@ -371,7 +371,7 @@ fn traces_request(employer_id: &str, finalized_payroll_id: &str, cookie: &str) -
 }
 
 #[tokio::test]
-async fn reading_a_finalized_payroll_returns_the_nine_figures_the_period_the_pay_date_and_the_salt_version()
+async fn reading_a_finalized_payroll_returns_the_ten_figures_the_period_the_pay_date_and_the_salt_version()
  {
     let (_email, cookie, employer_id) = an_authorized_operator().await;
     let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
@@ -397,6 +397,7 @@ async fn reading_a_finalized_payroll_returns_the_nine_figures_the_period_the_pay
     let figures = &body["figures"];
     assert_eq!(figures["basicPayCents"], 1_500_000);
     assert_eq!(figures["taxableAllowancesCents"], 0);
+    assert_eq!(figures["overtimeCents"], 0);
     assert_eq!(figures["grossCents"], 1_500_000);
     assert_eq!(figures["taxableRemunerationCents"], 1_500_000);
     assert!(figures["payeCents"].is_i64());
@@ -563,9 +564,13 @@ async fn reading_a_finalized_payrolls_traces_returns_the_paye_and_ssc_workings()
         assert!(trace["ceilingCents"].is_i64());
     }
 
+    // A salary-only payroll carries an empty overtime list, never a
+    // fabricated line (issue #76).
+    assert_eq!(body["overtime"], serde_json::json!([]));
+
     // Never the raw snapshot (§0.29) — the acceptance criterion is "on
     // either route", so the traces response is held to it as firmly as the
-    // detail response is. Only the three hand-written trace DTOs appear.
+    // detail response is. Only the four hand-written trace DTOs appear.
     assert!(body.get("payrollInputJson").is_none());
     assert!(body.get("payrollRulesJson").is_none());
     assert!(body.get("payrollCalculationJson").is_none());
@@ -575,8 +580,8 @@ async fn reading_a_finalized_payrolls_traces_returns_the_paye_and_ssc_workings()
     assert_eq!(
         keys,
         // `serde_json`'s object map is sorted, so this is the response's
-        // three keys in name order, not in declaration order.
-        vec!["employeeSsc", "employerSsc", "paye"]
+        // four keys in name order, not in declaration order.
+        vec!["employeeSsc", "employerSsc", "overtime", "paye"]
     );
 }
 

@@ -14,15 +14,15 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment, TaxYear,
-    UnsupportedDeductionStatus,
+    EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment,
+    TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunId, SALT_VERSION, SaltDatabase,
     calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
     get_finalized_payroll_detail, get_finalized_payroll_traces, get_payroll_run_detail,
-    record_compensation_terms,
+    record_compensation_terms, set_run_earnings,
 };
 use sqlx::PgPool;
 
@@ -323,6 +323,98 @@ async fn the_traces_are_the_paye_and_ssc_workings_behind_the_figures(pool: PgPoo
     // is what the detail reports as that figure.
     assert!(traces.employee_social_security.base <= basic_pay);
     assert!(traces.employer_social_security.base <= basic_pay);
+}
+
+/// Issue #76: an overtime line's workings ride on the traces read model, so
+/// an Operator asking "why is this N$1,557.69" can see the divisor, the
+/// derived rate, the hours, the multiplier — and that Salt chose the
+/// divisor. A salary-only payroll carries an empty list, not a fabricated
+/// one.
+#[sqlx::test]
+async fn the_traces_carry_each_overtime_lines_workings_and_its_salt_policy_stamp(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db, "Employer").await;
+
+    let (_, _, salary_only) = a_finalized_payroll(&db, &employer_id, "Ada Lovelace").await;
+    let traces = get_finalized_payroll_traces(&db, &employer_id, &salary_only)
+        .await
+        .unwrap();
+    assert_eq!(traces.overtime, Vec::new());
+
+    // A second Employer, because one Employer has at most one ordinary run
+    // per period and the salary-only payroll above already used this one.
+    let overtime_employer = an_employer(&db, "Overtime Employer").await;
+    let employment_id = a_fully_declared_employment(&db, &overtime_employer, "Grace Hopper").await;
+    let run_id =
+        create_ordinary_payroll_run(&db, &overtime_employer, period(), pay_date(), "actor")
+            .await
+            .unwrap();
+    set_run_earnings(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![
+            EarningInstruction::Overtime {
+                hours: payroll::OvertimeHours::new(rust_decimal::Decimal::new(12, 0)).unwrap(),
+                multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
+                label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
+            },
+            EarningInstruction::Overtime {
+                hours: payroll::OvertimeHours::new(rust_decimal::Decimal::new(4, 0)).unwrap(),
+                multiplier: payroll::OvertimeMultiplier::Double,
+                label: Some(payroll::EarningLabel::new("public holiday").unwrap()),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        calculate_payroll_run(&db, &run_id, "calculator")
+            .await
+            .unwrap(),
+        Vec::new()
+    );
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
+        .await
+        .unwrap();
+    let with_overtime = outcome.finalized[0].1.as_str().to_string();
+
+    let traces = get_finalized_payroll_traces(&db, &overtime_employer, &with_overtime)
+        .await
+        .unwrap();
+
+    // Two lines stay two rows of workings: they were priced and rounded
+    // independently, and a merged row would not add up.
+    assert_eq!(traces.overtime.len(), 2);
+    let first = &traces.overtime[0];
+    assert_eq!(first.label.as_ref().unwrap().as_str(), "Sunday overtime");
+    assert_eq!(
+        first.trace.basic_pay,
+        Money::from_cents(BASIC_PAY_CENTS).unwrap()
+    );
+    assert_eq!(
+        first.trace.months_per_year,
+        rust_decimal::Decimal::new(12, 0)
+    );
+    assert_eq!(
+        first.trace.weeks_per_year,
+        rust_decimal::Decimal::new(52, 0)
+    );
+    assert_eq!(
+        first.trace.multiplier,
+        payroll::OvertimeMultiplier::OneAndAHalf
+    );
+    // The stamp says plainly that Salt chose the divisor and nobody has
+    // confirmed it. It must never be describable as law.
+    assert_eq!(first.trace.policy.id.reference(), "SC-OPEN-6");
+    assert_eq!(
+        first.trace.policy.status,
+        payroll::SaltPolicyStatus::NeedsConfirmation
+    );
+    assert_eq!(
+        traces.overtime[1].trace.multiplier,
+        payroll::OvertimeMultiplier::Double
+    );
 }
 
 // ---- Employer scoping, on both read models (ADR-0017) ----

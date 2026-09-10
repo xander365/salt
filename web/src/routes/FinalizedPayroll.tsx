@@ -1,6 +1,6 @@
 // `/app/employers/:employerId/finalized/:finalizedPayrollId` (issue #66,
 // parent #59 Spec 3 of 3, §0.29; rebuilt for issue #88). One immutable
-// finalized payroll: the nine figures, the period, the pay date and the
+// finalized payroll: the ten figures, the period, the pay date and the
 // SaltVersion that produced them.
 //
 // There is no lifecycle to read here and nothing this screen could offer to
