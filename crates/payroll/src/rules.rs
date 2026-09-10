@@ -502,7 +502,8 @@ impl From<SscRuleset> for RawSscRuleset {
 
 /// How an unrounded exact amount becomes a `Money` output line. A field of
 /// `PayrollRules` so a change in rounding policy is dated like any other
-/// rule; the mechanism itself lives in [`crate::money::round_half_up`].
+/// rule. Decimal amounts delegate to [`crate::money::round_half_up`], while
+/// exact fractions stay fractions until this same seam produces cents.
 ///
 /// **Salt policy, not a statutory claim.** No source found prescribes a
 /// rounding behaviour for PAYE or SSC (SC-OPEN-2, `NEEDS NAMRA
@@ -521,6 +522,41 @@ impl RoundingRule {
     pub(crate) fn apply(self, amount: Decimal) -> Result<Money, crate::money::MoneyError> {
         match self {
             RoundingRule::HalfUpToCents => crate::money::round_half_up(amount),
+        }
+    }
+
+    /// Applies this policy to an exact non-negative fraction whose unit is
+    /// cents. This keeps repeating intermediate values exact until the same
+    /// rounding-policy seam used by [`Self::apply`].
+    pub(crate) fn apply_cents_fraction(
+        self,
+        numerator: i128,
+        denominator: i128,
+    ) -> Result<Money, crate::money::MoneyError> {
+        if numerator < 0 {
+            return Err(crate::money::MoneyError::Negative);
+        }
+        if denominator <= 0 {
+            return Err(crate::money::MoneyError::Overflow);
+        }
+
+        match self {
+            RoundingRule::HalfUpToCents => {
+                let whole = numerator / denominator;
+                let remainder = numerator % denominator;
+                let half = denominator / 2 + denominator % 2;
+                let rounded = if remainder >= half {
+                    whole
+                        .checked_add(1)
+                        .ok_or(crate::money::MoneyError::Overflow)?
+                } else {
+                    whole
+                };
+                let cents: i64 = rounded
+                    .try_into()
+                    .map_err(|_| crate::money::MoneyError::Overflow)?;
+                Money::from_cents(cents)
+            }
         }
     }
 }
@@ -1391,5 +1427,17 @@ mod tests {
         let rules = rules();
         let json = serde_json::to_string(&rules).unwrap();
         assert_eq!(serde_json::from_str::<PayrollRules>(&json).unwrap(), rules);
+    }
+
+    #[test]
+    fn salt_policy_fraction_rounding_keeps_a_repeating_rate_exact_until_the_line() {
+        let numerator = 8_376_221_876_635_290_410i128 * 12 * 3_731 * 3;
+        let denominator = 52i128 * 1_366 * 2;
+
+        let amount = RoundingRule::HalfUpToCents
+            .apply_cents_fraction(numerator, denominator)
+            .unwrap();
+
+        assert_eq!(amount.cents(), 7_919_392_791_855_400_853);
     }
 }

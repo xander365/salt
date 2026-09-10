@@ -56,9 +56,10 @@ fn parse_finalized_payroll_id(
 ///
 /// Every version in [`crate::finalize::KNOWN_JSON_SNAPSHOT_VERSIONS`] shares
 /// this one decoder: issue #73's version 2 added sibling columns beside
-/// `payroll_calculation_json`, and issue #74's earning deserializers accept
-/// both the labelled current shape and the scalar allowance shape written by
-/// version 1. Finalized snapshots are never migrated in place (ADR-0012).
+/// `payroll_calculation_json`, issue #74's earning deserializers accept both
+/// labelled and scalar allowances, and issue #76's version 3 adds overtime
+/// variants that are simply absent from older snapshots. Finalized snapshots
+/// are never migrated in place (ADR-0012).
 fn calculation_from_snapshot(
     finalized_payroll_id: &FinalizedPayrollId,
     schema_version: i32,

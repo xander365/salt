@@ -154,6 +154,10 @@ impl OvertimeHours {
     pub fn as_decimal(self) -> Decimal {
         self.0
     }
+
+    pub(crate) fn as_hundredths(self) -> i128 {
+        self.0.mantissa() * 10i128.pow(2 - self.0.scale())
+    }
 }
 
 impl TryFrom<Decimal> for OvertimeHours {
@@ -216,6 +220,13 @@ impl OvertimeMultiplier {
             OvertimeMultiplier::Double => Decimal::from_parts(2, 0, 0, false, 0),
         }
     }
+
+    pub(crate) const fn as_ratio(self) -> (i128, i128) {
+        match self {
+            OvertimeMultiplier::OneAndAHalf => (3, 2),
+            OvertimeMultiplier::Double => (2, 1),
+        }
+    }
 }
 
 impl TryFrom<Decimal> for OvertimeMultiplier {
@@ -254,10 +265,92 @@ impl From<OvertimeMultiplier> for Decimal {
 /// they joined mid-month. That choice is part of SC-OPEN-6 and is stamped
 /// with it.
 ///
-/// `derived_hourly_rate` is exact and unrounded, like
-/// `PayeTrace::year_to_date_tax_owed`. There is exactly one rounding on an
-/// overtime line and it happens at the line, through the Salt rounding
+/// `derived_hourly_rate` is an exact fraction. There is exactly one rounding
+/// on an overtime line and it happens at the line, through the Salt rounding
 /// policy — never on the rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawDerivedHourlyRate", into = "RawDerivedHourlyRate")]
+pub struct DerivedHourlyRate {
+    numerator: i128,
+    denominator: i128,
+}
+
+/// Version 2 stored the rate as a finite `Decimal`; version 3 stores the
+/// exact fraction. Accepting both keeps old finalized snapshots readable,
+/// while every newly serialized trace writes only the exact shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum RawDerivedHourlyRate {
+    Exact {
+        numerator: String,
+        denominator: String,
+    },
+    VersionTwo(Decimal),
+}
+
+impl TryFrom<RawDerivedHourlyRate> for DerivedHourlyRate {
+    type Error = &'static str;
+
+    fn try_from(raw: RawDerivedHourlyRate) -> Result<Self, Self::Error> {
+        let (numerator, denominator) = match raw {
+            RawDerivedHourlyRate::Exact {
+                numerator,
+                denominator,
+            } => (
+                numerator
+                    .parse()
+                    .map_err(|_| "derived hourly rate numerator must be an integer")?,
+                denominator
+                    .parse()
+                    .map_err(|_| "derived hourly rate denominator must be an integer")?,
+            ),
+            RawDerivedHourlyRate::VersionTwo(decimal) => {
+                (decimal.mantissa(), 10i128.pow(decimal.scale()))
+            }
+        };
+        Self::new(numerator, denominator).ok_or("derived hourly rate must be non-negative")
+    }
+}
+
+impl From<DerivedHourlyRate> for RawDerivedHourlyRate {
+    fn from(rate: DerivedHourlyRate) -> Self {
+        Self::Exact {
+            numerator: rate.numerator.to_string(),
+            denominator: rate.denominator.to_string(),
+        }
+    }
+}
+
+impl DerivedHourlyRate {
+    pub(crate) fn new(numerator: i128, denominator: i128) -> Option<Self> {
+        if numerator < 0 || denominator <= 0 {
+            return None;
+        }
+        let divisor = greatest_common_divisor(numerator, denominator);
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    }
+
+    pub fn numerator(self) -> i128 {
+        self.numerator
+    }
+
+    pub fn denominator(self) -> i128 {
+        self.denominator
+    }
+}
+
+const fn greatest_common_divisor(mut left: i128, mut right: i128) -> i128 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OvertimeTrace {
     pub basic_pay: Money,
@@ -268,7 +361,7 @@ pub struct OvertimeTrace {
     pub months_per_year: Decimal,
     /// The `52`.
     pub weeks_per_year: Decimal,
-    pub derived_hourly_rate: Decimal,
+    pub derived_hourly_rate: DerivedHourlyRate,
     pub hours: OvertimeHours,
     pub multiplier: OvertimeMultiplier,
     /// SC-OPEN-6, `NEEDS CONFIRMATION`. Salt chose this divisor; no
@@ -560,7 +653,7 @@ mod tests {
             ordinary_hours: OrdinaryHours::new(dec!(40)).unwrap(),
             months_per_year: dec!(12),
             weeks_per_year: dec!(52),
-            derived_hourly_rate: dec!(12000.00) * dec!(12) / dec!(52) / dec!(40),
+            derived_hourly_rate: DerivedHourlyRate::new(900, 13).unwrap(),
             hours: OvertimeHours::new(dec!(12)).unwrap(),
             multiplier: OvertimeMultiplier::OneAndAHalf,
             policy: SaltPolicyStamp::SALARY_TO_HOURLY_DIVISOR,
@@ -745,6 +838,25 @@ mod tests {
         };
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(serde_json::from_str::<Earning>(&json).unwrap(), line);
+    }
+
+    #[test]
+    fn a_version_two_decimal_hourly_rate_remains_readable() {
+        let legacy = dec!(12000.00) * dec!(12) / dec!(52) / dec!(40);
+        let rate: DerivedHourlyRate =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        assert_eq!(
+            rate,
+            DerivedHourlyRate::new(legacy.mantissa(), 10i128.pow(legacy.scale())).unwrap()
+        );
+        assert!(
+            serde_json::to_value(rate)
+                .unwrap()
+                .get("numerator")
+                .is_some(),
+            "version 3 always writes the exact fraction shape"
+        );
     }
 
     /// An instruction carries hours; a line carries money. Reading one

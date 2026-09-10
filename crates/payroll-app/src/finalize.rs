@@ -79,7 +79,9 @@ use payroll::{
 /// not only the three JSONB blobs any more, since issue #73: version 2 was
 /// the first row shape to also carry `employer_particulars_json`,
 /// `person_particulars_json` and `payslip_template_version`. It also carries
-/// the current labelled earning-line shape introduced by issue #74.
+/// the labelled earning-line shape introduced by issue #74. Version 3 adds
+/// overtime instructions and calculated lines, including the exact-fraction
+/// `DerivedHourlyRate` in each overtime trace (issue #76).
 ///
 /// It ships from day one and is stored on every row, because it is the field
 /// a future reader branches on to render old history without constructing
@@ -97,20 +99,20 @@ use payroll::{
 /// comparing this one against 2. This integer answers a narrower question:
 /// which decoder reads the JSONB blobs (see `KNOWN_JSON_SNAPSHOT_VERSIONS`
 /// and `crate::correction::prepopulate_earnings`).
-pub const SNAPSHOT_SCHEMA_VERSION: i32 = 2;
+pub const SNAPSHOT_SCHEMA_VERSION: i32 = 3;
 
 /// The `snapshot_schema_version` values whose `payroll_input_json` and
 /// `payroll_calculation_json` this build can deserialize (§9.1). Version 2
 /// (issue #73) added three new sibling *columns* and issue #74 added the
 /// current labelled earning-line shape, so 1 and 2 read through the same
-/// compatible decoder. Its deserializers accept both the old scalar allowance
-/// and the new labelled allowance shape, so both versions belong here. This
+/// compatible decoder. Version 3's new overtime variants are absent from old
+/// snapshots, so the same backward-compatible decoder also reads it. This
 /// list is the one place [`crate::finalized_payroll_read::calculation_from_snapshot`] and
 /// `crate::correction::prepopulate_earnings` both check against, rather than
 /// each comparing a stored version to [`SNAPSHOT_SCHEMA_VERSION`] directly —
 /// a row is not unreadable merely for having finalized under an earlier
 /// version whose earning lines this build can still decode.
-pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2];
+pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2, 3];
 
 /// The `PayslipTemplateVersion` [`finalize_payroll_run`] freezes onto every
 /// `FinalizedPayroll` (issue #73, CONTEXT.md's own glossary entry, Grill

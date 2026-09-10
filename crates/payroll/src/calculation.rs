@@ -11,7 +11,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::deduction::{Deduction, StatutoryDeduction};
-use crate::earning::{Earning, EarningInstruction, OvertimeTrace, RemunerationBases};
+use crate::earning::{
+    DerivedHourlyRate, Earning, EarningInstruction, OvertimeTrace, RemunerationBases,
+};
 use crate::employment::{CompensationTerms, EmploymentSnapshot, OrdinaryHours};
 use crate::money::{Money, MoneyError};
 use crate::pay_period::PayPeriod;
@@ -563,12 +565,20 @@ pub fn calculate(
                 label,
             } => {
                 let (ordinary_hours, rate) = derive_hourly_rate(terms)?;
-                let unrounded = rate
-                    .checked_mul(hours.as_decimal())
-                    .and_then(|hourly| hourly.checked_mul(multiplier.as_decimal()))
+                let (multiplier_numerator, multiplier_denominator) = multiplier.as_ratio();
+                let amount_numerator = rate
+                    .numerator()
+                    .checked_mul(hours.as_hundredths())
+                    .and_then(|value| value.checked_mul(multiplier_numerator))
+                    .ok_or(PayrollError::AmountOverflow)?;
+                let amount_denominator = rate
+                    .denominator()
+                    .checked_mul(multiplier_denominator)
                     .ok_or(PayrollError::AmountOverflow)?;
                 Earning::Overtime {
-                    amount: rules.rounding_rule().apply(unrounded)?,
+                    amount: rules
+                        .rounding_rule()
+                        .apply_cents_fraction(amount_numerator, amount_denominator)?,
                     trace: OvertimeTrace {
                         basic_pay: terms.basic_pay(),
                         ordinary_hours,
@@ -708,17 +718,21 @@ pub fn calculate(
 /// Returns the `OrdinaryHours` it used alongside the rate, so the trace
 /// records the hours the figure was actually derived with rather than
 /// reading the terms row a second time and risking a different answer.
-fn derive_hourly_rate(terms: CompensationTerms) -> Result<(OrdinaryHours, Decimal), PayrollError> {
+fn derive_hourly_rate(
+    terms: CompensationTerms,
+) -> Result<(OrdinaryHours, DerivedHourlyRate), PayrollError> {
     let ordinary_hours = terms
         .ordinary_hours()
         .ok_or(PayrollError::OrdinaryHoursNotRecorded)?;
-    let rate = terms
-        .basic_pay()
-        .as_decimal()
-        .checked_mul(MONTHS_PER_YEAR)
-        .and_then(|yearly| yearly.checked_div(WEEKS_PER_YEAR))
-        .and_then(|weekly| weekly.checked_div(ordinary_hours.as_decimal()))
+    let numerator = i128::from(terms.basic_pay().cents())
+        .checked_mul(MONTHS_PER_YEAR.mantissa())
         .ok_or(PayrollError::AmountOverflow)?;
+    let denominator = WEEKS_PER_YEAR
+        .mantissa()
+        .checked_mul(ordinary_hours.as_hundredths())
+        .ok_or(PayrollError::AmountOverflow)?;
+    let rate =
+        DerivedHourlyRate::new(numerator, denominator).ok_or(PayrollError::AmountOverflow)?;
     Ok((ordinary_hours, rate))
 }
 
@@ -2637,12 +2651,10 @@ mod tests {
         assert_eq!(trace.weeks_per_year, dec!(52));
         assert_eq!(trace.hours.as_decimal(), dec!(12));
         assert_eq!(trace.multiplier, OvertimeMultiplier::OneAndAHalf);
-        // The rate is exact and unrounded — not 69.23.
-        assert_eq!(
-            trace.derived_hourly_rate,
-            dec!(12000.00) * dec!(12) / dec!(52) / dec!(40)
-        );
-        assert_ne!(trace.derived_hourly_rate, dec!(69.23));
+        // The repeating rate is held as the exact fraction 900 / 13, never
+        // shortened to a finite decimal such as 69.23.
+        assert_eq!(trace.derived_hourly_rate.numerator(), 900);
+        assert_eq!(trace.derived_hourly_rate.denominator(), 13);
         assert_eq!(amount, money(dec!(1246.15)));
     }
 

@@ -26,7 +26,11 @@ DerivedHourlyRate = BasicPay x 12 / 52 / OrdinaryHours
 
 ## Rounding order, and exactly one rounding
 
-The rate is computed at full decimal precision and **never rounded**. Hours and multiplier are applied at full precision. The result is rounded **once**, at the line, through the single existing rounding-policy seam (`RoundingRule`, `SC-OPEN-2`).
+The rate is kept as an exact reduced fraction and **never rounded** — a
+repeating rate cannot be represented honestly as a finite decimal. Hours and
+multiplier are applied to that fraction. The result is rounded **once**, at
+the line, through the single existing rounding-policy seam (`RoundingRule`,
+`SC-OPEN-2`).
 
 This mirrors the asymmetric seam PAYE already uses: derivation returns an exact unrounded value, and the Salt rounding policy turns it into money. Two lines at the same multiplier stay two lines and round independently — they are never summed and rounded once, because a payslip has to be able to show each line and each shown line has to add up.
 

@@ -31,9 +31,9 @@ pub use calculation::{
 };
 pub use deduction::{Deduction, StatutoryDeduction};
 pub use earning::{
-    Earning, EarningInstruction, EarningLabel, EarningLabelError, MAX_EARNING_LABEL_LENGTH,
-    MAX_OVERTIME_HOURS, OvertimeHours, OvertimeHoursError, OvertimeMultiplier,
-    OvertimeMultiplierError, OvertimeTrace,
+    DerivedHourlyRate, Earning, EarningInstruction, EarningLabel, EarningLabelError,
+    MAX_EARNING_LABEL_LENGTH, MAX_OVERTIME_HOURS, OvertimeHours, OvertimeHoursError,
+    OvertimeMultiplier, OvertimeMultiplierError, OvertimeTrace,
 };
 pub use employment::{
     CompensationTerms, CompensationTermsError, EmployerId, EmploymentId, EmploymentSnapshot,

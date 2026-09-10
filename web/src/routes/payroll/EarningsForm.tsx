@@ -252,15 +252,6 @@ export function EarningsForm({
 
     for (const [index, overtime] of overtimes.entries()) {
       const label = overtime.label.trim();
-      if (label.length === 0) {
-        setLineError({
-          kind: 'overtime',
-          index,
-          field: 'label',
-          message: 'Enter a label for this overtime, e.g. Sunday overtime.',
-        });
-        return null;
-      }
       if (Array.from(label).length > MAX_LABEL_LENGTH) {
         setLineError({
           kind: 'overtime',
@@ -290,7 +281,12 @@ export function EarningsForm({
         });
         return null;
       }
-      request.push({ kind: 'overtime', hours, multiplier: overtime.multiplier, label });
+      request.push({
+        kind: 'overtime',
+        hours,
+        multiplier: overtime.multiplier,
+        label: label.length === 0 ? null : label,
+      });
     }
 
     return request;
@@ -428,7 +424,7 @@ export function EarningsForm({
                 <li key={index} className="flex flex-col gap-1">
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                     <div className="flex flex-col gap-1.5">
-                      <Label htmlFor={labelId}>Overtime label</Label>
+                      <Label htmlFor={labelId}>Overtime label (optional)</Label>
                       <Input
                         id={labelId}
                         type="text"

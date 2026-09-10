@@ -13,9 +13,9 @@
 //! method is a decision, not a preference (issue #53's own Deep
 //! Instructions).
 //!
-//! The request body contains only taxable allowance instructions. `BasicPay`
-//! is derived by the calculator from `CompensationTerms`, so it cannot be
-//! expressed by this input boundary.
+//! The request body contains taxable allowance and overtime instructions.
+//! `BasicPay` is derived by the calculator from `CompensationTerms`, so it
+//! cannot be expressed by this input boundary.
 //!
 //! Every handler here takes its `EmployerId` from
 //! [`AuthorizedEmployerContext`] and never from the path (ADR-0017). `GET`
@@ -88,7 +88,8 @@ fn status_str(status: RunStatus) -> &'static str {
 /// (INV-001).
 ///
 /// Responses use a nullable label so a version-1 unlabelled allowance can be
-/// displayed honestly; a new request must provide a valid non-blank label.
+/// displayed honestly and because overtime labels are optional. New taxable
+/// allowances still require a valid non-blank label.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum EarningLineDto {
@@ -151,6 +152,16 @@ fn parse_label(label: Option<String>) -> Result<EarningLabel, ApiError> {
         .and_then(|label| EarningLabel::new(label).map_err(|_| ApiError::malformed_request()))
 }
 
+fn parse_optional_label(label: Option<String>) -> Result<Option<EarningLabel>, ApiError> {
+    match label {
+        None => Ok(None),
+        Some(label) if label.trim().is_empty() => Ok(None),
+        Some(label) => EarningLabel::new(label)
+            .map(Some)
+            .map_err(|_| ApiError::malformed_request()),
+    }
+}
+
 fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
     match line {
         EarningLineDto::TaxableAllowance {
@@ -180,7 +191,7 @@ fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
             Ok(EarningInstruction::Overtime {
                 hours: parsed_hours,
                 multiplier: parsed_multiplier,
-                label: Some(parse_label(label)?),
+                label: parse_optional_label(label)?,
             })
         }
     }

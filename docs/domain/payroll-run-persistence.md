@@ -1100,7 +1100,7 @@ FinalizedPayroll
 
 - PayeTableId, SscRulesId
 - salt_version
-- snapshot_schema_version           integer, 1 or 2 (issue #74)
+- snapshot_schema_version           integer, 1, 2 or 3 (issue #76)
 
 - employer_particulars_json         JSONB, nullable (issue #73)
 - person_particulars_json           JSONB, nullable (issue #73)
@@ -1134,13 +1134,15 @@ is a legitimate state, not a defect.
 particulars present" is answered by testing the column itself (`IS NULL` or,
 in Rust, matching on `Option`), never by comparing `snapshot_schema_version`
 to 2. Version 2 is the first shape with the sibling particulars columns and
-the current labelled earning shape. The version integer keeps exactly the one
-job §9.1 always gave it: naming which decoder reads `payroll_input_json` and
-`payroll_calculation_json`. Versions 1 and 2 share the current decoder because
-it accepts both the old scalar allowance and the new labelled allowance shape,
-so `calculation_from_snapshot` and `prepopulate_earnings` check a row's
-version against the *set* of versions their decoder reads
-(`KNOWN_JSON_SNAPSHOT_VERSIONS = {1, 2}`), not against
+the labelled allowance shape; version 3 adds overtime instructions and
+calculated lines with an exact-fraction DerivedHourlyRate. The version integer
+keeps exactly the one job §9.1 always gave it: naming which decoder reads
+`payroll_input_json` and
+`payroll_calculation_json`. Versions 1, 2 and 3 share the current decoder
+because it accepts scalar and labelled allowances as well as version 2's
+finite-decimal hourly-rate trace, so `calculation_from_snapshot` and
+`prepopulate_earnings` check a row's version against the *set* of versions
+their decoder reads (`KNOWN_JSON_SNAPSHOT_VERSIONS = {1, 2, 3}`), not against
 `SNAPSHOT_SCHEMA_VERSION` (the version this build currently *writes*).
 
 **PersonParticulars always freezes something.** `full_name` is set the

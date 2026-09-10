@@ -417,9 +417,9 @@ export interface SscTraceDto {
  * One overtime line's workings. Every figure needed to redo
  * `basicPay x 12 / 52 / ordinaryHours x hours x multiplier` by hand.
  *
- * `derivedHourlyRate` is the exact unrounded rate as a decimal string, not
- * cents: it is intermediate arithmetic and is never rounded. The single
- * rounding on the line produced `amountCents`.
+ * The derived rate is an exact numerator/denominator pair, not cents. A
+ * fraction preserves repeating rates without rounding; the single rounding
+ * on the line produced `amountCents`.
  *
  * `policyReference` and `policyStatus` are wire *codes*, like `clamp` — the
  * words an Operator reads are this app's, never the server's. What they must
@@ -432,7 +432,8 @@ export interface OvertimeTraceDto {
   ordinaryHours: string;
   monthsPerYear: string;
   weeksPerYear: string;
-  derivedHourlyRate: string;
+  derivedHourlyRateNumerator: string;
+  derivedHourlyRateDenominator: string;
   hours: string;
   multiplier: string;
   policyReference: string;

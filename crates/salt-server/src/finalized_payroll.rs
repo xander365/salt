@@ -233,9 +233,9 @@ fn ssc_trace_to_dto(trace: SscTrace) -> SscTraceDto {
 /// OrdinaryHours x hours x multiplier` by hand, plus the stamp saying who
 /// chose the divisor.
 ///
-/// `derivedHourlyRate` is the exact unrounded rate as a decimal string, not
-/// cents: it is intermediate arithmetic and is never rounded (ADR-0022).
-/// The one rounding on the line produced `amountCents`.
+/// `derivedHourlyRateNumerator / derivedHourlyRateDenominator` is the exact
+/// unrounded rate. A fraction is necessary because the rate can repeat
+/// forever in decimal; the one rounding on the line produced `amountCents`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OvertimeTraceDto {
@@ -245,7 +245,8 @@ struct OvertimeTraceDto {
     ordinary_hours: String,
     months_per_year: String,
     weeks_per_year: String,
-    derived_hourly_rate: String,
+    derived_hourly_rate_numerator: String,
+    derived_hourly_rate_denominator: String,
     hours: String,
     multiplier: String,
     /// `"SC-OPEN-6"` — the conformance record's own reference.
@@ -270,7 +271,8 @@ fn overtime_trace_to_dto(line: OvertimeLineTrace) -> OvertimeTraceDto {
         ordinary_hours: decimal_to_dto(line.trace.ordinary_hours.as_decimal()),
         months_per_year: decimal_to_dto(line.trace.months_per_year),
         weeks_per_year: decimal_to_dto(line.trace.weeks_per_year),
-        derived_hourly_rate: decimal_to_dto(line.trace.derived_hourly_rate),
+        derived_hourly_rate_numerator: line.trace.derived_hourly_rate.numerator().to_string(),
+        derived_hourly_rate_denominator: line.trace.derived_hourly_rate.denominator().to_string(),
         hours: decimal_to_dto(line.trace.hours.as_decimal()),
         multiplier: decimal_to_dto(line.trace.multiplier.as_decimal()),
         policy_reference: line.trace.policy.id.reference(),

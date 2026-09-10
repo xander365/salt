@@ -695,6 +695,9 @@ async fn overtime_is_set_and_read_back_as_hours_at_a_multiplier() {
                       "label": "  Sunday overtime  " },
                     { "kind": "overtime", "hours": "4.5", "multiplier": "2",
                       "label": "public holiday" },
+                    { "kind": "overtime", "hours": "2", "multiplier": "1.5" },
+                    { "kind": "overtime", "hours": "1", "multiplier": "2",
+                      "label": "   " },
                 ],
             }),
         ))
@@ -711,7 +714,7 @@ async fn overtime_is_set_and_read_back_as_hours_at_a_multiplier() {
     )
     .await;
     let earnings = detail["members"][0]["earnings"].as_array().unwrap();
-    assert_eq!(earnings.len(), 2);
+    assert_eq!(earnings.len(), 4);
     assert_eq!(earnings[0]["kind"], "overtime");
     assert_eq!(earnings[0]["hours"], "12");
     assert_eq!(earnings[0]["multiplier"], "1.5");
@@ -722,6 +725,8 @@ async fn overtime_is_set_and_read_back_as_hours_at_a_multiplier() {
     );
     assert_eq!(earnings[1]["hours"], "4.5");
     assert_eq!(earnings[1]["multiplier"], "2");
+    assert_eq!(earnings[2]["label"], serde_json::Value::Null);
+    assert_eq!(earnings[3]["label"], serde_json::Value::Null);
 }
 
 // D31: the multiplier set is closed at 1.5 and 2.0. The body is well

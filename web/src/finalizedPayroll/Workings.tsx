@@ -236,8 +236,10 @@ function OvertimeWorkings({ trace, index }: { trace: OvertimeTraceDto; index: nu
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">Derived hourly rate (unrounded)</dt>
-          <dd className="money text-sm">{trace.derivedHourlyRate}</dd>
+          <dt className="text-xs text-muted-foreground">Derived hourly rate (exact)</dt>
+          <dd className="money text-sm">
+            {trace.derivedHourlyRateNumerator} &divide; {trace.derivedHourlyRateDenominator}
+          </dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">Hours</dt>

@@ -55,6 +55,10 @@ impl OrdinaryHours {
     pub fn as_decimal(self) -> Decimal {
         self.0
     }
+
+    pub(crate) fn as_hundredths(self) -> i128 {
+        self.0.mantissa() * 10i128.pow(2 - self.0.scale())
+    }
 }
 
 impl TryFrom<Decimal> for OrdinaryHours {

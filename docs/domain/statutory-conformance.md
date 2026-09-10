@@ -350,7 +350,10 @@ No published Namibian rule prescribing a divisor was found. The whole formula is
 
 `OrdinaryHours` is recorded per Employment precisely so the assumption is visible and dated, rather than hidden in a constant such as 173.33. An overtime line on a period whose terms row records no `OrdinaryHours` is **refused**; a salary-only period on that same row still pays, because missing hours are unknown, not invalid.
 
-The rate is exact and is never rounded. Hours and multiplier are applied at full precision, and there is exactly **one** rounding, at the line, through §5.8's seam. Two lines at the same multiplier stay two lines and round independently.
+The rate is an exact reduced fraction and is never rounded. Hours and
+multiplier are applied to that fraction, and there is exactly **one** rounding,
+at the line, through §5.8's seam. Two lines at the same multiplier stay two
+lines and round independently.
 
 The stamp travels as data, not prose: every `OvertimeTrace` carries a `SaltPolicyStamp` naming `SC-OPEN-6` and `NEEDS CONFIRMATION`, so the screen renders the sentence and the calculator emits no user-facing English.
 
