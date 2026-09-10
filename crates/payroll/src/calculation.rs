@@ -2635,7 +2635,7 @@ mod tests {
     // OrdinaryHours, both halves of the divisor, the unrounded rate, the
     // hours and the multiplier.
     #[test]
-    fn salt_policy_the_overtime_workings_show_every_figure_behind_the_line() {
+    fn salt_policy_overtime_workings_show_every_figure_behind_the_line() {
         let input = overtime_input(
             dec!(12000.00),
             dec!(40),
@@ -2659,7 +2659,7 @@ mod tests {
     }
 
     #[test]
-    fn salt_policy_the_overtime_workings_stamp_the_divisor_as_salt_policy_needing_confirmation() {
+    fn salt_policy_overtime_workings_stamp_the_divisor_as_needing_confirmation() {
         let input = overtime_input(
             dec!(12000.00),
             dec!(40),
@@ -2731,7 +2731,7 @@ mod tests {
     // because a person's hourly rate does not fall because they joined
     // mid-month. That choice is part of SC-OPEN-6.
     #[test]
-    fn salt_policy_the_hourly_rate_comes_from_contractual_pay_not_the_prorated_figure() {
+    fn salt_policy_overtime_rate_comes_from_contractual_pay_not_the_prorated_figure() {
         let terms = CompensationTerms::new(date(2026, 1, 1), None, money(dec!(12000.00)))
             .unwrap()
             .with_ordinary_hours(Some(OrdinaryHours::new(dec!(40)).unwrap()));
@@ -2795,7 +2795,7 @@ mod tests {
     // hours for the whole period. A row dated mid-period is refused by the
     // existing INV-014 message, and nothing about overtime changes that.
     #[test]
-    fn salt_policy_an_ordinary_hours_change_dated_inside_a_period_is_refused_as_before() {
+    fn salt_policy_overtime_ordinary_hours_change_inside_a_period_is_refused_as_before() {
         let terms = CompensationTerms::new(date(2026, 2, 10), None, money(dec!(12000.00)))
             .unwrap()
             .with_ordinary_hours(Some(OrdinaryHours::new(dec!(45)).unwrap()));

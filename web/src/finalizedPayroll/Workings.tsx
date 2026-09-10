@@ -212,8 +212,59 @@ function policyStatusText(reference: string, status: string): string {
   }
 }
 
+/**
+ * How many decimal places the derived rate is *shown* to. Four, not two: the
+ * rate is not money, it is multiplied before anything is rounded, and showing
+ * it to the cent would invite an Operator to check the line against a figure
+ * Salt never used.
+ */
+const RATE_DECIMAL_PLACES = 4;
+
+/**
+ * The exact rate as a decimal an Operator can actually multiply by hand.
+ *
+ * The rate repeats — 1125 / 13 is 86.538461... forever — so this is
+ * deliberately marked approximate and the exact fraction stays on the screen
+ * beside it. It is a reading aid and never the figure the money came from:
+ * Salt multiplied the fraction and rounded exactly once, at the line
+ * (ADR-0022).
+ *
+ * `BigInt` throughout, like every other figure this app displays (INV-001).
+ * `Number(numerator) / Number(denominator)` would introduce precisely the
+ * floating-point error the exact fraction exists to avoid. Half-up on the
+ * last shown digit, matching Salt's own rounding policy rather than
+ * truncating towards a figure that reads as lower than the true rate.
+ *
+ * `null` for anything that is not a non-negative fraction, so a wire value
+ * this function cannot read leaves the exact fraction standing alone rather
+ * than showing an invented decimal.
+ */
+function approximateRateText(numerator: string, denominator: string): string | null {
+  let top: bigint;
+  let bottom: bigint;
+  try {
+    top = BigInt(numerator);
+    bottom = BigInt(denominator);
+  } catch {
+    return null;
+  }
+  if (top < 0n || bottom <= 0n) {
+    return null;
+  }
+
+  const scale = 10n ** BigInt(RATE_DECIMAL_PLACES);
+  const scaled = (top * scale * 2n + bottom) / (bottom * 2n);
+  const whole = String(scaled / scale).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const fraction = String(scaled % scale).padStart(RATE_DECIMAL_PLACES, '0');
+  return `N$${whole}.${fraction}`;
+}
+
 function OvertimeWorkings({ trace, index }: { trace: OvertimeTraceDto; index: number }) {
   const heading = trace.label ?? `Overtime line ${index + 1}`;
+  const approximateRate = approximateRateText(
+    trace.derivedHourlyRateNumerator,
+    trace.derivedHourlyRateDenominator,
+  );
   return (
     <section aria-label={`${heading} workings`} className="flex flex-col gap-3">
       <h3 className="text-base font-semibold">{heading}</h3>
@@ -236,9 +287,27 @@ function OvertimeWorkings({ trace, index }: { trace: OvertimeTraceDto; index: nu
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">Derived hourly rate (exact)</dt>
-          <dd className="money text-sm">
-            {trace.derivedHourlyRateNumerator} &divide; {trace.derivedHourlyRateDenominator}
+          <dt className="text-xs text-muted-foreground">Derived hourly rate</dt>
+          <dd className="text-sm">
+            {approximateRate === null ? (
+              <span className="money">
+                {trace.derivedHourlyRateNumerator} &divide; {trace.derivedHourlyRateDenominator}
+              </span>
+            ) : (
+              <>
+                {/* The decimal first, because it is the one a person
+                    multiplies. The exact fraction stays beneath it: the
+                    rate can repeat forever, Salt never rounded it, and a
+                    lone decimal would not reproduce the line to the cent. */}
+                <span className="money">
+                  &asymp; {approximateRate} <span className="sr-only">per hour</span>
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  exactly {trace.derivedHourlyRateNumerator} &divide;{' '}
+                  {trace.derivedHourlyRateDenominator}
+                </span>
+              </>
+            )}
           </dd>
         </div>
         <div>

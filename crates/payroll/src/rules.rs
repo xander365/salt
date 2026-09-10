@@ -1430,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn salt_policy_fraction_rounding_keeps_a_repeating_rate_exact_until_the_line() {
+    fn salt_policy_rounding_a_fraction_keeps_a_repeating_rate_exact_until_the_line() {
         let numerator = 8_376_221_876_635_290_410i128 * 12 * 3_731 * 3;
         let denominator = 52i128 * 1_366 * 2;
 

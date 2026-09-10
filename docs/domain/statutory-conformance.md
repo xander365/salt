@@ -170,7 +170,7 @@ The consequence is §5.3: Salt v1 ships no user-facing "non-taxable" box at all.
 
 No Tier A source was found for any of the following. Each must be revisited when an answer arrives.
 
-Five of the six have a Salt policy attached in §5. **SC-OPEN-4 deliberately does not** — it has a refusal. Where Salt cannot even state what the rule would be, inventing a fifth unverified rule is worse than stopping.
+Five of the six have a Salt policy attached in §5. **SC-OPEN-4 deliberately does not** — it has a refusal. Where Salt cannot even state what the rule would be, inventing one more unverified rule is worse than stopping.
 
 | # | Question | Salt's response | Stamp |
 |---|---|---|---|

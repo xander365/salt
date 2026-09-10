@@ -293,6 +293,25 @@ async fn finalize_a_fully_declared_employment(
     employment_id: &str,
     cookie: &str,
 ) -> String {
+    finalize_a_fully_declared_employment_with_earnings(
+        employer_id,
+        employment_id,
+        cookie,
+        serde_json::json!([]),
+    )
+    .await
+}
+
+/// [`finalize_a_fully_declared_employment`], with `earnings` put on the
+/// member before Calculate. Separate rather than a parameter on every call
+/// site, because a salary-only payroll is what most of this file reads back
+/// and only issue #76's overtime tests need to type anything at all.
+async fn finalize_a_fully_declared_employment_with_earnings(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    earnings: Value,
+) -> String {
     let response = router()
         .await
         .oneshot(record_compensation_terms_request(
@@ -327,6 +346,33 @@ async fn finalize_a_fully_declared_employment(
     assert_eq!(response.status(), StatusCode::OK);
 
     let run_id = create_run(employer_id, cookie).await;
+
+    if !earnings
+        .as_array()
+        .expect("earnings is a JSON array")
+        .is_empty()
+    {
+        let response = router()
+            .await
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/employers/{employer_id}/payroll-runs/{run_id}/members/\
+                         {employment_id}/earnings"
+                    ))
+                    .header(header::COOKIE, cookie)
+                    .header("x-salt-request", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "earnings": earnings }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     let response = router()
         .await
@@ -368,6 +414,104 @@ fn traces_request(employer_id: &str, finalized_payroll_id: &str, cookie: &str) -
         .header(header::COOKIE, cookie)
         .body(Body::empty())
         .unwrap()
+}
+
+// Issue #76, over the wire and end to end: an Operator types hours at a
+// multiplier on the worksheet and Salt produces the money, shows every
+// figure behind it, and stamps the divisor as its own unconfirmed policy.
+//
+// Named `salt_policy_overtime_*` and never `statutory_*` (ADR-0008,
+// `statutory-conformance.md` §7): the figures below depend on the
+// SC-OPEN-6 divisor, which no regulator published.
+//
+// N$15,000.00 over 40 ordinary hours per week:
+//   rate = 1,500,000c x 12 / 52 / 40 = 1125 / 13 N$ per hour, exactly.
+//   10 hours at 1.5 = 1125/13 x 10 x 1.5 = 1,298.0769... -> 1,298.08
+//    4 hours at 2.0 = 1125/13 x  4 x 2.0 =   692.3076... ->   692.31
+// Rounded once each, at the line, never summed first.
+#[tokio::test]
+async fn salt_policy_overtime_is_priced_shown_and_stamped_over_the_wire() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let finalized_payroll_id = finalize_a_fully_declared_employment_with_earnings(
+        &employer_id,
+        &employment_id,
+        &cookie,
+        serde_json::json!([
+            { "kind": "overtime", "hours": "10", "multiplier": "1.5", "label": "Sunday overtime" },
+            { "kind": "overtime", "hours": "4", "multiplier": "2" },
+        ]),
+    )
+    .await;
+
+    // The money, on the detail route's own figures.
+    let body = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &finalized_payroll_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let figures = &body["figures"];
+    assert_eq!(figures["basicPayCents"], 1_500_000);
+    assert_eq!(figures["taxableAllowancesCents"], 0);
+    assert_eq!(
+        figures["overtimeCents"], 199_039,
+        "129,808 + 69,231, each rounded at its own line"
+    );
+    assert_eq!(figures["grossCents"], 1_699_039);
+    assert_eq!(figures["taxableRemunerationCents"], 1_699_039);
+
+    // The workings, on the traces route: one row per line, never merged,
+    // carrying every figure an Operator needs to redo the sum by hand.
+    let body = body_json(
+        router()
+            .await
+            .oneshot(traces_request(&employer_id, &finalized_payroll_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let overtime = body["overtime"].as_array().unwrap();
+    assert_eq!(overtime.len(), 2);
+
+    assert_eq!(overtime[0]["amountCents"], 129_808);
+    assert_eq!(overtime[0]["label"], "Sunday overtime");
+    assert_eq!(overtime[0]["basicPayCents"], 1_500_000);
+    assert_eq!(overtime[0]["ordinaryHours"], "40.00");
+    assert_eq!(overtime[0]["monthsPerYear"], "12");
+    assert_eq!(overtime[0]["weeksPerYear"], "52");
+    // The exact reduced fraction, never a finite decimal: 1125/13 repeats.
+    assert_eq!(overtime[0]["derivedHourlyRateNumerator"], "1125");
+    assert_eq!(overtime[0]["derivedHourlyRateDenominator"], "13");
+    assert_eq!(overtime[0]["hours"], "10");
+    assert_eq!(overtime[0]["multiplier"], "1.5");
+
+    assert_eq!(overtime[1]["amountCents"], 69_231);
+    assert_eq!(overtime[1]["label"], Value::Null);
+    assert_eq!(overtime[1]["hours"], "4");
+    assert_eq!(overtime[1]["multiplier"], "2");
+    // The same rate produced both lines; only the hours and factor differ.
+    assert_eq!(overtime[1]["derivedHourlyRateNumerator"], "1125");
+    assert_eq!(overtime[1]["derivedHourlyRateDenominator"], "13");
+
+    // The stamp, on every line. It says the divisor is Salt's own policy
+    // and that nobody has confirmed it. Nothing on this route may let it
+    // be read as law, so both fields are asserted rather than one.
+    for line in overtime {
+        assert_eq!(line["policyReference"], "SC-OPEN-6");
+        assert_eq!(line["policyStatus"], "needs_confirmation");
+    }
+
+    // Settled law, not a Salt choice: overtime never reaches the social
+    // security base, and does reach the PAYE base (§3.3).
+    assert_eq!(body["employeeSsc"]["basicPayCents"], 1_500_000);
+    assert_eq!(body["employerSsc"]["basicPayCents"], 1_500_000);
+    assert_eq!(
+        body["paye"]["thisPeriodTaxableRemunerationCents"],
+        1_699_039
+    );
 }
 
 #[tokio::test]

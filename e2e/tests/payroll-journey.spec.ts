@@ -242,6 +242,15 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
   await page.getByLabel('Allowance label').fill('standby allowance');
   await page.getByLabel('Amount', { exact: true }).fill('200.00');
+
+  // Add overtime as **hours at a multiplier** (issue #76, D14): the form
+  // takes no amount at all, because Salt prices the line itself. The
+  // multiplier is a closed set of two (D31), so it is a `<select>` and
+  // 1.5 is what a new line starts on.
+  await page.getByRole('button', { name: 'Add overtime' }).click();
+  await page.getByLabel('Overtime label (optional)').fill('Sunday overtime');
+  await page.getByLabel('Hours', { exact: true }).fill('10');
+  await expect(page.getByLabel('Multiplier')).toHaveValue('1.5');
   await page.getByRole('button', { name: 'Save earnings' }).click();
   await expect(page.getByText('Earnings saved.')).toBeVisible();
 
@@ -257,7 +266,18 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // `salt_policy_proration_never_touches_an_allowance`), so this one is
   // exact.
   expect(figures.taxableAllowancesCents).toBe(20_000);
-  expect(figures.grossCents).toBe(figures.basicPayCents + figures.taxableAllowancesCents);
+  // Overtime is exact too, and for a sharper reason: the derived hourly
+  // rate comes from the **contractual** N$15,000.00 on the terms row and
+  // never from the prorated Basic Pay above (SC-OPEN-6, ADR-0022) — a
+  // person's hourly rate does not fall because they joined mid-month.
+  //   rate  = 1,500,000c x 12 / 52 / 40 = 1125 / 13 N$ per hour, exactly
+  //   line  = 1125 / 13 x 10 hours x 1.5 = 1,298.0769... -> N$1,298.08
+  // Rounded once, at the line. This figure therefore does not move with
+  // proration, and asserting it exactly is the whole point.
+  expect(figures.overtimeCents).toBe(129_808);
+  expect(figures.grossCents).toBe(
+    figures.basicPayCents + figures.taxableAllowancesCents + figures.overtimeCents,
+  );
   expect(figures.taxableRemunerationCents).toBe(figures.grossCents);
   // The calculator really ran: both social security figures are positive.
   expect(figures.employeeSscCents).toBeGreaterThan(0);
@@ -318,6 +338,33 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await expect(page.getByText('This payroll is finalized and cannot be changed.')).toBeVisible();
   expect(await readFigures(page)).toEqual(figures);
   const finalizedUrl = page.url();
+
+  // Open the workings and check the overtime line by hand, which is the
+  // whole point of issue #76's acceptance criteria. Every figure behind
+  // N$1,298.08 has to be on the screen: the contractual Basic Pay, the
+  // ordinary hours, both halves of the divisor, the derived rate, the
+  // hours and the multiplier.
+  await page.getByText('How this pay was worked out').click();
+  const overtimeWorkings = page.getByRole('region', { name: 'Sunday overtime workings' });
+  await expect(overtimeWorkings.getByText('N$15,000.00')).toBeVisible();
+  await expect(overtimeWorkings.getByText('40.00', { exact: true })).toBeVisible();
+  await expect(overtimeWorkings.getByText('× 12 ÷ 52 ÷ 40.00')).toBeVisible();
+  // The rate repeats forever, so it is shown as an approximation *and* as
+  // the exact fraction Salt actually multiplied. Neither alone is honest.
+  await expect(overtimeWorkings.getByText('≈ N$86.5385')).toBeVisible();
+  await expect(overtimeWorkings.getByText('exactly 1125 ÷ 13')).toBeVisible();
+  await expect(overtimeWorkings.getByText('10', { exact: true })).toBeVisible();
+  await expect(overtimeWorkings.getByText('× 1.5')).toBeVisible();
+  await expect(overtimeWorkings.getByText('N$1,298.08')).toBeVisible();
+
+  // And it must say plainly that the divisor is Salt's own unconfirmed
+  // choice. This sentence is the acceptance criterion that matters most:
+  // the screen may never let an Operator read the divisor as Namibian law.
+  await expect(
+    overtimeWorkings.getByText(
+      "This divisor is Salt's own policy (SC-OPEN-6), not Namibian law. It is awaiting confirmation.",
+    ),
+  ).toBeVisible();
   // The screen changed because the URL did — a finalized payroll of its
   // own, never the run screen redrawing itself.
   expect(finalizedUrl).toMatch(/\/app\/employers\/[^/]+\/finalized\/[^/]+$/);
