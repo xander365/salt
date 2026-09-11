@@ -310,8 +310,17 @@ async fn finalize_a_fully_declared_employment_with_earnings(
     employer_id: &str,
     employment_id: &str,
     cookie: &str,
-    earnings: Value,
+    mut earnings: Value,
 ) -> String {
+    if let Some(lines) = earnings.as_array_mut() {
+        for line in lines {
+            if let Some(object) = line.as_object_mut() {
+                object
+                    .entry("source".to_owned())
+                    .or_insert_with(|| Value::String("one_off".to_owned()));
+            }
+        }
+    }
     let response = router()
         .await
         .oneshot(record_compensation_terms_request(

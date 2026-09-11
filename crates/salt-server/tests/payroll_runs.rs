@@ -176,8 +176,17 @@ fn create_run_request(
     employer_id: &str,
     cookie: &str,
     salt_header: bool,
-    body: Value,
+    mut body: Value,
 ) -> Request<Body> {
+    if let Some(earnings) = body.get_mut("earnings").and_then(Value::as_array_mut) {
+        for earning in earnings {
+            if let Some(object) = earning.as_object_mut() {
+                object
+                    .entry("source".to_owned())
+                    .or_insert_with(|| Value::String("one_off".to_owned()));
+            }
+        }
+    }
     let mut builder = Request::builder()
         .method("POST")
         .uri(format!("/api/employers/{employer_id}/payroll-runs"))
@@ -1389,6 +1398,36 @@ async fn calculating_a_fully_declared_run_returns_figures_and_the_run_becomes_ca
     assert_eq!(refreshed["status"], "calculated");
     assert_eq!(refreshed["members"][0]["figures"], *figures);
     assert!(refreshed["members"][0]["refusal"].is_null());
+
+    // A pay-line write removes the old calculation in the same transaction.
+    // The later plain GET names that absence as an edit, rather than making
+    // the worksheet guess whether this member was never calculated at all.
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({ "earnings": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let after_edit = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(after_edit["members"][0]["figures"].is_null());
+    assert_eq!(
+        after_edit["members"][0]["figuresAbsence"],
+        "pay_lines_changed"
+    );
 }
 
 /// A member missing its `CompensationTerms` cannot calculate — but the

@@ -47,7 +47,8 @@ use payroll::{
     OvertimeMultiplier, OvertimeMultiplierError,
 };
 use payroll_app::{
-    PayrollAppError, PayrollFigures, PayrollRunBlocker, PayrollRunDetail, RunStatus,
+    PayLineSource, PayrollAppError, PayrollFigures, PayrollFiguresAbsence, PayrollRunBlocker,
+    PayrollRunDetail, RunPayLine, RunStatus,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -97,13 +98,39 @@ pub(crate) enum EarningLineDto {
     TaxableAllowance {
         amount_cents: i64,
         label: Option<String>,
+        source: PayLineSourceDto,
     },
     #[serde(rename_all = "camelCase")]
     Overtime {
         hours: String,
         multiplier: String,
         label: Option<String>,
+        source: PayLineSourceDto,
     },
+}
+
+/// The source stored beside every line. A client sends it back on replacement
+/// so a no-op save cannot rewrite a correction line's frozen-snapshot
+/// provenance as a direct one-off entry.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PayLineSourceDto {
+    OneOff,
+    FromReversedSnapshot,
+}
+
+fn pay_line_source_from_dto(source: PayLineSourceDto) -> PayLineSource {
+    match source {
+        PayLineSourceDto::OneOff => PayLineSource::OneOff,
+        PayLineSourceDto::FromReversedSnapshot => PayLineSource::FromReversedSnapshot,
+    }
+}
+
+fn pay_line_source_to_dto(source: PayLineSource) -> PayLineSourceDto {
+    match source {
+        PayLineSource::OneOff => PayLineSourceDto::OneOff,
+        PayLineSource::FromReversedSnapshot => PayLineSourceDto::FromReversedSnapshot,
+    }
 }
 
 /// An overtime multiplier outside the closed set of 1.5 and 2.0 (D31).
@@ -162,23 +189,28 @@ fn parse_optional_label(label: Option<String>) -> Result<Option<EarningLabel>, A
     }
 }
 
-fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
+fn parse_pay_line(line: EarningLineDto) -> Result<RunPayLine, ApiError> {
     match line {
         EarningLineDto::TaxableAllowance {
             amount_cents,
             label,
+            source,
         } => {
             let amount =
                 Money::from_cents(amount_cents).map_err(|_| ApiError::malformed_request())?;
-            Ok(EarningInstruction::TaxableAllowance {
-                amount,
-                label: Some(parse_label(label)?),
+            Ok(RunPayLine {
+                earning: EarningInstruction::TaxableAllowance {
+                    amount,
+                    label: Some(parse_label(label)?),
+                },
+                source: pay_line_source_from_dto(source),
             })
         }
         EarningLineDto::Overtime {
             hours,
             multiplier,
             label,
+            source,
         } => {
             let hours_decimal =
                 Decimal::from_str(&hours).map_err(|_| ApiError::malformed_request())?;
@@ -188,21 +220,26 @@ fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
                 Decimal::from_str(&multiplier).map_err(|_| ApiError::malformed_request())?;
             let parsed_multiplier = OvertimeMultiplier::try_from(multiplier_decimal)
                 .map_err(|refusal| unsupported_multiplier(refusal, &multiplier))?;
-            Ok(EarningInstruction::Overtime {
-                hours: parsed_hours,
-                multiplier: parsed_multiplier,
-                label: parse_optional_label(label)?,
+            Ok(RunPayLine {
+                earning: EarningInstruction::Overtime {
+                    hours: parsed_hours,
+                    multiplier: parsed_multiplier,
+                    label: parse_optional_label(label)?,
+                },
+                source: pay_line_source_from_dto(source),
             })
         }
     }
 }
 
-fn earning_to_dto(earning: EarningInstruction) -> EarningLineDto {
-    match earning {
+fn pay_line_to_dto(pay_line: RunPayLine) -> EarningLineDto {
+    let source = pay_line_source_to_dto(pay_line.source);
+    match pay_line.earning {
         EarningInstruction::TaxableAllowance { amount, label } => {
             EarningLineDto::TaxableAllowance {
                 amount_cents: amount.cents(),
                 label: label.map(|label| label.to_string()),
+                source,
             }
         }
         EarningInstruction::Overtime {
@@ -213,6 +250,7 @@ fn earning_to_dto(earning: EarningInstruction) -> EarningLineDto {
             hours: hours.as_decimal().to_string(),
             multiplier: multiplier.as_decimal().to_string(),
             label: label.map(|label| label.to_string()),
+            source,
         },
     }
 }
@@ -325,6 +363,7 @@ struct PayrollRunMemberDto {
     earnings: Vec<EarningLineDto>,
     blockers: Vec<BlockerDto>,
     figures: Option<FiguresDto>,
+    figures_absence: Option<&'static str>,
     refusal: Option<RefusalDto>,
 }
 
@@ -423,9 +462,13 @@ fn payroll_run_detail_to_response(
                     employment_id: member.employment_id.to_string(),
                     finalized_payroll_id: member.finalized_payroll_id.map(|id| id.to_string()),
                     full_name: member.full_name,
-                    earnings: member.earnings.into_iter().map(earning_to_dto).collect(),
+                    earnings: member.pay_lines.into_iter().map(pay_line_to_dto).collect(),
                     blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
                     figures: member.figures.map(figures_to_dto),
+                    figures_absence: member.figures_absence.map(|absence| match absence {
+                        PayrollFiguresAbsence::NotCalculated => "not_calculated",
+                        PayrollFiguresAbsence::PayLinesChanged => "pay_lines_changed",
+                    }),
                     refusal,
                 }
             })
@@ -612,13 +655,19 @@ pub(crate) async fn set_run_pay_lines(
     .await?;
     let employment_id = EmploymentId::new(employment_id);
 
-    let earnings = request
+    let pay_lines = request
         .earnings
         .into_iter()
-        .map(parse_earning)
+        .map(parse_pay_line)
         .collect::<Result<Vec<_>, _>>()?;
 
-    payroll_app::set_run_pay_lines(state.db(), &payroll_run_id, &employment_id, earnings).await?;
+    payroll_app::set_run_pay_lines_with_provenance(
+        state.db(),
+        &payroll_run_id,
+        &employment_id,
+        pay_lines,
+    )
+    .await?;
 
     Ok(Json(RecordedResponse {}))
 }

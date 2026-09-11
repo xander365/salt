@@ -247,7 +247,13 @@ export function EarningsForm({
         });
         return null;
       }
-      request.push({ kind: 'taxableAllowance', amountCents: cents, label });
+      const line: EarningLineDto = {
+        kind: 'taxableAllowance',
+        amountCents: cents,
+        label,
+        source: 'one_off',
+      };
+      request.push({ ...line, source: sourceFor(line, earnings) });
     }
 
     for (const [index, overtime] of overtimes.entries()) {
@@ -281,12 +287,14 @@ export function EarningsForm({
         });
         return null;
       }
-      request.push({
+      const line: EarningLineDto = {
         kind: 'overtime',
         hours,
         multiplier: overtime.multiplier,
         label: label.length === 0 ? null : label,
-      });
+        source: 'one_off',
+      };
+      request.push({ ...line, source: sourceFor(line, earnings) });
     }
 
     return request;
@@ -518,6 +526,12 @@ export function EarningsForm({
       </p>
     </form>
   );
+}
+
+/** Retain a line's recorded provenance only while its instruction is exactly
+ * unchanged. An edited or newly added instruction is a direct one-off line. */
+function sourceFor(line: EarningLineDto, stored: EarningLineDto[]): EarningLineDto['source'] {
+  return stored.find((candidate) => sameLine(line, candidate))?.source ?? 'one_off';
 }
 
 /** Whether a line about to be sent is the same one already stored, so saving

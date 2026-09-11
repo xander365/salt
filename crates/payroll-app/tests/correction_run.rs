@@ -9,12 +9,13 @@ use payroll::{
     TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayrollAppError, PayrollRunId,
-    SNAPSHOT_SCHEMA_VERSION, SaltDatabase, add_employment_to_correction_run, calculate_payroll_run,
-    correct_compensation_terms, create_correction_run, create_employer, create_employment,
-    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
-    finalize_payroll_run, record_compensation_terms, remove_employment_from_run,
-    reverse_finalized_payroll, set_run_pay_lines,
+    EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayLineSource, PayrollAppError,
+    PayrollRunId, RunPayLine, SNAPSHOT_SCHEMA_VERSION, SaltDatabase,
+    add_employment_to_correction_run, calculate_payroll_run, correct_compensation_terms,
+    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
+    record_compensation_terms, remove_employment_from_run, reverse_finalized_payroll,
+    set_run_pay_lines, set_run_pay_lines_with_provenance,
 };
 use sqlx::PgPool;
 
@@ -1052,6 +1053,33 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     // Marked as having come from the reversed target's frozen snapshot
     // (issue #77's own acceptance criteria), not `one_off`.
     assert_eq!(source, "from_reversed_snapshot");
+
+    // The pay-lines route carries provenance back on every replacement, so a
+    // no-op save does not rewrite this copied line as a direct one-off.
+    set_run_pay_lines_with_provenance(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![RunPayLine {
+            earning: EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(20000).unwrap(),
+                label: None,
+            },
+            source: PayLineSource::FromReversedSnapshot,
+        }],
+    )
+    .await
+    .unwrap();
+    let source_after_resave: String = sqlx::query_scalar(
+        "SELECT source FROM payroll_run_pay_line
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(source_after_resave, "from_reversed_snapshot");
 }
 
 #[sqlx::test]

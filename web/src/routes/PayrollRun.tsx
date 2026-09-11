@@ -211,7 +211,12 @@ function Member({
           edit, and a number an Operator can still read is a number they can
           still act on — so the only honest thing on screen is the sentence
           saying they are gone until Calculate runs again. */}
-      {member.figures === null ? (
+      {member.figures === null && member.figuresAbsence === 'pay_lines_changed' ? (
+        <StaleBanner>
+          Pay lines changed since these figures were calculated. The figures are hidden until you
+          calculate again.
+        </StaleBanner>
+      ) : member.figures === null ? (
         <p className="text-sm text-muted-foreground">
           No figures yet. Calculate this run to see them.
         </p>

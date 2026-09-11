@@ -240,7 +240,11 @@ async fn a_runs_detail_names_every_member_and_their_earning_lines(pool: PgPool) 
     assert_eq!(detail.members[0].employment_id, employment_id);
     assert_eq!(detail.members[0].full_name, "Ada Lovelace");
     assert_eq!(
-        detail.members[0].earnings,
+        detail.members[0]
+            .pay_lines
+            .iter()
+            .map(|pay_line| pay_line.earning.clone())
+            .collect::<Vec<_>>(),
         vec![
             EarningInstruction::TaxableAllowance {
                 amount: Money::from_cents(5000).unwrap(),
@@ -270,7 +274,7 @@ async fn a_member_with_no_earning_lines_is_still_a_member(pool: PgPool) {
 
     assert_eq!(detail.members.len(), 1);
     assert_eq!(detail.members[0].employment_id, employment_id);
-    assert_eq!(detail.members[0].earnings, vec![]);
+    assert_eq!(detail.members[0].pay_lines, vec![]);
 }
 
 /// A run whose whole membership has been removed still has a period, a pay

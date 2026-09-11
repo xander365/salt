@@ -231,6 +231,7 @@ export interface PayrollRunsResponse {
 }
 
 export type EarningKind = 'taxableAllowance' | 'overtime';
+export type PayLineSourceDto = 'one_off' | 'from_reversed_snapshot';
 
 /** A taxable allowance: money an Operator decided. */
 export interface TaxableAllowanceLineDto {
@@ -238,6 +239,7 @@ export interface TaxableAllowanceLineDto {
   amountCents: number;
   /** Null only for unlabelled lines preserved from a version-1 snapshot. */
   label: string | null;
+  source: PayLineSourceDto;
 }
 
 /**
@@ -255,6 +257,7 @@ export interface OvertimeLineDto {
   hours: string;
   multiplier: string;
   label: string | null;
+  source: PayLineSourceDto;
 }
 
 export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
@@ -312,6 +315,7 @@ export interface PayrollRunMemberDto {
   earnings: EarningLineDto[];
   blockers: PayrollRunBlockerDto[];
   figures: FiguresDto | null;
+  figuresAbsence: 'not_calculated' | 'pay_lines_changed' | null;
   refusal: RefusalDto | null;
 }
 

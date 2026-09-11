@@ -126,9 +126,13 @@ pub async fn calculate_payroll_run(
                     calculated_by,
                 )
                 .await?;
+                clear_pay_line_figures_invalidation(&mut tx, payroll_run_id, &employment_id)
+                    .await?;
             }
             Err(refusal) => {
                 clear_working_calculation(&mut tx, payroll_run_id, &employment_id).await?;
+                clear_pay_line_figures_invalidation(&mut tx, payroll_run_id, &employment_id)
+                    .await?;
                 refusals.push(PayrollRunCalculationRefusal {
                     employment_id,
                     refusal,
@@ -150,6 +154,23 @@ pub async fn calculate_payroll_run(
 
     tx.commit().await?;
     Ok(refusals)
+}
+
+async fn clear_pay_line_figures_invalidation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+    employment_id: &EmploymentId,
+) -> Result<(), PayrollAppError> {
+    sqlx::query(
+        "UPDATE payroll_run_employment
+         SET figures_invalidated_by_pay_line_write = FALSE
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Every `payroll_run_pay_line` row for `payroll_run_id`, in line order,

@@ -22,6 +22,54 @@ use payroll::{
     TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 
+/// Why a member currently has no figures in the payroll-run detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayrollFiguresAbsence {
+    NotCalculated,
+    PayLinesChanged,
+}
+
+/// Where a run pay line came from. The database's `standing` source arrives
+/// with issue #79; this use case currently writes only these two sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayLineSource {
+    OneOff,
+    FromReversedSnapshot,
+}
+
+impl PayLineSource {
+    fn as_column(self) -> &'static str {
+        match self {
+            PayLineSource::OneOff => "one_off",
+            PayLineSource::FromReversedSnapshot => "from_reversed_snapshot",
+        }
+    }
+
+    fn from_column(source: &str) -> Self {
+        match source {
+            "one_off" => PayLineSource::OneOff,
+            "from_reversed_snapshot" => PayLineSource::FromReversedSnapshot,
+            _ => panic!("payroll_run_pay_line.source is one this build reads"),
+        }
+    }
+}
+
+/// One current Earning instruction and the fact that put it on this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunPayLine {
+    pub earning: EarningInstruction,
+    pub source: PayLineSource,
+}
+
+impl From<EarningInstruction> for RunPayLine {
+    fn from(earning: EarningInstruction) -> Self {
+        RunPayLine {
+            earning,
+            source: PayLineSource::OneOff,
+        }
+    }
+}
+
 app_id! {
     /// `payroll-app`'s own id (§4.1): a native UUID, unlike the pure crate's
     /// opaque `TEXT`-backed ids. Minted only by `create_ordinary_payroll_run`,
@@ -644,6 +692,25 @@ pub async fn set_run_pay_lines(
     employment_id: &EmploymentId,
     earnings: Vec<EarningInstruction>,
 ) -> Result<(), PayrollAppError> {
+    set_run_pay_lines_with_provenance(
+        db,
+        payroll_run_id,
+        employment_id,
+        earnings.into_iter().map(RunPayLine::from).collect(),
+    )
+    .await
+}
+
+/// Replaces a member's pay lines while retaining each line's provenance.
+/// Callers that type new lines directly should use [`set_run_pay_lines`]; the
+/// browser uses this entry point to faithfully send back a correction line
+/// that was pre-populated from a reversed frozen snapshot.
+pub async fn set_run_pay_lines_with_provenance(
+    db: &SaltDatabase,
+    payroll_run_id: &PayrollRunId,
+    employment_id: &EmploymentId,
+    mut pay_lines: Vec<RunPayLine>,
+) -> Result<(), PayrollAppError> {
     let mut tx = db.pool().begin().await?;
     lock_and_reopen_run(&mut tx, payroll_run_id).await?;
 
@@ -674,6 +741,38 @@ pub async fn set_run_pay_lines(
         });
     }
 
+    // Provenance is recorded by Salt, not asserted by an HTTP caller. A
+    // correction line keeps its frozen-snapshot source only when the exact
+    // instruction still exists; an edited or new instruction is one-off.
+    let snapshot_jsons: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT pay_line_json FROM payroll_run_pay_line
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2
+           AND source = 'from_reversed_snapshot'
+         ORDER BY line",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut remaining_snapshot_earnings: Vec<EarningInstruction> = snapshot_jsons
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value(value)
+                .expect("payroll_run_pay_line.pay_line_json is always an EarningInstruction")
+        })
+        .collect();
+    for pay_line in &mut pay_lines {
+        if let Some(index) = remaining_snapshot_earnings
+            .iter()
+            .position(|earning| earning == &pay_line.earning)
+        {
+            pay_line.source = PayLineSource::FromReversedSnapshot;
+            remaining_snapshot_earnings.remove(index);
+        } else {
+            pay_line.source = PayLineSource::OneOff;
+        }
+    }
+
     // Replace, not merge: the whole point of §4.5d is that this call states
     // the complete list, so a prior call's leftover lines must not survive
     // alongside a shorter new list. Every source is cleared, not only
@@ -689,20 +788,21 @@ pub async fn set_run_pay_lines(
     .execute(&mut *tx)
     .await?;
 
-    for (index, earning) in earnings.iter().enumerate() {
+    for (index, pay_line) in pay_lines.iter().enumerate() {
         let line = i16::try_from(index)
             .expect("a payroll run holds far fewer than i16::MAX earning lines");
         let pay_line_json =
-            serde_json::to_value(earning).expect("EarningInstruction always serializes");
+            serde_json::to_value(&pay_line.earning).expect("EarningInstruction always serializes");
         sqlx::query(
             "INSERT INTO payroll_run_pay_line
                 (payroll_run_id, employment_id, line, pay_line_json, source)
-             VALUES ($1::uuid, $2, $3, $4, 'one_off')",
+             VALUES ($1::uuid, $2, $3, $4, $5)",
         )
         .bind(payroll_run_id.as_str())
         .bind(employment_id.as_str())
         .bind(line)
         .bind(pay_line_json)
+        .bind(pay_line.source.as_column())
         .execute(&mut *tx)
         .await?;
     }
@@ -714,6 +814,16 @@ pub async fn set_run_pay_lines(
     // calculation beside a line that postdates it.
     sqlx::query(
         "DELETE FROM working_payroll_calculation
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE payroll_run_employment
+         SET figures_invalidated_by_pay_line_write = TRUE
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(payroll_run_id.as_str())
@@ -972,9 +1082,10 @@ pub struct PayrollRunMember {
     pub employment_id: EmploymentId,
     pub finalized_payroll_id: Option<FinalizedPayrollId>,
     pub full_name: String,
-    pub earnings: Vec<EarningInstruction>,
+    pub pay_lines: Vec<RunPayLine>,
     pub blockers: Vec<PayrollRunBlocker>,
     pub figures: Option<PayrollFigures>,
+    pub figures_absence: Option<PayrollFiguresAbsence>,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -1033,11 +1144,13 @@ pub async fn get_payroll_run_detail(
         String,
         Option<serde_json::Value>,
         Option<serde_json::Value>,
+        bool,
     );
 
     let member_rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT employment.id, finalized_payroll.id::text, person.full_name, earnings.earning_jsons,
-                working_payroll_calculation.payroll_calculation_json
+        "SELECT employment.id, finalized_payroll.id::text, person.full_name, pay_lines.pay_line_jsons,
+                working_payroll_calculation.payroll_calculation_json,
+                payroll_run_employment.figures_invalidated_by_pay_line_write
          FROM payroll_run_employment
          JOIN employment
            ON employment.id = payroll_run_employment.employment_id
@@ -1045,11 +1158,14 @@ pub async fn get_payroll_run_detail(
            ON person.id = employment.person_id
           AND person.employer_id = employment.employer_id
          LEFT JOIN LATERAL (
-             SELECT jsonb_agg(pay_line_json ORDER BY line) AS earning_jsons
+             SELECT jsonb_agg(
+                 jsonb_build_object('pay_line_json', pay_line_json, 'source', source)
+                 ORDER BY line
+             ) AS pay_line_jsons
              FROM payroll_run_pay_line
              WHERE payroll_run_pay_line.payroll_run_id = payroll_run_employment.payroll_run_id
                AND payroll_run_pay_line.employment_id = payroll_run_employment.employment_id
-         ) AS earnings ON TRUE
+         ) AS pay_lines ON TRUE
          LEFT JOIN working_payroll_calculation
            ON working_payroll_calculation.payroll_run_id = payroll_run_employment.payroll_run_id
           AND working_payroll_calculation.employment_id = payroll_run_employment.employment_id
@@ -1065,16 +1181,39 @@ pub async fn get_payroll_run_detail(
     .await?;
 
     let mut members = Vec::with_capacity(member_rows.len());
-    for (employment_id, finalized_payroll_id, full_name, earning_jsons, calculation_json) in
-        member_rows
+    for (
+        employment_id,
+        finalized_payroll_id,
+        full_name,
+        pay_line_jsons,
+        calculation_json,
+        figures_invalidated_by_pay_line_write,
+    ) in member_rows
     {
-        let earnings = earning_jsons
+        let pay_lines: Vec<RunPayLine> = pay_line_jsons
             .map(|value| {
-                serde_json::from_value::<Vec<EarningInstruction>>(value).expect(
-                    "payroll_run_pay_line.pay_line_json always serializes an EarningInstruction",
-                )
+                let rows: Vec<serde_json::Value> = serde_json::from_value(value)
+                    .expect("payroll_run_pay_line aggregation is always an array");
+                rows.into_iter()
+                    .map(|row| {
+                        let pay_line_json = row["pay_line_json"].clone();
+                        let source = row["source"]
+                            .as_str()
+                            .expect("payroll_run_pay_line.source is a string");
+                        RunPayLine {
+                            earning: serde_json::from_value(pay_line_json).expect(
+                                "payroll_run_pay_line.pay_line_json is always an EarningInstruction",
+                            ),
+                            source: PayLineSource::from_column(source),
+                        }
+                    })
+                    .collect()
             })
             .unwrap_or_default();
+        let earnings: Vec<EarningInstruction> = pay_lines
+            .iter()
+            .map(|pay_line| pay_line.earning.clone())
+            .collect();
         let figures = calculation_json.map(|value| {
             let calculation: PayrollCalculation = serde_json::from_value(value).expect(
                 "working_payroll_calculation.payroll_calculation_json always serializes a \
@@ -1082,15 +1221,23 @@ pub async fn get_payroll_run_detail(
             );
             PayrollFigures::from_calculation(&calculation)
         });
+        let figures_absence = if figures.is_some() {
+            None
+        } else if figures_invalidated_by_pay_line_write {
+            Some(PayrollFiguresAbsence::PayLinesChanged)
+        } else {
+            Some(PayrollFiguresAbsence::NotCalculated)
+        };
         let employment_id = EmploymentId::new(employment_id);
         let blockers = member_blockers(db, &employment_id, period, &earnings).await?;
         members.push(PayrollRunMember {
             employment_id,
             finalized_payroll_id: finalized_payroll_id.map(FinalizedPayrollId::new),
             full_name,
-            earnings,
+            pay_lines,
             blockers,
             figures,
+            figures_absence,
         });
     }
 
