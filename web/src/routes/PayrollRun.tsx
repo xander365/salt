@@ -16,6 +16,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import type {
+  DeductionLineDto,
   EarningLineDto,
   PayrollRunBlockerDto,
   PayrollRunDetailResponse,
@@ -103,20 +104,31 @@ function blockerFixPath(
   return section === null ? path : `${path}#${section}`;
 }
 
-/** A finalized run's Earnings, read back rather than edited. `PUT
- * .../pay-lines` refuses once history is written (`payroll_run_already_finalized`),
- * so offering the editor here would be a form whose every save is a refusal
- * — the same reason Finalize and Calculate are both gone by this point. */
-function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
-  if (earnings.length === 0) {
-    return <p className="text-sm text-muted-foreground">No earnings beyond basic pay.</p>;
+/** A finalized run's Earnings and voluntary deductions, read back rather
+ * than edited. `PUT .../pay-lines` refuses once history is written
+ * (`payroll_run_already_finalized`), so offering the editor here would be a
+ * form whose every save is a refusal — the same reason Finalize and
+ * Calculate are both gone by this point. */
+function FinalizedEarnings({
+  earnings,
+  deductions,
+}: {
+  earnings: EarningLineDto[];
+  deductions: DeductionLineDto[];
+}) {
+  if (earnings.length === 0 && deductions.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No earnings beyond basic pay, and no deductions.
+      </p>
+    );
   }
   return (
     <ul className="text-sm">
       {earnings.map((line, index) => (
         // The wire order is the stored order and there is no id to key on,
         // and this list is never reordered or edited — it is read-only.
-        <li key={index}>
+        <li key={`earning-${index}`}>
           {line.kind === 'taxableAllowance' ? (
             <>
               Taxable allowance — {line.label ?? 'unlabelled'} <Money cents={line.amountCents} />
@@ -129,6 +141,11 @@ function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
               Overtime — {line.label ?? 'unlabelled'}: {line.hours} hours &times; {line.multiplier}
             </>
           )}
+        </li>
+      ))}
+      {deductions.map((line, index) => (
+        <li key={`deduction-${index}`}>
+          Medical aid premium <Money cents={line.amountCents} />
         </li>
       ))}
     </ul>
@@ -155,12 +172,13 @@ function Member({
       <h3 className="text-lg font-semibold">{member.fullName}</h3>
 
       {runIsFinalized ? (
-        <FinalizedEarnings earnings={member.earnings} />
+        <FinalizedEarnings earnings={member.earnings} deductions={member.deductions} />
       ) : (
         <EarningsForm
           payrollRunId={payrollRunId}
           employmentId={member.employmentId}
           earnings={member.earnings}
+          deductions={member.deductions}
           onChanged={onEarningsChanged}
         />
       )}

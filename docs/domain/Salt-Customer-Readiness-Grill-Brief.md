@@ -286,6 +286,7 @@ Nothing here blocks the prototype. Everything here blocks the customer demo or t
 | SC-OPEN-4 | Treatment of prior-employer remuneration and PAYE; is a directive or certificate required? | Refused, §5.6 |
 | SC-OPEN-5 | SSC minimum earnings base — N$300 or N$500? | Implemented as N$500, flagged |
 | **SC-OPEN-6** | **What divisor converts a monthly salary to an hourly rate for overtime?** | **New. `SaltPolicy` per D18, `NEEDS CONFIRMATION`** |
+| **SC-OPEN-7** | **Is Salt correct that an employee's own medical aid premium gets no relief against taxable income?** | **New. `SaltPolicy` per issue #78, `NEEDS NAMRA CONFIRMATION`** |
 | **Q-OPEN-7** | **Does Labour General Regulations Annexure 1 require *named* hour categories (overtime, Sunday, public holiday) on a payslip, rather than bare multipliers?** [S6] | **New. Not verified from primary source. Could require revisiting D19.** |
 | **Q-OPEN-8** | **Are 1.5 and 2.0 the correct and only statutory overtime factors in Namibia?** | **New. Assumed from the owner's practice, not verified. Could require revisiting D31.** |
 | Q-OPEN-9 | How is an employer-paid medical aid benefit valued for tax? | Refused under D32, so not blocking |
@@ -293,6 +294,7 @@ Nothing here blocks the prototype. Everything here blocks the customer demo or t
 | Q-OPEN-11 | VET applicability. NTA states the levy applies at annual payroll of N$1 million or more, subject to exemptions [S7]. Ten people on N$10,000 monthly reach N$1.2 million before other remuneration. | Blocks reporting. VET and ECF are employer costs, never employee deductions |
 | Q-OPEN-12 | ECF classifications, rates and outputs. | Not established by any review to date |
 | Q-OPEN-13 | Current ETX and PAYE5 operational templates; the difference between NamRA's employee-tax page and the ITAS FAQ on annual reconciliation obligations [S4, S5]. | Obtain current templates before claiming compatibility. Keep internal reconciliation as a firm product need; verify external annual filing rather than declaring one |
+| Q-OPEN-22 | What does Namibian law require when a voluntary deduction (e.g. a medical aid premium) exceeds the net pay available to withhold it from — a priority order, a cap, a protected-earnings floor, carry-forward? | New (issue #78). Refused rather than guessed at: none of these is invented |
 
 **Product and commercial — needs the owner or a customer.**
 

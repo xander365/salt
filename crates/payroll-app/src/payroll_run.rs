@@ -19,8 +19,9 @@ use chrono::NaiveDate;
 use payroll::{
     Deduction, Earning, EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod,
     PaySchedule, PayrollCalculation, PayrollError, PriorEmployment, PriorEmploymentFigures,
-    TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus, VoluntaryDeductionInstruction,
 };
+use serde::{Deserialize, Serialize};
 
 /// Whether a member's figures in the run detail are current, and why not
 /// when they are absent (§D-6's `calculation_state`, issue #77). A figure
@@ -64,10 +65,82 @@ impl PayLineSource {
     }
 }
 
-/// One current Earning instruction and the fact that put it on this run.
+/// One instruction stored as a run pay line — an Earning or a voluntary
+/// Deduction (issue #78) — tagged so the two can share one ordered list and
+/// one `source`.
+///
+/// Before issue #78, `payroll_run_pay_line.pay_line_json` held a bare
+/// serialized `EarningInstruction` (no `Earning`/`Deduction` wrapper key).
+/// `Deserialize` reads both that legacy shape and the current tagged one, so
+/// a row written before this change is still readable; every newly
+/// serialized line writes only the tagged shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum PayLineInstruction {
+    Earning(EarningInstruction),
+    Deduction(VoluntaryDeductionInstruction),
+}
+
+impl PayLineInstruction {
+    /// The Earning instruction this line carries, or `None` for a
+    /// deduction line. Used where only earnings matter — the calculator's
+    /// own `earnings` input, and the `OrdinaryHours` blocker's overtime
+    /// check — so neither has to match on this type itself.
+    pub fn as_earning(&self) -> Option<&EarningInstruction> {
+        match self {
+            PayLineInstruction::Earning(earning) => Some(earning),
+            PayLineInstruction::Deduction(_) => None,
+        }
+    }
+
+    /// The voluntary deduction instruction this line carries, or `None` for
+    /// an earning line.
+    pub fn as_deduction(&self) -> Option<&VoluntaryDeductionInstruction> {
+        match self {
+            PayLineInstruction::Earning(_) => None,
+            PayLineInstruction::Deduction(deduction) => Some(deduction),
+        }
+    }
+}
+
+/// The wire shape `PayLineInstruction` reads: either the current tagged
+/// shape, or — tried second, since neither `EarningInstruction` variant is
+/// named `Earning` or `Deduction` and so cannot be mistaken for the tagged
+/// shape — a bare `EarningInstruction`, the only shape any row predating
+/// issue #78 can hold.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawPayLineInstruction {
+    Tagged(TaggedPayLineInstruction),
+    LegacyEarning(EarningInstruction),
+}
+
+#[derive(Debug, Deserialize)]
+enum TaggedPayLineInstruction {
+    Earning(EarningInstruction),
+    Deduction(VoluntaryDeductionInstruction),
+}
+
+impl<'de> Deserialize<'de> for PayLineInstruction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match RawPayLineInstruction::deserialize(deserializer)? {
+            RawPayLineInstruction::Tagged(TaggedPayLineInstruction::Earning(earning)) => {
+                PayLineInstruction::Earning(earning)
+            }
+            RawPayLineInstruction::Tagged(TaggedPayLineInstruction::Deduction(deduction)) => {
+                PayLineInstruction::Deduction(deduction)
+            }
+            RawPayLineInstruction::LegacyEarning(earning) => PayLineInstruction::Earning(earning),
+        })
+    }
+}
+
+/// One current pay-line instruction and the fact that put it on this run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPayLine {
-    pub earning: EarningInstruction,
+    pub instruction: PayLineInstruction,
     pub source: PayLineSource,
 }
 
@@ -684,12 +757,13 @@ pub async fn remove_employment_from_run(
     Ok(())
 }
 
-/// Replaces the classified `Earning` lines held for `(payroll_run_id,
-/// employment_id)` with `earnings`, in the order given (§4.5d). An empty
-/// `earnings` is a complete statement — no additional Earnings this period —
-/// and clears whatever was there, rather than being refused or ignored:
-/// Earnings are the Employer's own act of paying, so there is no unasked
-/// question here to confirm-none the way `PriorEmployment` and
+/// Replaces the classified pay lines held for `(payroll_run_id,
+/// employment_id)` with `earnings` followed by `deductions`, each in the
+/// order given (§4.5d, extended to voluntary deductions by issue #78). An
+/// empty `earnings` and `deductions` is a complete statement — no additional
+/// pay this period — and clears whatever was there, rather than being
+/// refused or ignored: these are the Employer's own act of paying, so there
+/// is no unasked question here to confirm-none the way `PriorEmployment` and
 /// `UnsupportedDeductionStatus` have one.
 ///
 /// An Employment that is not an *active* member of the run is refused too:
@@ -702,6 +776,8 @@ pub async fn remove_employment_from_run(
 /// lines cannot silently rewrite where they came from (§D-10) — and every
 /// other line is `one_off`: typed directly onto this run, never recurring.
 /// Matching is one-for-one, so a second copy of a copied line is one-off.
+/// Matching applies identically to deduction lines: a deduction pre-populated
+/// from a reversed snapshot that is still stated verbatim keeps its source.
 ///
 /// **Closes the run detail's stale-figures defect (issue #77).** Writing,
 /// changing or clearing a member's lines deletes that member's
@@ -715,17 +791,18 @@ pub async fn set_run_pay_lines(
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
     earnings: Vec<EarningInstruction>,
+    deductions: Vec<VoluntaryDeductionInstruction>,
 ) -> Result<(), PayrollAppError> {
     let mut tx = db.pool().begin().await?;
     lock_editable_run(&mut tx, payroll_run_id).await?;
 
-    // Earning lines are a fact about paying this Employment for this
-    // period, so a run that is not paying it has nowhere to put them. The
-    // membership foreign key from migration 0017 already refuses an
-    // Employment that was never proposed, but it cannot see `removed_at`:
-    // without this check, lines could be written against someone the
-    // Employer has deliberately, reasonedly taken out of the run, and they
-    // would sit there looking like pay that was intended.
+    // Earning and deduction lines are a fact about paying this Employment
+    // for this period, so a run that is not paying it has nowhere to put
+    // them. The membership foreign key from migration 0017 already refuses
+    // an Employment that was never proposed, but it cannot see
+    // `removed_at`: without this check, lines could be written against
+    // someone the Employer has deliberately, reasonedly taken out of the
+    // run, and they would sit there looking like pay that was intended.
     //
     // No row lock is needed here. `remove_employment_from_run` takes the
     // run's own `FOR UPDATE` before it removes anything, and
@@ -746,6 +823,15 @@ pub async fn set_run_pay_lines(
         });
     }
 
+    // Every instruction the caller states, earnings first then deductions —
+    // the one ordered list this function stores and diffs, whatever the two
+    // arrays it arrived as.
+    let instructions: Vec<PayLineInstruction> = earnings
+        .into_iter()
+        .map(PayLineInstruction::Earning)
+        .chain(deductions.into_iter().map(PayLineInstruction::Deduction))
+        .collect();
+
     // A copied line keeps its frozen-snapshot source only while the exact
     // instruction is still stated; an edited or new instruction is one-off.
     let stored_rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
@@ -760,30 +846,33 @@ pub async fn set_run_pay_lines(
     let stored: Vec<RunPayLine> = stored_rows
         .into_iter()
         .map(|(pay_line_json, source)| RunPayLine {
-            earning: serde_json::from_value(pay_line_json)
-                .expect("payroll_run_pay_line.pay_line_json is always an EarningInstruction"),
+            instruction: serde_json::from_value(pay_line_json)
+                .expect("payroll_run_pay_line.pay_line_json is always a PayLineInstruction"),
             source: PayLineSource::from_column(&source),
         })
         .collect();
-    let mut remaining_snapshot_earnings: Vec<&EarningInstruction> = stored
+    let mut remaining_snapshot_lines: Vec<&PayLineInstruction> = stored
         .iter()
         .filter(|line| line.source == PayLineSource::FromReversedSnapshot)
-        .map(|line| &line.earning)
+        .map(|line| &line.instruction)
         .collect();
-    let pay_lines: Vec<RunPayLine> = earnings
+    let pay_lines: Vec<RunPayLine> = instructions
         .into_iter()
-        .map(|earning| {
-            let source = match remaining_snapshot_earnings
+        .map(|instruction| {
+            let source = match remaining_snapshot_lines
                 .iter()
-                .position(|copied| **copied == earning)
+                .position(|copied| **copied == instruction)
             {
                 Some(index) => {
-                    remaining_snapshot_earnings.remove(index);
+                    remaining_snapshot_lines.remove(index);
                     PayLineSource::FromReversedSnapshot
                 }
                 None => PayLineSource::OneOff,
             };
-            RunPayLine { earning, source }
+            RunPayLine {
+                instruction,
+                source,
+            }
         })
         .collect();
 
@@ -817,8 +906,8 @@ pub async fn set_run_pay_lines(
     for (index, pay_line) in pay_lines.iter().enumerate() {
         let line = i16::try_from(index)
             .expect("a payroll run holds far fewer than i16::MAX earning lines");
-        let pay_line_json =
-            serde_json::to_value(&pay_line.earning).expect("EarningInstruction always serializes");
+        let pay_line_json = serde_json::to_value(&pay_line.instruction)
+            .expect("PayLineInstruction always serializes");
         sqlx::query(
             "INSERT INTO payroll_run_pay_line
                 (payroll_run_id, employment_id, line, pay_line_json, source)
@@ -1236,8 +1325,8 @@ pub async fn get_payroll_run_detail(
                             .as_str()
                             .expect("payroll_run_pay_line.source is a string");
                         RunPayLine {
-                            earning: serde_json::from_value(pay_line_json).expect(
-                                "payroll_run_pay_line.pay_line_json is always an EarningInstruction",
+                            instruction: serde_json::from_value(pay_line_json).expect(
+                                "payroll_run_pay_line.pay_line_json is always a PayLineInstruction",
                             ),
                             source: PayLineSource::from_column(source),
                         }
@@ -1245,9 +1334,11 @@ pub async fn get_payroll_run_detail(
                     .collect()
             })
             .unwrap_or_default();
+        // Only earnings matter to `member_blockers`'s overtime check;
+        // deduction lines carry no bearing on `OrdinaryHours`.
         let earnings: Vec<EarningInstruction> = pay_lines
             .iter()
-            .map(|pay_line| pay_line.earning.clone())
+            .filter_map(|pay_line| pay_line.instruction.as_earning().cloned())
             .collect();
         let figures = calculation_json.map(|value| {
             let calculation: PayrollCalculation = serde_json::from_value(value).expect(

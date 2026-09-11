@@ -159,7 +159,7 @@ async fn a_member_never_calculated_reports_not_calculated_even_after_a_write(poo
 
     // No figures ever existed, so there is nothing a write could have made
     // stale — the worksheet must not say otherwise.
-    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)])
+    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)], Vec::new())
         .await
         .unwrap();
     assert_eq!(
@@ -182,7 +182,7 @@ async fn writing_lines_retires_only_that_members_figures_until_the_next_calculat
         (CalculationState::Current, true)
     );
 
-    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)])
+    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)], Vec::new())
         .await
         .unwrap();
 
@@ -200,7 +200,7 @@ async fn writing_lines_retires_only_that_members_figures_until_the_next_calculat
     );
 
     // A second write before any Calculate keeps saying why.
-    set_run_pay_lines(&db, &run_id, &first, vec![allowance(60_000)])
+    set_run_pay_lines(&db, &run_id, &first, vec![allowance(60_000)], Vec::new())
         .await
         .unwrap();
     assert_eq!(
@@ -235,14 +235,14 @@ async fn writing_lines_retires_only_that_members_figures_until_the_next_calculat
 async fn resubmitting_the_same_lines_keeps_the_figures_current(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (employer_id, run_id, first, _) = a_run_with_two_members(&db).await;
-    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)])
+    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)], Vec::new())
         .await
         .unwrap();
     calculate_payroll_run(&db, &run_id, "calculator")
         .await
         .unwrap();
 
-    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)])
+    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)], Vec::new())
         .await
         .unwrap();
 
@@ -257,6 +257,7 @@ async fn resubmitting_the_same_lines_keeps_the_figures_current(pool: PgPool) {
         &run_id,
         &first,
         vec![allowance(50_000), allowance(10_000)],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -268,6 +269,7 @@ async fn resubmitting_the_same_lines_keeps_the_figures_current(pool: PgPool) {
         &run_id,
         &first,
         vec![allowance(10_000), allowance(50_000)],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -283,7 +285,7 @@ async fn resubmitting_the_same_lines_keeps_the_figures_current(pool: PgPool) {
 async fn clearing_a_members_lines_retires_their_figures(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (employer_id, run_id, first, _) = a_run_with_two_members(&db).await;
-    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)])
+    set_run_pay_lines(&db, &run_id, &first, vec![allowance(50_000)], Vec::new())
         .await
         .unwrap();
     calculate_payroll_run(&db, &run_id, "calculator")
@@ -291,7 +293,7 @@ async fn clearing_a_members_lines_retires_their_figures(pool: PgPool) {
         .unwrap();
     assert_eq!(working_calculation_count(&pool, &run_id, &first).await, 1);
 
-    set_run_pay_lines(&db, &run_id, &first, Vec::new())
+    set_run_pay_lines(&db, &run_id, &first, Vec::new(), Vec::new())
         .await
         .unwrap();
 

@@ -763,9 +763,11 @@ fn classify_payroll_error(err: &PayrollError) -> (StatusCode, &'static str, Opti
             "prior_paye_exceeds_recalculated_liability",
             None,
         ),
-        PayrollError::DeductionsExceedGrossRemuneration => {
-            (unprocessable, "deductions_exceed_gross_remuneration", None)
-        }
+        PayrollError::DeductionsExceedGrossRemuneration { shortfall } => (
+            unprocessable,
+            "deductions_exceed_gross_remuneration",
+            Some(json!({ "shortfallCents": shortfall.cents() })),
+        ),
         PayrollError::AmountOverflow => (unprocessable, "amount_overflow", None),
         PayrollError::NoPayeTableCoversDate { date } => (
             unprocessable,
@@ -933,6 +935,10 @@ const UNSUPPORTED_DEDUCTION_KIND_CODES: &[(UnsupportedDeductionKind, &str)] = &[
         UnsupportedDeductionKind::EducationPolicy,
         "education_policy",
     ),
+    (
+        UnsupportedDeductionKind::EmployerPaidMedicalAid,
+        "employer_paid_medical_aid",
+    ),
 ];
 
 pub(crate) fn unsupported_deduction_kind_code(kind: &UnsupportedDeductionKind) -> &'static str {
@@ -1010,6 +1016,7 @@ mod tests {
             snapshot,
             period,
             earnings,
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
                 period.end(),
             )),
@@ -1890,9 +1897,11 @@ mod tests {
     #[test]
     fn deductions_exceed_gross_remuneration() {
         check_payroll_error(
-            PayrollError::DeductionsExceedGrossRemuneration,
+            PayrollError::DeductionsExceedGrossRemuneration {
+                shortfall: Money::from_cents(500).unwrap(),
+            },
             "deductions_exceed_gross_remuneration",
-            None,
+            Some(json!({ "shortfallCents": 500 })),
         );
     }
 
@@ -2022,6 +2031,7 @@ mod tests {
             payroll::UnsupportedDeductionKind::ProvidentFund,
             payroll::UnsupportedDeductionKind::RetirementAnnuityFund,
             payroll::UnsupportedDeductionKind::EducationPolicy,
+            payroll::UnsupportedDeductionKind::EmployerPaidMedicalAid,
         ] {
             assert_eq!(
                 parse_unsupported_deduction_kind(unsupported_deduction_kind_code(&kind)),

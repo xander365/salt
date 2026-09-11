@@ -1,6 +1,7 @@
 //! `AddEmploymentToCorrectionRun` (§4.8, §4.5d, §6.3, ADR-0015): the one act
 //! that gives a Correction run its single member, its declared replacement
-//! target (if any), and its pre-populated Earning lines.
+//! target (if any), and its pre-populated Earning and Deduction lines
+//! (issue #78).
 //!
 //! Whether a null target is *legitimate* — a reasoned removal, or the
 //! Employment never having been a member — is a question only finalization
@@ -13,25 +14,31 @@
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
-use crate::finalize::FinalizedPayrollId;
-use crate::payroll_run::{LockedRun, PayrollRunId, RunKind, lock_and_reopen_run};
-use payroll::{EarningInstruction, EmployerId, EmploymentId, PayPeriod};
+use crate::finalize::{DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION, FinalizedPayrollId};
+use crate::payroll_run::{
+    LockedRun, PayLineInstruction, PayrollRunId, RunKind, lock_and_reopen_run,
+};
+use payroll::{
+    EarningInstruction, EmployerId, EmploymentId, PayPeriod, VoluntaryDeductionInstruction,
+};
 
-/// What happened to a Correction run's Earning lines when
+/// What happened to a Correction run's Earning and Deduction lines when
 /// [`add_employment_to_correction_run`] tried to pre-populate them from a
-/// reversed `FinalizedPayroll`'s frozen snapshot (§4.5d, §6.3).
+/// reversed `FinalizedPayroll`'s frozen snapshot (§4.5d, §6.3, issue #78).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EarningPrePopulation {
     /// No target was named, so there is no snapshot to read from; the run
-    /// starts with no Earning lines, the same as a fresh Ordinary member.
+    /// starts with no lines, the same as a fresh Ordinary member.
     NoTarget,
-    /// `count` Earning lines were copied from the target's frozen
-    /// `PayrollInput`.
+    /// `count` Earning and Deduction lines together were copied from the
+    /// target's frozen `PayrollInput`.
     FromTarget { count: usize },
     /// The target's `snapshot_schema_version` is not one this build of Salt
-    /// deserializes. The run starts with no Earning lines rather than
-    /// guessing at an unreadable shape (§9.1) — this variant is how that
-    /// degradation "says so" to the caller.
+    /// deserializes, or (from `snapshot_schema_version`
+    /// [`DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION`] onward) its
+    /// `deductions` field could not be read. The run starts with no lines
+    /// rather than guessing at an unreadable shape (§9.1) — this variant is
+    /// how that degradation "says so" to the caller.
     UnreadableSnapshot { schema_version: i32 },
 }
 
@@ -222,14 +229,14 @@ pub(crate) async fn validate_correction_target(
     Ok((schema_version, input_json))
 }
 
-/// Copies `input_json`'s `earnings` array into `payroll_run_pay_line` rows
-/// for `(payroll_run_id, employment_id)`, each marked `source =
-/// 'from_reversed_snapshot'` so the run detail can say where it came from,
-/// when `schema_version` is one this build reads. Only the `earnings` field
-/// is read — never the whole frozen `PayrollInput` — because that is the
-/// only field this pre-population exists to carry forward (§4.5d); the rest
-/// of a Correction's `PayrollInput` comes fresh from current master data
-/// (§6.5).
+/// Copies `input_json`'s `earnings` array, followed by its `deductions`
+/// array (issue #78), into `payroll_run_pay_line` rows for `(payroll_run_id,
+/// employment_id)`, each marked `source = 'from_reversed_snapshot'` so the
+/// run detail can say where it came from, when `schema_version` is one this
+/// build reads. Only those two fields are read — never the whole frozen
+/// `PayrollInput` — because they are the only fields this pre-population
+/// exists to carry forward (§4.5d); the rest of a Correction's
+/// `PayrollInput` comes fresh from current master data (§6.5).
 ///
 /// Checked against [`crate::finalize::KNOWN_JSON_SNAPSHOT_VERSIONS`], never
 /// against `schema_version != SNAPSHOT_SCHEMA_VERSION` (issue #73/#74):
@@ -250,7 +257,7 @@ async fn prepopulate_pay_lines(
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     }
 
-    // A snapshot at the current version is expected to deserialize, but the
+    // A snapshot at a known version is expected to deserialize, but the
     // failure is degraded rather than panicked on: §9.1's promise is that an
     // unreadable snapshot starts the run empty and says so, and a panic is
     // the one shape that does neither. The version stamp is what the caller
@@ -258,8 +265,8 @@ async fn prepopulate_pay_lines(
     //
     // An absent `earnings` field degrades the same way a malformed one
     // does, rather than being read as an empty list: a `PayrollInput` at
-    // this version always serializes the field, so its absence says the
-    // snapshot is not the shape this build reads — and answering "no
+    // every known version always serializes the field, so its absence says
+    // the snapshot is not the shape this build reads — and answering "no
     // allowances" to that is the guess §9.1 forbids, not a degradation.
     let Some(earnings_json) = input_json.get("earnings") else {
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
@@ -270,11 +277,37 @@ async fn prepopulate_pay_lines(
         return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
     };
 
-    for (index, earning) in earnings.iter().enumerate() {
-        let line = i16::try_from(index)
-            .expect("a payroll run holds far fewer than i16::MAX earning lines");
+    // `deductions` joined `PayrollInput` at
+    // `DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION`. A snapshot
+    // strictly older than that genuinely has no such field — reading that
+    // absence as "no deductions" is a fact about history, established once
+    // here rather than guessed. A snapshot at or after that version
+    // degrades exactly like `earnings` above: absence or a malformed shape
+    // is unreadable, never a guess.
+    let deductions: Vec<VoluntaryDeductionInstruction> =
+        if schema_version < DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION {
+            Vec::new()
+        } else {
+            let Some(deductions_json) = input_json.get("deductions") else {
+                return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
+            };
+            let Ok(deductions) = serde_json::from_value(deductions_json.clone()) else {
+                return Ok(EarningPrePopulation::UnreadableSnapshot { schema_version });
+            };
+            deductions
+        };
+
+    let lines: Vec<PayLineInstruction> = earnings
+        .into_iter()
+        .map(PayLineInstruction::Earning)
+        .chain(deductions.into_iter().map(PayLineInstruction::Deduction))
+        .collect();
+
+    for (index, instruction) in lines.iter().enumerate() {
+        let line =
+            i16::try_from(index).expect("a payroll run holds far fewer than i16::MAX pay lines");
         let pay_line_json =
-            serde_json::to_value(earning).expect("EarningInstruction always serializes");
+            serde_json::to_value(instruction).expect("PayLineInstruction always serializes");
         sqlx::query(
             "INSERT INTO payroll_run_pay_line
                 (payroll_run_id, employment_id, line, pay_line_json, source)
@@ -288,9 +321,7 @@ async fn prepopulate_pay_lines(
         .await?;
     }
 
-    Ok(EarningPrePopulation::FromTarget {
-        count: earnings.len(),
-    })
+    Ok(EarningPrePopulation::FromTarget { count: lines.len() })
 }
 
 /// Whether a Correction run's single member may legitimately finalize with

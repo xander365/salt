@@ -15,10 +15,10 @@ use payroll::{
     UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    EmploymentPerson, PayrollAppError, PayrollRunBlocker, PayrollRunId, RunStatus, SaltDatabase,
-    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
-    declare_unsupported_deduction_status, get_payroll_run_detail, list_payroll_runs,
-    record_compensation_terms, remove_employment_from_run, set_run_pay_lines,
+    EmploymentPerson, PayLineInstruction, PayrollAppError, PayrollRunBlocker, PayrollRunId,
+    RunStatus, SaltDatabase, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, get_payroll_run_detail,
+    list_payroll_runs, record_compensation_terms, remove_employment_from_run, set_run_pay_lines,
     verify_payroll_run_belongs_to_employer,
 };
 use sqlx::PgPool;
@@ -224,6 +224,7 @@ async fn a_runs_detail_names_every_member_and_their_earning_lines(pool: PgPool) 
                 label: None,
             },
         ],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -243,17 +244,17 @@ async fn a_runs_detail_names_every_member_and_their_earning_lines(pool: PgPool) 
         detail.members[0]
             .pay_lines
             .iter()
-            .map(|pay_line| pay_line.earning.clone())
+            .map(|pay_line| pay_line.instruction.clone())
             .collect::<Vec<_>>(),
         vec![
-            EarningInstruction::TaxableAllowance {
+            PayLineInstruction::Earning(EarningInstruction::TaxableAllowance {
                 amount: Money::from_cents(5000).unwrap(),
                 label: None,
-            },
-            EarningInstruction::TaxableAllowance {
+            }),
+            PayLineInstruction::Earning(EarningInstruction::TaxableAllowance {
                 amount: Money::from_cents(2500).unwrap(),
                 label: None,
-            },
+            }),
         ]
     );
 }
@@ -662,6 +663,7 @@ async fn overtime_on_terms_without_ordinary_hours_blocks_but_salary_alone_does_n
             multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
             label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
         }],
+        Vec::new(),
     )
     .await
     .unwrap();

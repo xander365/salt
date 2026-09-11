@@ -99,20 +99,34 @@ use payroll::{
 /// comparing this one against 2. This integer answers a narrower question:
 /// which decoder reads the JSONB blobs (see `KNOWN_JSON_SNAPSHOT_VERSIONS`
 /// and `crate::correction::prepopulate_pay_lines`).
-pub const SNAPSHOT_SCHEMA_VERSION: i32 = 3;
+pub const SNAPSHOT_SCHEMA_VERSION: i32 = 4;
 
 /// The `snapshot_schema_version` values whose `payroll_input_json` and
 /// `payroll_calculation_json` this build can deserialize (§9.1). Version 2
 /// (issue #73) added three new sibling *columns* and issue #74 added the
 /// current labelled earning-line shape, so 1 and 2 read through the same
 /// compatible decoder. Version 3's new overtime variants are absent from old
-/// snapshots, so the same backward-compatible decoder also reads it. This
-/// list is the one place [`crate::finalized_payroll_read::calculation_from_snapshot`] and
+/// snapshots, so the same backward-compatible decoder also reads it. Version
+/// 4 (issue #78) adds `PayrollInput.deductions`, a genuinely new field absent
+/// from every earlier version's frozen `payroll_input_json` — see
+/// [`DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION`] for how
+/// `crate::correction::prepopulate_pay_lines` tells that legitimate absence
+/// apart from an unreadable one. This list is the one place
+/// [`crate::finalized_payroll_read::calculation_from_snapshot`] and
 /// `crate::correction::prepopulate_pay_lines` both check against, rather than
 /// each comparing a stored version to [`SNAPSHOT_SCHEMA_VERSION`] directly —
 /// a row is not unreadable merely for having finalized under an earlier
-/// version whose earning lines this build can still decode.
-pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2, 3];
+/// version whose lines this build can still decode.
+pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2, 3, 4];
+
+/// The first `snapshot_schema_version` whose frozen `payroll_input_json`
+/// carries a `deductions` field at all (issue #78). A snapshot strictly
+/// before this version has no such field by construction — reading that
+/// absence as "no deductions" is a fact about history, not a guess — while a
+/// snapshot at or after it that lacks the field is corrupt or from a shape
+/// this build does not otherwise know, and stays unreadable rather than
+/// being read as empty (§9.1).
+pub(crate) const DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION: i32 = 4;
 
 /// The `PayslipTemplateVersion` [`finalize_payroll_run`] freezes onto every
 /// `FinalizedPayroll` (issue #73, CONTEXT.md's own glossary entry, Grill

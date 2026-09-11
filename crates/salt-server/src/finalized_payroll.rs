@@ -260,6 +260,7 @@ struct OvertimeTraceDto {
 fn policy_status_str(status: SaltPolicyStatus) -> &'static str {
     match status {
         SaltPolicyStatus::NeedsConfirmation => "needs_confirmation",
+        SaltPolicyStatus::NeedsNamraConfirmation => "needs_namra_confirmation",
     }
 }
 

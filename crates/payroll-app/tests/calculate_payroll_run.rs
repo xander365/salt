@@ -159,7 +159,7 @@ async fn a_calculation_needs_only_the_one_connection_it_already_holds(pool: PgPo
         create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new())
+    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new(), Vec::new())
         .await
         .unwrap();
 
@@ -299,6 +299,7 @@ async fn salt_policy_overtime_hours_are_priced_and_kept_out_of_the_social_securi
             multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
             label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
         }],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -359,6 +360,7 @@ async fn an_overtime_line_without_recorded_ordinary_hours_is_refused(pool: PgPoo
             multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
             label: Some(payroll::EarningLabel::new("Sunday overtime").unwrap()),
         }],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -416,6 +418,7 @@ async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation
             amount: Money::from_cents(250000).unwrap(),
             label: None,
         }],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -640,6 +643,7 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
             amount: Money::from_cents(50000).unwrap(),
             label: None,
         }],
+        Vec::new(),
     )
     .await
     .unwrap();

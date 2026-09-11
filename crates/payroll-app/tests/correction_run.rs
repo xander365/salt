@@ -6,15 +6,16 @@
 use chrono::NaiveDate;
 use payroll::{
     EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment,
-    TaxYear, UnsupportedDeductionStatus,
+    TaxYear, UnsupportedDeductionStatus, VoluntaryDeductionInstruction,
 };
 use payroll_app::{
-    EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayrollAppError, PayrollRunId,
-    SNAPSHOT_SCHEMA_VERSION, SaltDatabase, add_employment_to_correction_run, calculate_payroll_run,
-    correct_compensation_terms, create_correction_run, create_employer, create_employment,
-    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
-    finalize_payroll_run, record_compensation_terms, remove_employment_from_run,
-    reverse_finalized_payroll, set_run_pay_lines,
+    EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayLineInstruction,
+    PayrollAppError, PayrollRunId, SNAPSHOT_SCHEMA_VERSION, SaltDatabase,
+    add_employment_to_correction_run, calculate_payroll_run, correct_compensation_terms,
+    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
+    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
+    record_compensation_terms, remove_employment_from_run, reverse_finalized_payroll,
+    set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -998,6 +999,7 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
             amount: Money::from_cents(20000).unwrap(),
             label: None,
         }],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -1043,10 +1045,12 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     .unwrap();
     assert_eq!(
         pay_line_json,
-        serde_json::to_value(EarningInstruction::TaxableAllowance {
-            amount: Money::from_cents(20000).unwrap(),
-            label: None,
-        })
+        serde_json::to_value(PayLineInstruction::Earning(
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(20000).unwrap(),
+                label: None,
+            }
+        ))
         .unwrap()
     );
     // Marked as having come from the reversed target's frozen snapshot
@@ -1075,9 +1079,15 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
 
     // Salt decides provenance, not the caller: resaving the untouched copied
     // line keeps its frozen-snapshot source, so a no-op save cannot wipe it.
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![copied.clone()])
-        .await
-        .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![copied.clone()],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(sources(pool.clone()).await, ["from_reversed_snapshot"]);
 
     // Matching is one-for-one: a second, identical line is typed by hand, so
@@ -1087,6 +1097,7 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
         &run_id,
         &employment_id,
         vec![copied.clone(), copied.clone()],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -1101,14 +1112,227 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
         amount: Money::from_cents(25000).unwrap(),
         label: None,
     };
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![edited])
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![edited], Vec::new())
         .await
         .unwrap();
     assert_eq!(sources(pool.clone()).await, ["one_off"]);
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![copied])
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![copied], Vec::new())
         .await
         .unwrap();
     assert_eq!(sources(pool.clone()).await, ["one_off"]);
+}
+
+// ---- Deduction pre-population (issue #78, §4.5d, §6.3, §9.1) ----
+
+/// Carried over from #77: a Correction's pre-population copies deductions
+/// beside earnings from the reversed target's frozen snapshot, each marked
+/// `from_reversed_snapshot`, in the order the snapshot held them — earnings
+/// first, then deductions (§4.5d).
+#[sqlx::test]
+async fn deductions_are_prepopulated_from_the_reversed_targets_frozen_snapshot(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let ordinary_run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    set_run_pay_lines(
+        &db,
+        &ordinary_run_id,
+        &employment_id,
+        vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(20000).unwrap(),
+            label: None,
+        }],
+        vec![VoluntaryDeductionInstruction::MedicalAidPremium(
+            Money::from_cents(75000).unwrap(),
+        )],
+    )
+    .await
+    .unwrap();
+    calculate_payroll_run(&db, &ordinary_run_id, "calculator")
+        .await
+        .unwrap();
+    let outcome = finalize_payroll_run(&db, &ordinary_run_id, "finalizer")
+        .await
+        .unwrap();
+    let target = outcome.finalized[0].1.clone();
+    reverse_finalized_payroll(&db, &target, "March salary was wrong", "actor")
+        .await
+        .unwrap();
+
+    let run_id = create_correction_run(
+        &db,
+        &employer_id,
+        period(),
+        date(2026, 6, 5),
+        "March pay was wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let pre_population =
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
+            .await
+            .unwrap();
+
+    // One earning line and one deduction line together.
+    assert_eq!(
+        pre_population,
+        EarningPrePopulation::FromTarget { count: 2 }
+    );
+
+    let rows: Vec<(i16, serde_json::Value, String)> = sqlx::query_as(
+        "SELECT line, pay_line_json, source FROM payroll_run_pay_line
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2 ORDER BY line",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].1,
+        serde_json::to_value(PayLineInstruction::Earning(
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(20000).unwrap(),
+                label: None,
+            }
+        ))
+        .unwrap()
+    );
+    assert_eq!(rows[0].2, "from_reversed_snapshot");
+    assert_eq!(
+        rows[1].1,
+        serde_json::to_value(PayLineInstruction::Deduction(
+            VoluntaryDeductionInstruction::MedicalAidPremium(Money::from_cents(75000).unwrap())
+        ))
+        .unwrap()
+    );
+    // Marked as having come from the reversed target's frozen snapshot
+    // (issue #78's own acceptance criterion), not `one_off`.
+    assert_eq!(rows[1].2, "from_reversed_snapshot");
+}
+
+/// `deductions` joined `PayrollInput` at issue #78. A snapshot genuinely
+/// finalized before that — a known version strictly below the one that
+/// introduced the field — has no `deductions` key at all, and that absence
+/// is read as "no deductions", not as unreadable: it is a fact about
+/// history, established once, never a guess.
+#[sqlx::test]
+async fn a_snapshot_from_before_deductions_existed_prepopulates_no_deductions(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
+    // Simulates a row finalized before issue #78: a known older version
+    // whose frozen input genuinely never had a `deductions` field.
+    sqlx::query(
+        "UPDATE finalized_payroll
+         SET snapshot_schema_version = $1, payroll_input_json = payroll_input_json - 'deductions'
+         WHERE id = $2::uuid",
+    )
+    .bind(SNAPSHOT_SCHEMA_VERSION - 1)
+    .bind(target.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let run_id = create_correction_run(
+        &db,
+        &employer_id,
+        period(),
+        date(2026, 6, 5),
+        "March pay was wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let pre_population =
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
+            .await
+            .unwrap();
+
+    // `finalize_and_reverse_march` sets no earnings and now (simulated) no
+    // deductions either, so the legitimate absence of both is 0, not a
+    // refusal.
+    assert_eq!(
+        pre_population,
+        EarningPrePopulation::FromTarget { count: 0 }
+    );
+}
+
+/// A snapshot at or after the version that introduced `deductions` is
+/// expected to carry the field. One that does not is corrupt or an
+/// otherwise-unknown shape — never read as "no deductions", the guess
+/// §9.1 forbids.
+#[sqlx::test]
+async fn a_snapshot_missing_its_deductions_field_at_a_version_that_should_carry_it_is_unreadable(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let target = finalize_and_reverse_march(&db, &employer_id, &employment_id).await;
+    // `snapshot_schema_version` stays at the version this build writes, but
+    // `deductions` is stripped as though corrupted or from some other
+    // unknown shape at that same version — genuinely different from the
+    // legitimate pre-#78 absence the test above covers.
+    sqlx::query(
+        "UPDATE finalized_payroll
+         SET payroll_input_json = payroll_input_json - 'deductions'
+         WHERE id = $1::uuid",
+    )
+    .bind(target.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let run_id = create_correction_run(
+        &db,
+        &employer_id,
+        period(),
+        date(2026, 6, 5),
+        "March pay was wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let pre_population =
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
+            .await
+            .unwrap();
+
+    assert_eq!(
+        pre_population,
+        EarningPrePopulation::UnreadableSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION
+        }
+    );
 }
 
 #[sqlx::test]

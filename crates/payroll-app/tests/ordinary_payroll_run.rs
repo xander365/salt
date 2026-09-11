@@ -6,9 +6,9 @@
 use chrono::NaiveDate;
 use payroll::{DayOfMonth, EarningInstruction, EmploymentId, Money, PayPeriod, PeriodEndDay};
 use payroll_app::{
-    EmploymentPerson, PayrollAppError, PayrollRunId, SaltDatabase, create_employer,
-    create_employment, create_ordinary_payroll_run, remove_employment_from_run, set_run_pay_lines,
-    void_employment,
+    EmploymentPerson, PayLineInstruction, PayrollAppError, PayrollRunId, SaltDatabase,
+    create_employer, create_employment, create_ordinary_payroll_run, remove_employment_from_run,
+    set_run_pay_lines, void_employment,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::oneshot;
@@ -574,7 +574,7 @@ async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     let earnings = vec![allowance(50_000), allowance(10_000)];
 
-    set_run_pay_lines(&db, &run_id, &employment_id, earnings.clone())
+    set_run_pay_lines(&db, &run_id, &employment_id, earnings.clone(), Vec::new())
         .await
         .unwrap();
 
@@ -591,12 +591,12 @@ async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     assert_eq!(rows[0].0, 0);
     assert_eq!(rows[1].0, 1);
     assert_eq!(
-        serde_json::from_value::<EarningInstruction>(rows[0].1.clone()).unwrap(),
-        earnings[0]
+        serde_json::from_value::<PayLineInstruction>(rows[0].1.clone()).unwrap(),
+        PayLineInstruction::Earning(earnings[0].clone())
     );
     assert_eq!(
-        serde_json::from_value::<EarningInstruction>(rows[1].1.clone()).unwrap(),
-        earnings[1]
+        serde_json::from_value::<PayLineInstruction>(rows[1].1.clone()).unwrap(),
+        PayLineInstruction::Earning(earnings[1].clone())
     );
 }
 
@@ -607,9 +607,15 @@ async fn earning_lines_written_through_set_run_pay_lines_are_sourced_one_off(poo
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(50_000)])
-        .await
-        .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![allowance(50_000)],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     let source: String = sqlx::query_scalar(
         "SELECT source FROM payroll_run_pay_line
@@ -644,9 +650,15 @@ async fn writing_pay_lines_deletes_the_members_stale_working_calculation(pool: P
     .await
     .unwrap();
 
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)])
-        .await
-        .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![allowance(10_000)],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM working_payroll_calculation
@@ -668,7 +680,7 @@ async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new())
+    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new(), Vec::new())
         .await
         .unwrap();
 
@@ -688,11 +700,17 @@ async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool
 async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(50_000)])
-        .await
-        .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![allowance(50_000)],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
-    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new())
+    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new(), Vec::new())
         .await
         .unwrap();
 
@@ -724,9 +742,15 @@ async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
         .await
         .unwrap();
 
-    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)])
-        .await
-        .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![allowance(10_000)],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     let status: String = sqlx::query_scalar("SELECT status FROM payroll_run WHERE id = $1::uuid")
         .bind(run_id.as_str())
@@ -746,7 +770,14 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
+    let result = set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![allowance(10_000)],
+        Vec::new(),
+    )
+    .await;
 
     assert_eq!(
         result,
@@ -763,7 +794,8 @@ async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_refused(
     let (employer_id, run_id, _) = a_run_with_one_member(&db).await;
     let outsider = an_employment(&db, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
-    let result = set_run_pay_lines(&db, &run_id, &outsider, vec![allowance(10_000)]).await;
+    let result =
+        set_run_pay_lines(&db, &run_id, &outsider, vec![allowance(10_000)], Vec::new()).await;
 
     assert_eq!(
         result,
@@ -785,7 +817,14 @@ async fn setting_earnings_for_a_removed_member_is_refused(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
+    let result = set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![allowance(10_000)],
+        Vec::new(),
+    )
+    .await;
 
     assert_eq!(
         result,

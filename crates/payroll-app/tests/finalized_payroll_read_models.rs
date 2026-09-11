@@ -365,6 +365,7 @@ async fn the_traces_carry_each_overtime_lines_workings_and_its_salt_policy_stamp
                 label: Some(payroll::EarningLabel::new("public holiday").unwrap()),
             },
         ],
+        Vec::new(),
     )
     .await
     .unwrap();

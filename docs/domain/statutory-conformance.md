@@ -146,6 +146,8 @@ Their **combined** deduction is capped at **N$150,000** per tax year (from the 2
 
 Salt v1 supports none of them. That is acceptable only because Salt **refuses** such an employee rather than calculating them as though the deduction did not exist. See §5.5.
 
+A fifth, unrelated fact is refused through the same machinery for a different reason: **employer-paid** medical aid is not one of these four deductions at all, but a fringe benefit whose taxable value Salt cannot compute (Q-OPEN-9). It is grouped with the four above because both kinds block `calculate` the same way, not because both are deductions — see §5.11 for the **employee's own** medical aid premium, which Salt does support.
+
 ### 3.6 Allowances are not generically tax-free
 
 Schedule 2 defines remuneration broadly and includes allowances. A reimbursement wholly for expenditure actually incurred in the course of employment is excluded from remuneration.
@@ -170,7 +172,7 @@ The consequence is §5.3: Salt v1 ships no user-facing "non-taxable" box at all.
 
 No Tier A source was found for any of the following. Each must be revisited when an answer arrives.
 
-Five of the six have a Salt policy attached in §5. **SC-OPEN-4 deliberately does not** — it has a refusal. Where Salt cannot even state what the rule would be, inventing one more unverified rule is worse than stopping.
+Six of the eight have a Salt policy attached in §5. **SC-OPEN-4 and Q-OPEN-22 deliberately do not** — each has a refusal. Where Salt cannot even state what the rule would be, inventing one more unverified rule is worse than stopping.
 
 | # | Question | Salt's response | Stamp |
 |---|---|---|---|
@@ -180,6 +182,8 @@ Five of the six have a Salt policy attached in §5. **SC-OPEN-4 deliberately doe
 | SC-OPEN-4 | How must a new employer treat prior-employer remuneration and PAYE, and is a directive or certificate required first? | **Refusal** (§5.6) | `NEEDS NAMRA CONFIRMATION` |
 | SC-OPEN-5 | One older source (US SSA country profile, 2019) gives the SSC minimum earnings base as N$300, not N$500. Salt implements N$500, consistent with current reporting, the shipped code and the published N$4.50 minimum contribution. | Implemented as N$500 | `flagged` |
 | SC-OPEN-6 | What divisor converts a monthly salary to an hourly rate for overtime? No published Namibian rule prescribing one was found. | Policy (§5.10) | `NEEDS CONFIRMATION` |
+| SC-OPEN-7 | Does Salt correctly grant no relief against taxable income for an employee's own medical aid premium? NamRA's four allowed deductions (§3.5) do not list it, but no primary source was read confirming that absence is deliberate. | Policy (§5.11) | `NEEDS NAMRA CONFIRMATION` |
+| Q-OPEN-22 | What does Namibian law require when a voluntary deduction (e.g. a medical aid premium) exceeds the net pay available to withhold it from — a priority order, a cap, a protected-earnings floor, carry-forward? | **Refusal** (§5.11) — Salt invents none of these and names the shortfall instead | `NEEDS NAMRA CONFIRMATION` |
 
 **SC-OPEN-1 is a real choice, not a gap.** Sage ships two methods for Namibia: **Normal Tax**, which annualises the current period, and **Average Tax**, which uses year-to-date income based on time worked. Salt implements a third shape (§5.1). The Income Tax Act anticipates deduction tables and methods prescribed by the Minister; it does not define Salt's formula. Nothing here entitles Salt to call its per-period arithmetic statutory.
 
@@ -250,7 +254,7 @@ Recorded in ADR-0007.
 
 ### 5.5 Unsupported deductions are refused, never approximated
 
-`PayrollInput` carries an explicit **knowledge state** about the four deduction kinds Salt does not support (§3.5):
+`PayrollInput` carries an explicit **knowledge state** about the facts that would change PAYE which Salt cannot calculate (§3.5) — the four unsupported deduction kinds, plus employer-paid medical aid (issue #78):
 
 ```text
 UnsupportedDeductionStatus
@@ -363,6 +367,19 @@ The seam is deliberately asymmetric: it takes `Money` and returns an exact unrou
 
 Two consequences: changing the rounding policy must not invalidate a single statutory table test, and the calculator applies rounding only after statutory arithmetic has produced an exact value. There is still only one implementation of progressive-band arithmetic — the statutory seam is that same walk entered without threshold scaling, not a second copy.
 
+### 5.11 Voluntary deductions — medical aid premium (issue #78)
+
+`Deduction` gains a second branch alongside `StatutoryDeduction`: `Voluntary(VoluntaryDeduction)`. v1 constructs exactly one kind, `MedicalAidPremium` — the employee's own contribution, withheld at the amount instructed and no other. A second voluntary kind is a code change and a deliberate decision, exactly like a third overtime multiplier; there is no generic "other deduction" with a free-text type.
+
+The premium is computed **after** PAYE and employee social security, from the earning lines exactly as if it did not exist — the earning-bases accumulator never sees it, so PAYE and both social security figures are bit-identical to the same input without the deduction. Deductions are ordered PAYE, employee social security, then voluntary — the order a payslip prints and net pay is derived in.
+
+A voluntary deduction that would take net pay below zero is refused — `PayrollError::DeductionsExceedGrossRemuneration` extended to carry the shortfall — rather than partially withheld. Salt invents no priority order, cap, or carry-forward to resolve this; the existing checked-subtraction chain is simply extended to include voluntary deductions in the sum it checks.
+
+Salt grants **no relief against taxable income** for the employee's own medical aid premium. NamRA's four allowed deductions (§3.5) do not list medical aid, which supports that reading, but no primary source was read confirming it. Stamped SC-OPEN-7, `NEEDS NAMRA CONFIRMATION` — every test whose expected figure depends on this reading is `salt_policy_*`, never `statutory_*` (ADR-0008).
+
+**Employer-paid** medical aid is a different fact — a fringe benefit, not a deduction — and is refused by name through the existing `UnsupportedDeductionStatus` machinery (§5.5), widened from "the four deductions NamRA's brochure allows against taxable income" to "facts that would change PAYE which Salt cannot calculate". How that benefit would be valued for tax remains unresolved and non-blocking, because it is refused rather than guessed at (Q-OPEN-9).
+
+What Namibian law requires when a voluntary deduction exceeds available net pay — a priority order, a cap, a protected-earnings floor, carry-forward — is unresolved. Recorded as `Q-OPEN-22`.
 
 ---
 
@@ -443,6 +460,7 @@ Any test of the form "this period's PAYE is X" belongs here, because the method 
 - `salt_policy_ssc_*` — part-month joiner and leaver clamping to the full monthly floor and ceiling (SC-OPEN-3).
 - `salt_policy_rounding_*` — half-up at each statutory output (SC-OPEN-2).
 - `salt_policy_overtime_*` — anything whose figure depends on the salary-to-hourly divisor (SC-OPEN-6, §5.10): the derived rate, the money on a line, that the rate comes from contractual and not prorated pay, and that an `OrdinaryHours` change dated mid-period is refused by the existing rules. **Never `statutory_*`** — a `statutory_*` name means a literal published by a regulator and is citable as evidence under ADR-0008, and no regulator published this divisor. Overtime *mechanics* that hold whatever the divisor is — that two lines round independently, that a multiplier outside the closed set is refused, that overtime never reaches the social security base — are `algorithm_*`.
+- `salt_policy_*` for a medical aid premium (SC-OPEN-7, §5.11) — that it reduces net pay by exactly its amount, that PAYE and both social security figures are unchanged, that it appears as its own classified line after the statutory ones, and that one exceeding available net pay is refused naming the shortfall rather than partially withheld (Q-OPEN-22). **Never `statutory_*`** — Salt's no-relief reading is unconfirmed.
 - **Ruleset selection by period end date** — that a period straddling a rate change uses the entry covering its **end date**, for its whole length. The rule is ADR-0005's, stated by the product owner; no Namibian source prescribes it. What is statutory is the ceiling value and its instrument's effective date. How Salt maps a pay period onto that date is Salt policy, so a straddle test is `salt_policy_*` and may never be cited as evidence. The N$11,000-to-N$12,500 straddle across 1 September 2026 is the live example.
 
 ### `algorithm_*` — synthetic mechanics

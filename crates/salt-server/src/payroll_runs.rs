@@ -13,9 +13,10 @@
 //! the member's whole list, and naming that idempotence in the method is a
 //! decision, not a preference (issue #53's own Deep Instructions).
 //!
-//! The request body contains taxable allowance and overtime instructions.
-//! `BasicPay` is derived by the calculator from `CompensationTerms`, so it
-//! cannot be expressed by this input boundary.
+//! The request body carries two arrays: `earnings` (taxable allowance and
+//! overtime instructions) and `deductions` (medical aid premium instructions,
+//! issue #78). `BasicPay` is derived by the calculator from
+//! `CompensationTerms`, so it cannot be expressed by this input boundary.
 //!
 //! Every handler here takes its `EmployerId` from
 //! [`AuthorizedEmployerContext`] and never from the path (ADR-0017). `GET`
@@ -44,11 +45,11 @@ use axum::http::StatusCode;
 use chrono::NaiveDate;
 use payroll::{
     EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money, OvertimeHours,
-    OvertimeMultiplier, OvertimeMultiplierError,
+    OvertimeMultiplier, OvertimeMultiplierError, VoluntaryDeductionInstruction,
 };
 use payroll_app::{
-    CalculationState, PayLineSource, PayrollAppError, PayrollFigures, PayrollRunBlocker,
-    PayrollRunDetail, RunPayLine, RunStatus,
+    CalculationState, PayLineInstruction, PayLineSource, PayrollAppError, PayrollFigures,
+    PayrollRunBlocker, PayrollRunDetail, RunStatus,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,21 @@ pub(crate) enum EarningLineDto {
     },
 }
 
+/// One voluntary deduction instruction on the wire, tagged by `kind`
+/// (issue #78):
+///
+/// - `{"kind": "medicalAidPremium", "amountCents": 75000}`
+///
+/// Exactly one kind exists, same as the enum it mirrors
+/// (`VoluntaryDeductionInstruction`): a second kind is a code change on both
+/// sides, never a free-text deduction type this boundary accepts.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum DeductionLineDto {
+    #[serde(rename_all = "camelCase")]
+    MedicalAidPremium { amount_cents: i64 },
+}
+
 /// One stored pay line on the way out: its instruction, flattened, plus the
 /// `source` Salt recorded beside it (issue #77) —
 /// `{"kind": "taxableAllowance", "amountCents": 2000, "label": "standby", "source": "one_off"}`.
@@ -119,6 +135,15 @@ pub(crate) enum EarningLineDto {
 pub(crate) struct PayLineDto {
     #[serde(flatten)]
     line: EarningLineDto,
+    source: PayLineSourceDto,
+}
+
+/// One stored deduction line on the way out, the same shape `PayLineDto`
+/// gives earnings.
+#[derive(Serialize)]
+pub(crate) struct DeductionPayLineDto {
+    #[serde(flatten)]
+    line: DeductionLineDto,
     source: PayLineSourceDto,
 }
 
@@ -227,8 +252,18 @@ fn parse_earning(line: EarningLineDto) -> Result<EarningInstruction, ApiError> {
     }
 }
 
-fn pay_line_to_dto(pay_line: RunPayLine) -> PayLineDto {
-    let line = match pay_line.earning {
+fn parse_deduction(line: DeductionLineDto) -> Result<VoluntaryDeductionInstruction, ApiError> {
+    match line {
+        DeductionLineDto::MedicalAidPremium { amount_cents } => {
+            let amount =
+                Money::from_cents(amount_cents).map_err(|_| ApiError::malformed_request())?;
+            Ok(VoluntaryDeductionInstruction::MedicalAidPremium(amount))
+        }
+    }
+}
+
+fn earning_line_to_dto(earning: EarningInstruction) -> EarningLineDto {
+    match earning {
         EarningInstruction::TaxableAllowance { amount, label } => {
             EarningLineDto::TaxableAllowance {
                 amount_cents: amount.cents(),
@@ -244,11 +279,41 @@ fn pay_line_to_dto(pay_line: RunPayLine) -> PayLineDto {
             multiplier: multiplier.as_decimal().to_string(),
             label: label.map(|label| label.to_string()),
         },
-    };
-    PayLineDto {
-        line,
-        source: pay_line_source_to_dto(pay_line.source),
     }
+}
+
+fn deduction_line_to_dto(deduction: VoluntaryDeductionInstruction) -> DeductionLineDto {
+    match deduction {
+        VoluntaryDeductionInstruction::MedicalAidPremium(amount) => {
+            DeductionLineDto::MedicalAidPremium {
+                amount_cents: amount.cents(),
+            }
+        }
+    }
+}
+
+/// Splits one member's stored pay lines (earnings and deductions
+/// interleaved, in storage order) into the two arrays the wire carries —
+/// `PayLineDto`s and `DeductionPayLineDto`s, each keeping its own `source`.
+fn pay_lines_to_dtos(
+    pay_lines: Vec<payroll_app::RunPayLine>,
+) -> (Vec<PayLineDto>, Vec<DeductionPayLineDto>) {
+    let mut earnings = Vec::new();
+    let mut deductions = Vec::new();
+    for pay_line in pay_lines {
+        let source = pay_line_source_to_dto(pay_line.source);
+        match pay_line.instruction {
+            PayLineInstruction::Earning(earning) => earnings.push(PayLineDto {
+                line: earning_line_to_dto(earning),
+                source,
+            }),
+            PayLineInstruction::Deduction(deduction) => deductions.push(DeductionPayLineDto {
+                line: deduction_line_to_dto(deduction),
+                source,
+            }),
+        }
+    }
+    (earnings, deductions)
 }
 
 /// `calculationState`'s wire spelling (§D-6): whether `figures` is current,
@@ -367,6 +432,7 @@ struct PayrollRunMemberDto {
     finalized_payroll_id: Option<String>,
     full_name: String,
     earnings: Vec<PayLineDto>,
+    deductions: Vec<DeductionPayLineDto>,
     blockers: Vec<BlockerDto>,
     figures: Option<FiguresDto>,
     calculation_state: &'static str,
@@ -464,11 +530,13 @@ fn payroll_run_detail_to_response(
                 let refusal = refusals
                     .remove(&member.employment_id)
                     .map(|refusal| refusal_to_dto(&refusal));
+                let (earnings, deductions) = pay_lines_to_dtos(member.pay_lines);
                 PayrollRunMemberDto {
                     employment_id: member.employment_id.to_string(),
                     finalized_payroll_id: member.finalized_payroll_id.map(|id| id.to_string()),
                     full_name: member.full_name,
-                    earnings: member.pay_lines.into_iter().map(pay_line_to_dto).collect(),
+                    earnings,
+                    deductions,
                     blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
                     figures: member.figures.map(figures_to_dto),
                     calculation_state: calculation_state_str(member.calculation_state),
@@ -630,6 +698,11 @@ pub(crate) async fn finalize_payroll_run(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetRunPayLinesRequest {
     earnings: Vec<EarningLineDto>,
+    /// Absent on an older client's body, read the same as an empty array:
+    /// no deduction is a complete statement, exactly like an absent
+    /// `earnings` line would be malformed but an empty one is not.
+    #[serde(default)]
+    deductions: Vec<DeductionLineDto>,
 }
 
 /// `PUT /api/employers/{e}/payroll-runs/{r}/members/{em}/pay-lines`: replaces
@@ -637,13 +710,14 @@ pub(crate) struct SetRunPayLinesRequest {
 /// Employer is 404, checked here before `payroll_app::set_run_pay_lines`
 /// runs, since that use case takes no `EmployerId` of its own.
 ///
-/// The request body still names its array `earnings`: every line this route
-/// accepts today is an Earning, no deduction kind existing until issue #78.
-/// The route itself is renamed off `.../earnings` because what it replaces —
-/// and what `payroll_app::set_run_pay_lines` stores — is provenance-carrying
-/// pay lines, not an earnings-only concept (issue #77). A line carries no
-/// `source` on the way in; one sent anyway is ignored, because provenance is
-/// Salt's record, not the caller's claim.
+/// The request body carries two arrays, `earnings` and `deductions`
+/// (issue #78) — still two arrays and not one tagged list, because a caller
+/// states a complete list of each kind and the two are validated
+/// independently. The route itself is renamed off `.../earnings` because
+/// what it replaces — and what `payroll_app::set_run_pay_lines` stores — is
+/// provenance-carrying pay lines, not an earnings-only concept (issue #77).
+/// A line carries no `source` on the way in; one sent anyway is ignored,
+/// because provenance is Salt's record, not the caller's claim.
 pub(crate) async fn set_run_pay_lines(
     State(state): State<AppState>,
     context: AuthorizedEmployerContext,
@@ -665,8 +739,20 @@ pub(crate) async fn set_run_pay_lines(
         .into_iter()
         .map(parse_earning)
         .collect::<Result<Vec<_>, _>>()?;
+    let deductions = request
+        .deductions
+        .into_iter()
+        .map(parse_deduction)
+        .collect::<Result<Vec<_>, _>>()?;
 
-    payroll_app::set_run_pay_lines(state.db(), &payroll_run_id, &employment_id, earnings).await?;
+    payroll_app::set_run_pay_lines(
+        state.db(),
+        &payroll_run_id,
+        &employment_id,
+        earnings,
+        deductions,
+    )
+    .await?;
 
     Ok(Json(RecordedResponse {}))
 }

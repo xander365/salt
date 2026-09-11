@@ -179,7 +179,11 @@ export type UnsupportedDeductionStatusValue = 'confirmed_none' | 'present';
  * (`crates/payroll/src/unsupported_deduction.rs`), by their stable wire code
  * (`crates/salt-server/src/payroll_error.rs`). */
 export type UnsupportedDeductionKindCode =
-  'approved_pension_fund' | 'provident_fund' | 'retirement_annuity_fund' | 'education_policy';
+  | 'approved_pension_fund'
+  | 'provident_fund'
+  | 'retirement_annuity_fund'
+  | 'education_policy'
+  | 'employer_paid_medical_aid';
 
 /** `POST .../unsupported-deductions`. Unlike compensation terms, `reason` is
  * never optional here — the server refuses a blank one unconditionally. */
@@ -272,6 +276,26 @@ export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
 export type PayLineDto = EarningLineDto & { source: PayLineSourceDto };
 
 /**
+ * A medical aid premium withheld from the employee's own pay (issue #78) —
+ * a `VoluntaryDeduction`, computed after PAYE and social security and
+ * carrying no relief against taxable income (`SC-OPEN-7`,
+ * `NEEDS NAMRA CONFIRMATION`). Exactly one kind exists today, the same as
+ * the server-side enum it mirrors: a second kind is a code change on both
+ * sides, never a free-text deduction type.
+ */
+export interface MedicalAidPremiumLineDto {
+  kind: 'medicalAidPremium';
+  amountCents: number;
+}
+
+/** One voluntary deduction instruction: the shape `PUT .../pay-lines`
+ * accepts in its `deductions` array. */
+export type DeductionLineDto = MedicalAidPremiumLineDto;
+
+/** One stored deduction line as the run detail returns it. */
+export type DeductionPayLineDto = DeductionLineDto & { source: PayLineSourceDto };
+
+/**
  * Whether a member's `figures` are current, and why not when absent (§D-6).
  * `pay_lines_saved` means a pay-line write retired figures that existed; the
  * worksheet says so rather than showing numbers older than the lines.
@@ -329,6 +353,7 @@ export interface PayrollRunMemberDto {
   finalizedPayrollId: string | null;
   fullName: string;
   earnings: PayLineDto[];
+  deductions: DeductionPayLineDto[];
   blockers: PayrollRunBlockerDto[];
   figures: FiguresDto | null;
   calculationState: CalculationStateDto;

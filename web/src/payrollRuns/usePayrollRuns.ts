@@ -7,6 +7,7 @@ import { apiFetch } from '../api/client';
 import type {
   CreatePayrollRunRequest,
   CreatePayrollRunResponse,
+  DeductionLineDto,
   EarningLineDto,
   FinalizePayrollRunResponse,
   PayrollRunDetailResponse,
@@ -77,11 +78,12 @@ export function useCreatePayrollRun() {
 
 /**
  * `PUT .../payroll-runs/{r}/members/{em}/pay-lines` (issue #65, route
- * generalized by issue #77): replaces one member's whole list of pay lines,
- * matching `set_run_pay_lines`'s own contract — the caller sends every line
- * every time, never a delta. The request still names its array `earnings`:
- * every line this form can send today is an Earning. Lines carry no
- * `source`: the server records where each line came from.
+ * generalized by issue #77, `deductions` added by issue #78): replaces one
+ * member's whole list of pay lines, matching `set_run_pay_lines`'s own
+ * contract — the caller sends every line every time, never a delta. Two
+ * arrays travel, `earnings` and `deductions`, each a complete statement of
+ * its own kind. Lines carry no `source`: the server records where each line
+ * came from.
  *
  * Invalidates the run detail on success rather than patching it locally.
  * That refetch is a plain `GET`, which always answers `refusal: null` for
@@ -101,13 +103,15 @@ export function useSetRunPayLines(payrollRunId: string) {
     mutationFn: ({
       employmentId,
       earnings,
+      deductions,
     }: {
       employmentId: string;
       earnings: EarningLineDto[];
+      deductions: DeductionLineDto[];
     }) =>
       apiFetch<RecordedResponse>(
         `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/members/${encodeURIComponent(employmentId)}/pay-lines`,
-        { method: 'PUT', body: JSON.stringify({ earnings }) },
+        { method: 'PUT', body: JSON.stringify({ earnings, deductions }) },
       ),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) }),

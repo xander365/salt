@@ -29,7 +29,9 @@ pub use calculation::{
     PayeResult, PayeTrace, PayrollCalculation, PayrollError, PayrollInput, SscResult, SscTrace,
     Warning, calculate, validate_effective_from_is_a_period_start,
 };
-pub use deduction::{Deduction, StatutoryDeduction};
+pub use deduction::{
+    Deduction, StatutoryDeduction, VoluntaryDeduction, VoluntaryDeductionInstruction,
+};
 pub use earning::{
     DerivedHourlyRate, Earning, EarningInstruction, EarningLabel, EarningLabelError,
     MAX_EARNING_LABEL_LENGTH, MAX_OVERTIME_HOURS, OvertimeHours, OvertimeHoursError,

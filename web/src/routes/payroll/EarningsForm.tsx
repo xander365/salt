@@ -1,14 +1,19 @@
-// One member's earnings editor on a payroll run's own screen (issue #65,
-// §0.22/§0.31; overtime added by issue #76). `PUT .../members/{em}/pay-lines`
-// (issue #77) replaces the member's whole list, so this form always sends every
+// One member's earnings and deductions editor on a payroll run's own screen
+// (issue #65, §0.22/§0.31; overtime added by issue #76; medical aid premium
+// deductions added by issue #78). `PUT .../members/{em}/pay-lines` (issue
+// #77) replaces the member's whole list, so this form always sends every
 // line it holds, not just the one an Operator just typed — editing twice this
 // way can never leave a stale line behind (issue #65's own first acceptance
 // criterion).
 //
 // The whole list this form sends is its labelled `taxableAllowance` lines
-// followed by its `overtime` lines, and that is the whole of what a member's
-// earning instructions can be. Basic pay is derived from CompensationTerms
-// and cannot be entered here.
+// followed by its `overtime` lines for `earnings`, and its `medicalAidPremium`
+// lines for `deductions` — the whole of what a member's earning and voluntary
+// deduction instructions can be. Basic pay is derived from CompensationTerms
+// and cannot be entered here. A medical aid premium is withheld exactly as
+// instructed: this form does no PAYE or social-security arithmetic, and
+// Salt computes those two figures as if the deduction did not exist
+// (SC-OPEN-7).
 //
 // An overtime line carries **hours and a multiplier, never money** (D14,
 // ADR-0022): Salt derives the rate from the Employment's own pay and ordinary
@@ -33,7 +38,13 @@ import { type SubmitEvent, useId, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
-import type { EarningLineDto, OvertimeLineDto, TaxableAllowanceLineDto } from '../../api/types';
+import type {
+  DeductionLineDto,
+  EarningLineDto,
+  MedicalAidPremiumLineDto,
+  OvertimeLineDto,
+  TaxableAllowanceLineDto,
+} from '../../api/types';
 import { formatCents, parseCentsInput } from '../../money';
 import { useSetRunPayLines } from '../../payrollRuns/usePayrollRuns';
 import { Button } from '../../components/ui/button';
@@ -67,6 +78,13 @@ function earningsFailureMessage(caught: unknown): string {
 
     case 'invalid_overtime_hours':
       return 'Those overtime hours were refused. Enter hours above zero, to at most two decimal places.';
+
+    case 'deductions_exceed_gross_remuneration': {
+      const shortfall = (error.details as { shortfallCents?: unknown } | null)?.shortfallCents;
+      return typeof shortfall === 'number'
+        ? `This would take net pay below zero, by ${safeAmountText(shortfall)}. Lower the deduction.`
+        : 'This would take net pay below zero. Lower the deduction.';
+    }
 
     default:
       return 'Something went wrong. Please try again.';
@@ -112,7 +130,7 @@ function parseHoursInput(raw: string): string | null {
 }
 
 interface LineError {
-  kind: 'allowance' | 'overtime';
+  kind: 'allowance' | 'overtime' | 'medicalAidPremium';
   index: number;
   field: string;
   message: string;
@@ -129,17 +147,23 @@ interface OvertimeDraft {
   label: string;
 }
 
+interface MedicalAidPremiumDraft {
+  amount: string;
+}
+
 const MAX_LABEL_LENGTH = 100;
 
 export function EarningsForm({
   payrollRunId,
   employmentId,
   earnings,
+  deductions,
   onChanged,
 }: {
   payrollRunId: string;
   employmentId: string;
   earnings: EarningLineDto[];
+  deductions: DeductionLineDto[];
   onChanged?: () => void;
 }) {
   const setEarnings = useSetRunPayLines(payrollRunId);
@@ -163,6 +187,11 @@ export function EarningsForm({
         multiplier: line.multiplier,
         label: line.label ?? '',
       })),
+  );
+  const [medicalAidPremiums, setMedicalAidPremiums] = useState<MedicalAidPremiumDraft[]>(() =>
+    deductions
+      .filter((line): line is MedicalAidPremiumLineDto => line.kind === 'medicalAidPremium')
+      .map((line) => ({ amount: safeAmountText(line.amountCents) })),
   );
   const [lineError, setLineError] = useState<LineError | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -213,8 +242,26 @@ export function EarningsForm({
     edited();
   }
 
-  /** Every line this form holds, allowances first then overtime, validated.
-   * Returns `null` once it has set the error naming the offending field. */
+  function addMedicalAidPremium() {
+    setMedicalAidPremiums((prev) => [...prev, { amount: '' }]);
+    edited();
+  }
+
+  function removeMedicalAidPremium(index: number) {
+    setMedicalAidPremiums((prev) => prev.filter((_, candidate) => candidate !== index));
+    edited();
+  }
+
+  function editMedicalAidPremium(index: number, value: string) {
+    setMedicalAidPremiums((prev) =>
+      prev.map((premium, candidate) => (candidate === index ? { amount: value } : premium)),
+    );
+    edited();
+  }
+
+  /** Every earning line this form holds, allowances first then overtime,
+   * validated. Returns `null` once it has set the error naming the
+   * offending field. */
   function buildRequest(): EarningLineDto[] | null {
     const request: EarningLineDto[] = [];
 
@@ -294,6 +341,29 @@ export function EarningsForm({
     return request;
   }
 
+  /** Every deduction line this form holds, validated the same way an
+   * allowance's amount is. Returns `null` once it has set the error naming
+   * the offending field. */
+  function buildDeductionsRequest(): DeductionLineDto[] | null {
+    const request: DeductionLineDto[] = [];
+
+    for (const [index, premium] of medicalAidPremiums.entries()) {
+      const cents = parseCentsInput(premium.amount);
+      if (cents === null) {
+        setLineError({
+          kind: 'medicalAidPremium',
+          index,
+          field: 'amount',
+          message: 'Enter a non-negative amount with no more than two decimal places, e.g. 500.00.',
+        });
+        return null;
+      }
+      request.push({ kind: 'medicalAidPremium', amountCents: cents });
+    }
+
+    return request;
+  }
+
   async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (setEarnings.isPending) {
@@ -307,6 +377,10 @@ export function EarningsForm({
     if (request === null) {
       return;
     }
+    const deductionsRequest = buildDeductionsRequest();
+    if (deductionsRequest === null) {
+      return;
+    }
     setLineError(null);
 
     // The whole list, every time (issue #65's own first acceptance
@@ -314,10 +388,16 @@ export function EarningsForm({
     // removed is gone precisely because this body does not carry it.
     const changed =
       request.length !== earnings.length ||
-      request.some((line, index) => !sameLine(line, earnings[index]));
+      request.some((line, index) => !sameLine(line, earnings[index])) ||
+      deductionsRequest.length !== deductions.length ||
+      deductionsRequest.some((line, index) => !sameDeductionLine(line, deductions[index]));
 
     try {
-      await setEarnings.mutateAsync({ employmentId, earnings: request });
+      await setEarnings.mutateAsync({
+        employmentId,
+        earnings: request,
+        deductions: deductionsRequest,
+      });
       setSaved(true);
       if (changed) {
         onChanged?.();
@@ -510,6 +590,68 @@ export function EarningsForm({
         </p>
       </section>
 
+      <section aria-label="Medical aid premium" className="flex flex-col gap-3">
+        {medicalAidPremiums.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No medical aid premium on this line.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {medicalAidPremiums.map((premium, index) => {
+              const amountId = `${employmentId}-medical-aid-amount-${index}`;
+              const at =
+                lineError?.kind === 'medicalAidPremium' &&
+                lineError.index === index &&
+                lineError.field === 'amount';
+              const amountErrorId = `${errorId}-medical-aid-${index}-amount`;
+              return (
+                <li key={index} className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor={amountId}>Amount</Label>
+                      <Input
+                        id={amountId}
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        className="w-32"
+                        value={premium.amount}
+                        aria-invalid={at || undefined}
+                        aria-describedby={at ? amountErrorId : undefined}
+                        onChange={(event) => editMedicalAidPremium(index, event.target.value)}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removeMedicalAidPremium(index)}
+                    >
+                      <X className="size-4" aria-hidden="true" />
+                      Remove
+                    </Button>
+                  </div>
+                  {at && <ValidationError id={amountErrorId}>{lineError?.message}</ValidationError>}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={addMedicalAidPremium}
+          className="self-start"
+        >
+          <Plus className="size-4" aria-hidden="true" />
+          Add a medical aid premium
+        </Button>
+        <p className="text-sm text-muted-foreground">
+          Withheld from this employee&rsquo;s own pay, after PAYE and social security, at exactly
+          the amount entered. Salt grants no tax relief for it (needs NamRA confirmation).
+        </p>
+      </section>
+
       {error !== null && <ValidationError>{error}</ValidationError>}
 
       <Button type="submit" size="sm" disabled={setEarnings.isPending} className="self-start">
@@ -541,4 +683,13 @@ function sameLine(line: EarningLineDto, stored: EarningLineDto | undefined): boo
     );
   }
   return false;
+}
+
+/** `sameLine`'s counterpart for deduction lines. Exactly one kind exists
+ * today, so this compares on amount alone; a second kind would need the
+ * same per-kind match `sameLine` uses. */
+function sameDeductionLine(line: DeductionLineDto, stored: DeductionLineDto | undefined): boolean {
+  return (
+    stored !== undefined && line.kind === stored.kind && line.amountCents === stored.amountCents
+  );
 }

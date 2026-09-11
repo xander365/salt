@@ -1,6 +1,15 @@
 //! `UnsupportedDeductionStatus`: what Salt knows about whether an Employee
-//! has any of the four deduction kinds Salt v1 does not support —
+//! has any fact that would change PAYE which Salt cannot calculate —
 //! `docs/domain/statutory-conformance.md` §3.5, §5.5.
+//!
+//! Widened by issue #78 from its original meaning — "one of the four current
+//! deductions NamRA's brochure allows against taxable income" — because
+//! employer-paid medical aid is unsupported for a different reason: it is
+//! not one of those four deductions at all, but a fringe benefit whose
+//! taxable value Salt cannot compute (`Q-OPEN-9`). What every kind here
+//! genuinely has in common is only this: each is a fact Salt has no rule to
+//! turn into a PAYE figure, so `calculate` cannot proceed while any is
+//! present.
 //!
 //! Named apart from `StatutoryDeduction` (`crate::deduction`), which means
 //! a PAYE or social security amount actually withheld — a different
@@ -8,15 +17,25 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One of the four current deductions NamRA's brochure allows against
-/// taxable income (`docs/domain/statutory-conformance.md` §3.5), none of
-/// which Salt v1 calculates.
+/// One fact that would change PAYE which Salt cannot calculate
+/// (`docs/domain/statutory-conformance.md` §3.5). The first four are
+/// deductions NamRA's brochure allows against taxable income; the fifth,
+/// `EmployerPaidMedicalAid`, is not one of those four at all but a fringe
+/// benefit whose taxable value is unresolved (`Q-OPEN-9`) — grouped here
+/// because both kinds block `calculate` the same way, not because both are
+/// deductions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnsupportedDeductionKind {
     ApprovedPensionFund,
     ProvidentFund,
     RetirementAnnuityFund,
     EducationPolicy,
+    /// A benefit the Employer pays toward the Employee's medical aid, as
+    /// distinct from the Employee's own premium — a `VoluntaryDeduction`,
+    /// which Salt does support (issue #78). How the benefit is valued for
+    /// tax is unresolved (`Q-OPEN-9`), so it is refused by name rather than
+    /// guessed at.
+    EmployerPaidMedicalAid,
 }
 
 impl std::fmt::Display for UnsupportedDeductionKind {
@@ -28,6 +47,7 @@ impl std::fmt::Display for UnsupportedDeductionKind {
                 "retirement annuity fund contribution"
             }
             UnsupportedDeductionKind::EducationPolicy => "education policy premium",
+            UnsupportedDeductionKind::EmployerPaidMedicalAid => "employer-paid medical aid benefit",
         };
         f.write_str(name)
     }
@@ -118,8 +138,8 @@ impl From<UnsupportedDeductionKinds> for Vec<UnsupportedDeductionKind> {
     }
 }
 
-/// What Salt knows about whether an Employee has any of the four
-/// deduction kinds it does not support. The three states are distinct on
+/// What Salt knows about whether an Employee has any fact that would change
+/// PAYE which Salt cannot calculate. The three states are distinct on
 /// purpose: nothing here can be mistaken for "nobody asked"
 /// (`docs/domain/statutory-conformance.md` §5.5).
 ///
@@ -129,11 +149,11 @@ impl From<UnsupportedDeductionKinds> for Vec<UnsupportedDeductionKind> {
 /// to remove.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnsupportedDeductionStatus {
-    /// Established: the Employee has none of the four kinds. `calculate`
-    /// proceeds normally.
+    /// Established: the Employee has none of the unsupported kinds.
+    /// `calculate` proceeds normally.
     ConfirmedNone,
-    /// The Employee has one or more of the four kinds. `calculate` refuses,
-    /// naming every kind present.
+    /// The Employee has one or more of the unsupported kinds. `calculate`
+    /// refuses, naming every kind present.
     Present(UnsupportedDeductionKinds),
     /// Nobody has established the fact. `calculate` refuses rather than
     /// treat an unasked question as a confirmed "no".
@@ -157,6 +177,23 @@ mod tests {
         let kinds =
             UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::ProvidentFund]).unwrap();
         assert_eq!(kinds.as_slice(), &[UnsupportedDeductionKind::ProvidentFund]);
+    }
+
+    /// Issue #78: employer-paid medical aid is refused by name before an
+    /// Operator invests in setup, exactly like the original four kinds.
+    #[test]
+    fn employer_paid_medical_aid_is_a_named_unsupported_kind() {
+        let kinds =
+            UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::EmployerPaidMedicalAid])
+                .unwrap();
+        assert_eq!(
+            kinds.as_slice(),
+            &[UnsupportedDeductionKind::EmployerPaidMedicalAid]
+        );
+        assert_eq!(
+            UnsupportedDeductionKind::EmployerPaidMedicalAid.to_string(),
+            "employer-paid medical aid benefit"
+        );
     }
 
     #[test]

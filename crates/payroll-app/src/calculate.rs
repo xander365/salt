@@ -18,13 +18,14 @@ use crate::employer::pay_schedule_for_employer;
 use crate::employment::get_employment_snapshot_conn;
 use crate::error::PayrollAppError;
 use crate::payroll_run::{
-    PayrollRunId, RunStatus, active_member_ids, finalized_payrolls_for_run, lock_run,
+    PayLineInstruction, PayrollRunId, RunStatus, active_member_ids, finalized_payrolls_for_run,
+    lock_run,
 };
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_conn;
 use crate::year_to_date::build_year_to_date_context_conn;
 use payroll::{
-    EarningInstruction, EmploymentId, PayPeriod, PaySchedule, PayrollCalculation, PayrollInput,
-    PayrollRules, calculate, ruleset_for,
+    EmploymentId, PayPeriod, PaySchedule, PayrollCalculation, PayrollInput, PayrollRules,
+    calculate, ruleset_for,
 };
 
 /// Why one member's calculation was refused, named alongside the
@@ -105,14 +106,14 @@ pub async fn calculate_payroll_run(
 
     let member_ids = active_member_ids(&mut tx, payroll_run_id).await?;
 
-    let mut earnings_by_member = run_pay_lines_by_member(&mut tx, payroll_run_id).await?;
+    let mut pay_lines_by_member = run_pay_lines_by_member(&mut tx, payroll_run_id).await?;
 
     let mut refusals = Vec::new();
     for member_id in member_ids {
         let employment_id = EmploymentId::new(member_id.clone());
-        let earnings = earnings_by_member.remove(&member_id).unwrap_or_default();
+        let pay_lines = pay_lines_by_member.remove(&member_id).unwrap_or_default();
 
-        match assemble_and_calculate(&mut tx, &employment_id, period, schedule, earnings, &rules)
+        match assemble_and_calculate(&mut tx, &employment_id, period, schedule, pay_lines, &rules)
             .await
         {
             Ok((input, calculation)) => {
@@ -179,11 +180,12 @@ async fn clear_pay_line_figures_invalidation(
 ///
 /// Reads every `source` alike: whether a line was typed directly onto the
 /// run or pre-populated from a reversed Correction target, it is one of this
-/// member's current Earning lines and calculates the same way (§4.5d).
+/// member's current pay lines and calculates the same way (§4.5d, extended
+/// to voluntary deductions by issue #78).
 pub(crate) async fn run_pay_lines_by_member(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
-) -> Result<HashMap<String, Vec<EarningInstruction>>, PayrollAppError> {
+) -> Result<HashMap<String, Vec<PayLineInstruction>>, PayrollAppError> {
     let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
         "SELECT employment_id, pay_line_json FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid ORDER BY employment_id, line",
@@ -192,11 +194,14 @@ pub(crate) async fn run_pay_lines_by_member(
     .fetch_all(&mut **tx)
     .await?;
 
-    let mut by_member: HashMap<String, Vec<EarningInstruction>> = HashMap::new();
+    let mut by_member: HashMap<String, Vec<PayLineInstruction>> = HashMap::new();
     for (employment_id, pay_line_json) in rows {
-        let earning: EarningInstruction = serde_json::from_value(pay_line_json)
-            .expect("payroll_run_pay_line.pay_line_json is always a serialized EarningInstruction");
-        by_member.entry(employment_id).or_default().push(earning);
+        let instruction: PayLineInstruction = serde_json::from_value(pay_line_json)
+            .expect("payroll_run_pay_line.pay_line_json is always a serialized PayLineInstruction");
+        by_member
+            .entry(employment_id)
+            .or_default()
+            .push(instruction);
     }
     Ok(by_member)
 }
@@ -227,7 +232,7 @@ pub(crate) async fn assemble_and_calculate(
     employment_id: &EmploymentId,
     period: PayPeriod,
     schedule: PaySchedule,
-    earnings: Vec<EarningInstruction>,
+    pay_lines: Vec<PayLineInstruction>,
     rules: &PayrollRules,
 ) -> Result<(PayrollInput, PayrollCalculation), PayrollAppError> {
     let employment = get_employment_snapshot_conn(tx, employment_id, period.end()).await?;
@@ -235,10 +240,20 @@ pub(crate) async fn assemble_and_calculate(
         get_unsupported_deduction_status_conn(tx, employment_id, period.end()).await?;
     let year_to_date = build_year_to_date_context_conn(tx, employment_id, period.end()).await?;
 
+    let earnings = pay_lines
+        .iter()
+        .filter_map(|line| line.as_earning().cloned())
+        .collect();
+    let deductions = pay_lines
+        .iter()
+        .filter_map(|line| line.as_deduction().copied())
+        .collect();
+
     let input = PayrollInput::new(
         employment,
         period,
         earnings,
+        deductions,
         year_to_date,
         schedule,
         unsupported_deductions,

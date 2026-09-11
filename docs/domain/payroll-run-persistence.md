@@ -427,20 +427,24 @@ PayrollRunPayLine                              (payroll_run_pay_line, issue #77)
 - removed, removed_reason  only on a standing line; a removal states why
 ```
 
-Today every line is an `EarningInstruction` — a labelled `TaxableAllowance` or
-`Overtime` hours at a multiplier. The table holds deductions beside earnings
-once a deduction kind exists (issue #78); nothing in its shape is
-earning-specific. `standing` and its columns are written by issue #79; the
+`pay_line_json` holds a `PayLineInstruction` (issue #78): a labelled
+`Earning` (`TaxableAllowance` or `Overtime` hours at a multiplier) or a
+`Deduction` (today, only `MedicalAidPremium`), tagged so the two share one
+ordered list and one `source`. A row written before issue #78 holds a bare
+`EarningInstruction` with no wrapper key; the deserializer reads both shapes,
+so no data migration was needed, but every newly written row uses the
+tagged shape. `standing` and its columns are written by issue #79; the
 schema already enforces their rules (migration 0038), including a partial
 unique index on `(payroll_run_id, employment_id, standing_pay_item_id)` that
 makes proposal and refresh idempotent.
 
 **Provenance is Salt's record, not the caller's claim.** `PUT
-.../members/{em}/pay-lines` (which replaced `PUT .../earnings`) carries
-instructions only. A line is `from_reversed_snapshot` exactly while it is one
-of the lines a Correction's pre-population copied, matched one-for-one;
-every other line written through the route is `one_off`. A resave of
-untouched lines therefore cannot wipe where they came from.
+.../members/{em}/pay-lines` (which replaced `PUT .../earnings`) carries two
+arrays, `earnings` and `deductions` (issue #78), and instructions only. A
+line — earning or deduction alike — is `from_reversed_snapshot` exactly
+while it is one of the lines a Correction's pre-population copied, matched
+one-for-one; every other line written through the route is `one_off`. A
+resave of untouched lines therefore cannot wipe where they came from.
 
 **A figure is never older than the inputs beside it.** A write that changes a
 member's lines deletes that member's `WorkingPayrollCalculation` in the same
@@ -455,22 +459,27 @@ the `CompensationTerms`, and the input type cannot express a second one. New
 instructions require a non-blank human label; the optional label in the
 deserialization shape exists only to preserve unlabelled version-1 history.
 
-**Absence means no additional earnings, and that is a complete statement.** This
+**Absence means no additional pay, and that is a complete statement.** This
 is a deliberate asymmetry with §4.5b and §4.5c, and the reason is the difference
 between the facts. Those two are three-valued because a **statutory** question
-may go unasked, and Salt must never answer it by default. Earnings are the
-Employer's own act of paying; there is no unasked question and nothing to
-confirm-none. A per-employee, per-month "no allowances this period" checkbox
-would fire for every employee in every run and enforce no invariant — the
-ceremony ADR-0010 rejected.
+may go unasked, and Salt must never answer it by default. Earnings and
+deductions are the Employer's own act of paying; there is no unasked
+question and nothing to confirm-none. A per-employee, per-month "no
+allowances this period" checkbox would fire for every employee in every run
+and enforce no invariant — the ceremony ADR-0010 rejected.
 
 A Correction run's lines are pre-populated from the reversed
 `FinalizedPayroll`'s frozen `payroll_input_json`, marked
-`from_reversed_snapshot`, and then edited (§6.3). Where that snapshot's
+`from_reversed_snapshot`, and then edited (§6.3) — its `earnings` array
+first, then its `deductions` array (issue #78). Where that snapshot's
 `snapshot_schema_version` is not one the running Salt deserializes, the run
-starts with no lines and says so. ADR-0004
-promises history is explainable, never that every old snapshot deserializes
-forever, so the convenience has to degrade honestly rather than pretend.
+starts with no lines and says so. A snapshot from before `PayrollInput`
+carried a `deductions` field (`snapshot_schema_version` below 4) genuinely
+has none, read as an empty list rather than unreadable; a snapshot at or
+after that version whose `deductions` field is absent or malformed is
+unreadable like any other corrupt shape, never guessed at. ADR-0004 promises
+history is explainable, never that every old snapshot deserializes forever,
+so the convenience has to degrade honestly rather than pretend.
 
 ### 4.6 PayrollRun
 

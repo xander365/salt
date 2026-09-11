@@ -10,7 +10,9 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::deduction::{Deduction, StatutoryDeduction};
+use crate::deduction::{
+    Deduction, StatutoryDeduction, VoluntaryDeduction, VoluntaryDeductionInstruction,
+};
 use crate::earning::{
     DerivedHourlyRate, Earning, EarningInstruction, OvertimeTrace, RemunerationBases,
 };
@@ -41,6 +43,11 @@ pub struct PayrollInput {
     /// adds the `BasicPay` line itself from the Employment's
     /// `CompensationTerms`, and the input type cannot express a second one.
     earnings: Vec<EarningInstruction>,
+    /// Voluntary deduction instructions (issue #78) — today, only medical
+    /// aid premiums. Computed after PAYE and employee social security, from
+    /// the earning lines exactly as if no voluntary deduction existed: the
+    /// earning-bases accumulator never sees this field.
+    deductions: Vec<VoluntaryDeductionInstruction>,
     year_to_date: YearToDateContext,
     /// The Employer's `PaySchedule`, used only to validate
     /// `CompensationTerms.EffectiveFrom` against INV-014. It never selects
@@ -59,6 +66,7 @@ impl PayrollInput {
         employment: EmploymentSnapshot,
         period: PayPeriod,
         earnings: Vec<EarningInstruction>,
+        deductions: Vec<VoluntaryDeductionInstruction>,
         year_to_date: YearToDateContext,
         schedule: PaySchedule,
         unsupported_deductions: UnsupportedDeductionStatus,
@@ -67,6 +75,7 @@ impl PayrollInput {
             employment,
             period,
             earnings,
+            deductions,
             year_to_date,
             schedule,
             unsupported_deductions,
@@ -121,8 +130,13 @@ pub enum PayrollError {
     /// domain yet, so this is refused rather than silently clamped to zero
     /// or turned into a negative deduction (INV-012).
     PriorPayeExceedsRecalculatedLiability,
-    /// PAYE plus employee social security exceeded gross remuneration.
-    DeductionsExceedGrossRemuneration,
+    /// PAYE, employee social security and any voluntary deduction together
+    /// exceeded gross remuneration. Carries the shortfall — how much more
+    /// than gross remuneration the deductions came to — so the refusal is
+    /// actionable without the caller re-deriving it. Salt invents no
+    /// priority order, cap, or carry-forward to resolve this: it refuses and
+    /// names the gap (`Q-OPEN-22`).
+    DeductionsExceedGrossRemuneration { shortfall: Money },
     /// A monetary amount overflowed `i64` cents during calculation.
     AmountOverflow,
     /// `paye_table_for` found no `PayeTable` whose payroll applicability
@@ -242,8 +256,12 @@ impl std::fmt::Display for PayrollError {
             PayrollError::PriorPayeExceedsRecalculatedLiability => {
                 write!(f, "prior PAYE exceeds recalculated year-to-date liability")
             }
-            PayrollError::DeductionsExceedGrossRemuneration => {
-                write!(f, "deductions exceed gross remuneration")
+            PayrollError::DeductionsExceedGrossRemuneration { shortfall } => {
+                write!(
+                    f,
+                    "deductions exceed gross remuneration by {}",
+                    shortfall.as_decimal()
+                )
             }
             PayrollError::AmountOverflow => write!(f, "a monetary amount overflowed"),
             PayrollError::NoPayeTableCoversDate { date } => {
@@ -407,8 +425,10 @@ pub struct PayrollCalculation {
     /// The Employer's own cost. Never appears in `deductions` and never
     /// reduces `net_pay` (INV-007).
     pub employer_social_security: SscResult,
-    /// `PAYE` and employee social security only — matches
-    /// `gross_remuneration - deductions == net_pay`.
+    /// `PAYE`, employee social security, then every voluntary deduction in
+    /// the order instructed — matches
+    /// `gross_remuneration - deductions == net_pay`. Ordered as a payslip
+    /// prints and net pay is derived: statutory first, voluntary last.
     pub deductions: Vec<Deduction>,
     pub net_pay: Money,
     pub warnings: Vec<Warning>,
@@ -645,18 +665,38 @@ pub fn calculate(
     let employee_ssc_amount = contribution(social_security.employee_rate())?;
     let employer_ssc_amount = contribution(social_security.employer_rate())?;
 
-    let deductions = vec![
+    // Voluntary deductions (issue #78, SC-OPEN-7): computed after PAYE and
+    // employee social security, from the instructions alone — no formula, no
+    // earning base, no interaction with the arithmetic above. The amount
+    // withheld is exactly the amount instructed.
+    let mut deductions = vec![
         Deduction::Statutory(StatutoryDeduction::PAYE(paye_amount)),
         Deduction::Statutory(StatutoryDeduction::SocialSecurity(employee_ssc_amount)),
     ];
+    for instruction in &input.deductions {
+        let VoluntaryDeductionInstruction::MedicalAidPremium(amount) = instruction;
+        deductions.push(Deduction::Voluntary(
+            VoluntaryDeduction::MedicalAidPremium {
+                amount: *amount,
+                policy: SaltPolicyStamp::MEDICAL_AID_PREMIUM_UNRELIEVED,
+            },
+        ));
+    }
 
-    // Both `Money` amounts are already non-negative, so the only way this
-    // subtraction fails is by going below zero — i.e. the deductions
-    // exceeded gross remuneration.
+    // Ordered PAYE, employee social security, then voluntary — the order a
+    // payslip prints and net pay is derived in (§0's own words). Every
+    // `Money` amount is already non-negative, so the only way this sum or
+    // subtraction fails is the total going below zero, i.e. the deductions
+    // exceeded gross remuneration; the shortfall is recomputed on that path
+    // alone so the ordinary path never pays for it.
+    let total_deductions = Money::checked_sum(deductions.iter().copied().map(Deduction::amount))?;
     let net_pay = gross_remuneration
-        .checked_sub(paye_amount)
-        .and_then(|remainder| remainder.checked_sub(employee_ssc_amount))
-        .map_err(|_| PayrollError::DeductionsExceedGrossRemuneration)?;
+        .checked_sub(total_deductions)
+        .map_err(|_| PayrollError::DeductionsExceedGrossRemuneration {
+            shortfall: total_deductions
+                .checked_sub(gross_remuneration)
+                .expect("total_deductions exceeds gross_remuneration on this path by construction"),
+        })?;
 
     Ok(PayrollCalculation {
         earning_lines,
@@ -829,6 +869,7 @@ mod tests {
             snapshot(date(2025, 1, 1), None, terms),
             test_period(),
             instructions,
+            Vec::new(),
             ytd(dec!(0), dec!(0), 1),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -979,6 +1020,7 @@ mod tests {
         PayrollInput::new(
             employment_paying(basic_pay),
             period,
+            Vec::new(),
             Vec::new(),
             ytd,
             test_schedule(),
@@ -1511,6 +1553,7 @@ mod tests {
             employment_paying(dec!(25000.00)),
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             status,
@@ -1590,6 +1633,7 @@ mod tests {
             employment_paying(dec!(25000.00)),
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::Unknown,
@@ -1605,6 +1649,7 @@ mod tests {
         PayrollInput::new(
             employment_paying(dec!(25000.00)),
             test_period(),
+            Vec::new(),
             Vec::new(),
             YearToDateContext::new(
                 test_tax_year(),
@@ -1708,6 +1753,7 @@ mod tests {
             employment_paying(dec!(25000.00)),
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::new(
                 test_tax_year(),
                 Money::ZERO,
@@ -1745,6 +1791,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
+            Vec::new(),
             ytd,
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -1767,6 +1814,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -1787,6 +1835,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             test_period(),
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
@@ -1812,6 +1861,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
@@ -1845,6 +1895,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -1877,6 +1928,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
                 date(2028, 2, 29),
             )),
@@ -1905,6 +1957,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
                 date(2026, 4, 30),
@@ -1935,6 +1988,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
@@ -1969,6 +2023,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -1998,6 +2053,7 @@ mod tests {
             employment,
             period,
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2024,6 +2080,7 @@ mod tests {
             employment.clone(),
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2040,6 +2097,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             truncated,
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
@@ -2064,6 +2122,7 @@ mod tests {
             employment,
             period,
             vec![allowance(dec!(800.00))],
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2107,6 +2166,7 @@ mod tests {
                 employment,
                 *period,
                 Vec::new(),
+                Vec::new(),
                 YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
                     period.end(),
                 )),
@@ -2135,6 +2195,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2155,6 +2216,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             test_period(),
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             test_schedule(),
@@ -2181,6 +2243,7 @@ mod tests {
             employment,
             test_period(),
             Vec::new(),
+            Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2203,6 +2266,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
                 date(2026, 3, 28),
@@ -2230,6 +2294,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             period,
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(TaxYear::for_period_end(
                 date(2028, 3, 28),
@@ -2261,6 +2326,7 @@ mod tests {
         let input = PayrollInput::new(
             employment,
             test_period(),
+            Vec::new(),
             Vec::new(),
             YearToDateContext::first_period_with_no_prior_employment(test_tax_year()),
             schedule,
@@ -2310,6 +2376,7 @@ mod tests {
             employment_paying(dec!(15000.00)),
             test_period(),
             vec![allowance(dec!(2000.00))],
+            Vec::new(),
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2359,6 +2426,7 @@ mod tests {
             employment_paying(dec!(15000.00)),
             test_period(),
             vec![allowance(dec!(5000.00))],
+            Vec::new(),
             ytd_context,
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2427,6 +2495,7 @@ mod tests {
                 allowance(dec!(700.00)),
                 allowance(dec!(600.00)),
             ],
+            Vec::new(),
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2455,6 +2524,7 @@ mod tests {
             employment_paying(dec!(15000.00)),
             test_period(),
             vec![allowance(dec!(0.00))],
+            Vec::new(),
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2485,6 +2555,7 @@ mod tests {
                 amount: Money::from_cents(i64::MAX).unwrap(),
                 label: None,
             }],
+            Vec::new(),
             ytd(dec!(110000.00), dec!(0.00), 11),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2511,6 +2582,7 @@ mod tests {
                 amount: money(dec!(2000.00)),
                 label: None,
             }],
+            Vec::new(),
             ytd,
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2522,6 +2594,7 @@ mod tests {
                 amount: money(dec!(2000.00)),
                 label: Some(EarningLabel::new("standby allowance").unwrap()),
             }],
+            Vec::new(),
             ytd,
             schedule,
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2593,7 +2666,9 @@ mod tests {
 
         assert_eq!(
             calculate(&input, &rules),
-            Err(PayrollError::DeductionsExceedGrossRemuneration)
+            Err(PayrollError::DeductionsExceedGrossRemuneration {
+                shortfall: money(dec!(5000.00))
+            })
         );
     }
 
@@ -2740,6 +2815,7 @@ mod tests {
             snapshot(date(2026, 1, 16), None, terms),
             PayPeriod::new(date(2026, 1, 1), date(2026, 1, 31)).unwrap(),
             vec![overtime(dec!(12), dec!(1.5))],
+            Vec::new(),
             ytd(dec!(0), dec!(0), 1),
             calendar_month_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2768,6 +2844,7 @@ mod tests {
             snapshot(date(2025, 1, 1), None, terms),
             test_period(),
             vec![overtime(dec!(12), dec!(1.5))],
+            Vec::new(),
             ytd(dec!(0), dec!(0), 1),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2803,6 +2880,7 @@ mod tests {
             snapshot(date(2025, 1, 1), None, terms),
             test_period(),
             vec![overtime(dec!(12), dec!(1.5))],
+            Vec::new(),
             ytd(dec!(0), dec!(0), 1),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2828,6 +2906,7 @@ mod tests {
                 multiplier: OvertimeMultiplier::OneAndAHalf,
                 label: Some(EarningLabel::new("Sunday overtime").unwrap()),
             }],
+            Vec::new(),
             ytd(dec!(0), dec!(0), 1),
             test_schedule(),
             UnsupportedDeductionStatus::ConfirmedNone,
@@ -2850,6 +2929,167 @@ mod tests {
             only_overtime_line(&unlabelled).0
         );
         assert_eq!(labelled.net_pay, unlabelled.net_pay);
+    }
+
+    // ---- Voluntary deductions (issue #78, SC-OPEN-7) ----------------------
+    //
+    // Salt grants no relief against taxable income for the employee's own
+    // medical aid premium: PAYE and social security are computed from the
+    // earning lines exactly as if the deduction did not exist, and the
+    // premium is subtracted from net pay afterwards. That reading is Salt's
+    // own, `NEEDS NAMRA CONFIRMATION`, so every test whose expected figure
+    // depends on it is `salt_policy_*`, never `statutory_*` (ADR-0008).
+
+    fn medical_aid(amount: Decimal) -> VoluntaryDeductionInstruction {
+        VoluntaryDeductionInstruction::MedicalAidPremium(money(amount))
+    }
+
+    /// `input_for` with voluntary deduction instructions alongside no other
+    /// earnings beyond `BasicPay`.
+    fn input_with_deductions(
+        basic_pay: Decimal,
+        ytd: YearToDateContext,
+        deductions: Vec<VoluntaryDeductionInstruction>,
+    ) -> PayrollInput {
+        PayrollInput::new(
+            employment_paying(basic_pay),
+            test_period(),
+            Vec::new(),
+            deductions,
+            ytd,
+            test_schedule(),
+            UnsupportedDeductionStatus::ConfirmedNone,
+        )
+    }
+
+    #[test]
+    fn salt_policy_a_medical_aid_premium_is_withheld_as_a_voluntary_deduction_and_reduces_net_pay_by_exactly_that_amount()
+     {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let without = input_with_deductions(dec!(15000.00), ytd, Vec::new());
+        let with = input_with_deductions(dec!(15000.00), ytd, vec![medical_aid(dec!(750.00))]);
+
+        let without = calculate(&without, &test_rules()).unwrap();
+        let with = calculate(&with, &test_rules()).unwrap();
+
+        assert_eq!(
+            with.net_pay,
+            without.net_pay.checked_sub(money(dec!(750.00))).unwrap()
+        );
+    }
+
+    #[test]
+    fn salt_policy_a_medical_aid_premium_changes_neither_paye_nor_either_social_security_figure() {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let without = input_with_deductions(dec!(15000.00), ytd, Vec::new());
+        let with = input_with_deductions(dec!(15000.00), ytd, vec![medical_aid(dec!(750.00))]);
+
+        let without = calculate(&without, &test_rules()).unwrap();
+        let with = calculate(&with, &test_rules()).unwrap();
+
+        assert_eq!(with.paye, without.paye);
+        assert_eq!(
+            with.employee_social_security,
+            without.employee_social_security
+        );
+        assert_eq!(
+            with.employer_social_security,
+            without.employer_social_security
+        );
+        assert_eq!(with.gross_remuneration, without.gross_remuneration);
+        assert_eq!(with.taxable_remuneration, without.taxable_remuneration);
+    }
+
+    #[test]
+    fn salt_policy_a_medical_aid_premium_is_its_own_classified_line_after_the_statutory_ones() {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let input = input_with_deductions(dec!(15000.00), ytd, vec![medical_aid(dec!(750.00))]);
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        assert!(matches!(
+            calc.deductions[0],
+            Deduction::Statutory(StatutoryDeduction::PAYE(_))
+        ));
+        assert!(matches!(
+            calc.deductions[1],
+            Deduction::Statutory(StatutoryDeduction::SocialSecurity(_))
+        ));
+        assert_eq!(
+            calc.deductions[2],
+            Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium {
+                amount: money(dec!(750.00)),
+                policy: SaltPolicyStamp::MEDICAL_AID_PREMIUM_UNRELIEVED,
+            })
+        );
+        assert_eq!(calc.deductions.len(), 3);
+    }
+
+    #[test]
+    fn salt_policy_a_medical_aid_premium_is_stamped_sc_open_7_needs_namra_confirmation() {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let input = input_with_deductions(dec!(15000.00), ytd, vec![medical_aid(dec!(750.00))]);
+
+        let calc = calculate(&input, &test_rules()).unwrap();
+
+        let Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium { policy, .. }) =
+            calc.deductions[2]
+        else {
+            panic!("expected a voluntary medical aid deduction");
+        };
+        assert_eq!(policy.id.reference(), "SC-OPEN-7");
+        assert_eq!(policy, SaltPolicyStamp::MEDICAL_AID_PREMIUM_UNRELIEVED);
+    }
+
+    #[test]
+    fn salt_policy_two_medical_aid_lines_are_each_their_own_line_and_both_reduce_net_pay() {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let one_line = input_with_deductions(dec!(15000.00), ytd, vec![medical_aid(dec!(500.00))]);
+        let two_lines = input_with_deductions(
+            dec!(15000.00),
+            ytd,
+            vec![medical_aid(dec!(500.00)), medical_aid(dec!(200.00))],
+        );
+
+        let one_line = calculate(&one_line, &test_rules()).unwrap();
+        let two_lines = calculate(&two_lines, &test_rules()).unwrap();
+
+        assert_eq!(two_lines.deductions.len(), 4);
+        assert_eq!(
+            two_lines.net_pay,
+            one_line.net_pay.checked_sub(money(dec!(200.00))).unwrap()
+        );
+    }
+
+    #[test]
+    fn salt_policy_a_medical_aid_premium_that_would_take_net_pay_below_zero_is_refused_naming_the_shortfall()
+     {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        // Basic pay 1,000.00 with a low-rate table and SSC leaves a small
+        // net pay; a premium larger than what is left must refuse rather
+        // than partially withhold.
+        let input = input_with_deductions(dec!(1000.00), ytd, vec![medical_aid(dec!(999999.00))]);
+
+        let refusal = calculate(&input, &test_rules()).unwrap_err();
+
+        let PayrollError::DeductionsExceedGrossRemuneration { shortfall } = refusal else {
+            panic!("expected DeductionsExceedGrossRemuneration, got {refusal:?}");
+        };
+        assert!(shortfall > Money::ZERO);
+    }
+
+    #[test]
+    fn salt_policy_employer_paid_medical_aid_is_refused_by_name_before_any_arithmetic_runs() {
+        let kinds =
+            UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::EmployerPaidMedicalAid])
+                .unwrap();
+        let input =
+            input_with_unsupported_deductions(UnsupportedDeductionStatus::Present(kinds.clone()));
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::UnsupportedDeductionsPresent { kinds })
+        );
     }
 
     #[test]
