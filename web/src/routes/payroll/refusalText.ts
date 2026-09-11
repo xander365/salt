@@ -9,6 +9,7 @@
 // the server's own `message`, which may be reworded (§0.23).
 
 import type { RefusalDto } from '../../api/types';
+import { moneyDisplayText } from '../../money';
 import { unsupportedDeductionKindLabel } from '../employment/unsupportedDeductionKinds';
 
 function kindsFromDetails(details: unknown): string[] {
@@ -19,6 +20,16 @@ function kindsFromDetails(details: unknown): string[] {
   return Array.isArray(kinds)
     ? kinds.filter((kind): kind is string => typeof kind === 'string')
     : [];
+}
+
+function shortfallFromDetails(details: unknown): number | null {
+  if (typeof details !== 'object' || details === null) {
+    return null;
+  }
+  const shortfall = (details as { shortfallCents?: unknown }).shortfallCents;
+  return typeof shortfall === 'number' && Number.isSafeInteger(shortfall) && shortfall >= 0
+    ? shortfall
+    : null;
 }
 
 /** The sentence an Operator reads for one member's refusal, chosen by
@@ -63,8 +74,12 @@ export function refusalSentence(refusal: RefusalDto): string {
     case 'prior_paye_exceeds_recalculated_liability':
       return 'The declared prior PAYE exceeds what this employment now owes for the year.';
 
-    case 'deductions_exceed_gross_remuneration':
-      return 'Deductions exceed this member’s gross pay.';
+    case 'deductions_exceed_gross_remuneration': {
+      const shortfall = shortfallFromDetails(refusal.details);
+      return shortfall === null
+        ? 'This would take net pay below zero. Lower the deduction.'
+        : `This would take net pay below zero by ${moneyDisplayText(shortfall)}. Lower the deduction.`;
+    }
 
     case 'amount_overflow':
       return 'A figure for this member is too large for Salt to represent.';

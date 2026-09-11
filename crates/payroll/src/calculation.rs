@@ -46,7 +46,10 @@ pub struct PayrollInput {
     /// Voluntary deduction instructions (issue #78) — today, only medical
     /// aid premiums. Computed after PAYE and employee social security, from
     /// the earning lines exactly as if no voluntary deduction existed: the
-    /// earning-bases accumulator never sees this field.
+    /// earning-bases accumulator never sees this field. An absent field
+    /// decodes as an empty list so a `WorkingPayrollCalculation` written
+    /// before issue #78 can still be finalized after upgrading Salt.
+    #[serde(default)]
     deductions: Vec<VoluntaryDeductionInstruction>,
     year_to_date: YearToDateContext,
     /// The Employer's `PaySchedule`, used only to validate
@@ -3113,6 +3116,21 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PayrollRules>(&rules_json).unwrap(),
             test_rules()
+        );
+    }
+
+    #[test]
+    fn a_pre_medical_aid_working_input_reads_with_no_deductions() {
+        let input = input_for(dec!(15000.00), ytd(dec!(110000.00), dec!(0.00), 11));
+        let mut legacy_json = serde_json::to_value(&input).unwrap();
+        legacy_json
+            .as_object_mut()
+            .expect("PayrollInput serializes as an object")
+            .remove("deductions");
+
+        assert_eq!(
+            serde_json::from_value::<PayrollInput>(legacy_json).unwrap(),
+            input
         );
     }
 }

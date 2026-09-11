@@ -698,10 +698,6 @@ pub(crate) async fn finalize_payroll_run(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetRunPayLinesRequest {
     earnings: Vec<EarningLineDto>,
-    /// Absent on an older client's body, read the same as an empty array:
-    /// no deduction is a complete statement, exactly like an absent
-    /// `earnings` line would be malformed but an empty one is not.
-    #[serde(default)]
     deductions: Vec<DeductionLineDto>,
 }
 
@@ -755,4 +751,22 @@ pub(crate) async fn set_run_pay_lines(
     .await?;
 
     Ok(Json(RecordedResponse {}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SetRunPayLinesRequest;
+
+    #[test]
+    fn setting_pay_lines_requires_a_complete_deductions_statement() {
+        let request = serde_json::json!({
+            "earnings": [{
+                "kind": "taxableAllowance",
+                "amountCents": 10_000,
+                "label": "standby"
+            }]
+        });
+
+        assert!(serde_json::from_value::<SetRunPayLinesRequest>(request).is_err());
+    }
 }
