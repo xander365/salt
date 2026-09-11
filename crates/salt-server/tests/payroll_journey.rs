@@ -768,7 +768,10 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             &employment_id,
             &cookie,
             true,
-            json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 20_000_i64, "label": "standby" }] }),
+            json!({
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 20_000_i64, "label": "standby" }],
+                "deductions": [{ "kind": "medicalAidPremium", "amountCents": 50_000_i64 }],
+            }),
         ))
         .await
         .unwrap();
@@ -786,8 +789,8 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
     let member = &calculated_body["members"][0];
     assert!(member["refusal"].is_null());
 
-    // Read the ten figures. Exactly ten, all cents-exact integers and
-    // never a JSON float (INV-001, §0.29).
+    // Read the figures: §0.29's ten plus issue #78's medical aid premium,
+    // all cents-exact integers and never a JSON float (INV-001).
     let figures = &member["figures"];
     let mut figure_names: Vec<&str> = figures
         .as_object()
@@ -803,6 +806,7 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             "employeeSscCents",
             "employerSscCents",
             "grossCents",
+            "medicalAidPremiumCents",
             "netCents",
             "overtimeCents",
             "payeCents",
@@ -810,7 +814,7 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
             "taxableRemunerationCents",
             "totalDeductionsCents",
         ],
-        "the wire carries exactly the ten figures §0.29 names",
+        "the wire carries exactly §0.29's ten figures plus the medical aid premium",
     );
     let cents = |field: &str| {
         figures[field]
@@ -840,9 +844,13 @@ async fn signing_in_and_running_one_ordinary_payroll_end_to_end() {
     // The two figures that are sums are the sums of the others, and the
     // employer's own contribution is a cost to the Employer, never a
     // deduction from the employee.
+    // The medical aid premium is withheld at exactly the amount sent, after
+    // the two statutory deductions and never feeding either (SC-OPEN-7):
+    // gross and taxable remuneration above are unchanged by it.
+    assert_eq!(cents("medicalAidPremiumCents"), 50_000);
     assert_eq!(
         cents("totalDeductionsCents"),
-        cents("payeCents") + cents("employeeSscCents"),
+        cents("payeCents") + cents("employeeSscCents") + cents("medicalAidPremiumCents"),
     );
     assert_eq!(
         cents("netCents"),
@@ -1099,7 +1107,7 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
                 &employment_id,
                 &cookie,
                 true,
-                json!({ "earnings": [] }),
+                json!({ "earnings": [], "deductions": [] }),
             ))
             .await
             .unwrap()
@@ -1223,7 +1231,14 @@ async fn every_payroll_route_answers_401_without_a_session() {
         ),
         list_runs_request(e, no_cookie),
         run_detail_request(e, r, no_cookie),
-        set_earnings_request(e, r, em, no_cookie, true, json!({ "earnings": [] })),
+        set_earnings_request(
+            e,
+            r,
+            em,
+            no_cookie,
+            true,
+            json!({ "earnings": [], "deductions": [] }),
+        ),
         calculate_request(e, r, no_cookie, true),
         finalize_request(e, r, no_cookie, true),
         finalized_detail_request(e, f, no_cookie),
@@ -1304,7 +1319,7 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
             em,
             &cookie,
             false,
-            json!({ "earnings": [] }),
+            json!({ "earnings": [], "deductions": [] }),
         ),
         calculate_request(&employer_id, r, &cookie, false),
         finalize_request(&employer_id, r, &cookie, false),

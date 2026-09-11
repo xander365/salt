@@ -459,6 +459,14 @@ the `CompensationTerms`, and the input type cannot express a second one. New
 instructions require a non-blank human label; the optional label in the
 deserialization shape exists only to preserve unlabelled version-1 history.
 
+A deduction line is a `MedicalAidPremium` amount and nothing else (issue #78,
+parent #70 §D-4). `Money` refuses a negative or fractional amount, and
+`set_run_pay_lines` refuses a zero one (`VoluntaryDeductionAmountIsZero`,
+HTTP 422 `voluntary_deduction_amount_is_zero`, naming the line's index)
+before it reads anything, so nothing is written and no figure is retired. The
+body's `deductions` array is required: a body without it is malformed (400),
+never read as "no deductions", which would silently delete the ones stored.
+
 **Absence means no additional pay, and that is a complete statement.** This
 is a deliberate asymmetry with §4.5b and §4.5c, and the reason is the difference
 between the facts. Those two are three-valued because a **statutory** question

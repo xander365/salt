@@ -19,7 +19,8 @@ use chrono::NaiveDate;
 use payroll::{
     Deduction, Earning, EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod,
     PaySchedule, PayrollCalculation, PayrollError, PriorEmployment, PriorEmploymentFigures,
-    TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus, VoluntaryDeductionInstruction,
+    TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus, VoluntaryDeduction,
+    VoluntaryDeductionInstruction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -793,6 +794,15 @@ pub async fn set_run_pay_lines(
     earnings: Vec<EarningInstruction>,
     deductions: Vec<VoluntaryDeductionInstruction>,
 ) -> Result<(), PayrollAppError> {
+    // A zero deduction withholds nothing and is not a line (§D-4). Checked
+    // before anything is read, so the refusal never depends on run state.
+    if let Some(index) = deductions.iter().position(|deduction| {
+        let VoluntaryDeductionInstruction::MedicalAidPremium(amount) = deduction;
+        *amount == Money::ZERO
+    }) {
+        return Err(PayrollAppError::VoluntaryDeductionAmountIsZero { index });
+    }
+
     let mut tx = db.pool().begin().await?;
     lock_editable_run(&mut tx, payroll_run_id).await?;
 
@@ -1093,13 +1103,14 @@ pub enum PayrollRunBlocker {
 /// Employee SSC, Employer SSC, Total Deductions and Net — ten in all — read
 /// straight off a stored `PayrollCalculation` (issue #55, extended to nine
 /// by issue #57 so a finalized read and a working one share one shape, and
-/// to ten by issue #76 when Overtime became an earning kind of its own). `basic_pay` and
+/// to ten by issue #76 when Overtime became an earning kind of its own), plus
+/// the Medical Aid Premium issue #78 adds as an eleventh. `basic_pay` and
 /// `taxable_allowances` are summed from `earning_lines` here, once, because
 /// `calculate` itself never stores either as a bare total —
 /// `RemunerationBases` accumulates into three statutory bases, not per-kind
 /// totals. `total_deductions` is summed from `calculation.deductions`
-/// itself, the same PAYE-plus-employee-SSC total `net_pay` is already
-/// derived from (INV-007: employer SSC never appears in it).
+/// itself, the same PAYE, employee SSC and voluntary total `net_pay` is
+/// already derived from (INV-007: employer SSC never appears in it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PayrollFigures {
     pub basic_pay: Money,
@@ -1114,6 +1125,11 @@ pub struct PayrollFigures {
     pub paye: Money,
     pub employee_social_security: Money,
     pub employer_social_security: Money,
+    /// Every `VoluntaryDeduction::MedicalAidPremium` withheld, summed (issue
+    /// #78). Its own figure so a voluntary deduction is shown as the
+    /// classified line it is, after the two statutory ones, and never only
+    /// as an unexplained part of `total_deductions`.
+    pub medical_aid_premium: Money,
     pub total_deductions: Money,
     pub net_pay: Money,
 }
@@ -1130,10 +1146,10 @@ impl PayrollFigures {
     /// cannot overflow: `calculate` already summed the same lines into
     /// `gross_remuneration` via `checked_add` without overflowing, and
     /// every line is non-negative, so no subset of them can overflow
-    /// either. Summing `deductions` into `total_deductions` cannot overflow
-    /// for the same reason: `calculate` already subtracted the same two
-    /// amounts from `gross_remuneration` via `checked_sub` without going
-    /// negative.
+    /// either. Summing `deductions` into `total_deductions` (or any subset of
+    /// them into `medical_aid_premium`) cannot overflow for the same reason:
+    /// `calculate` already summed every one of them and subtracted the total
+    /// from `gross_remuneration` without overflowing or going negative.
     pub(crate) fn from_calculation(calculation: &PayrollCalculation) -> Self {
         let mut basic_pay = Money::ZERO;
         let mut taxable_allowances = Money::ZERO;
@@ -1165,6 +1181,15 @@ impl PayrollFigures {
                 .map(Deduction::amount),
         )
         .expect("see from_calculation's own doc comment: cannot overflow here");
+        let medical_aid_premium = Money::checked_sum(calculation.deductions.iter().filter_map(
+            |deduction| match deduction {
+                Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium { amount, .. }) => {
+                    Some(*amount)
+                }
+                Deduction::Statutory(_) => None,
+            },
+        ))
+        .expect("see from_calculation's own doc comment: cannot overflow here");
         PayrollFigures {
             basic_pay,
             taxable_allowances,
@@ -1174,6 +1199,7 @@ impl PayrollFigures {
             paye: calculation.paye.amount,
             employee_social_security: calculation.employee_social_security.amount,
             employer_social_security: calculation.employer_social_security.amount,
+            medical_aid_premium,
             total_deductions,
             net_pay: calculation.net_pay,
         }
@@ -1448,6 +1474,68 @@ async fn member_blockers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn allowance() -> EarningInstruction {
+        EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(20_000).unwrap(),
+            label: Some(payroll::EarningLabel::new("standby").unwrap()),
+        }
+    }
+
+    fn premium() -> VoluntaryDeductionInstruction {
+        VoluntaryDeductionInstruction::MedicalAidPremium(Money::from_cents(75_000).unwrap())
+    }
+
+    /// Carried over from #77: a row written before issue #78 holds a bare
+    /// `EarningInstruction` with no wrapper key. It must still read, and read
+    /// as the earning it always was — the four `expect`ing readers would
+    /// otherwise panic on every pre-#78 run.
+    #[test]
+    fn a_pre_deduction_bare_earning_row_reads_as_an_earning_line() {
+        let legacy = serde_json::to_value(allowance()).unwrap();
+
+        assert_eq!(
+            serde_json::from_value::<PayLineInstruction>(legacy).unwrap(),
+            PayLineInstruction::Earning(allowance())
+        );
+    }
+
+    #[test]
+    fn both_tagged_shapes_round_trip() {
+        for line in [
+            PayLineInstruction::Earning(allowance()),
+            PayLineInstruction::Deduction(premium()),
+        ] {
+            let json = serde_json::to_value(&line).unwrap();
+            assert_eq!(
+                serde_json::from_value::<PayLineInstruction>(json).unwrap(),
+                line
+            );
+        }
+    }
+
+    /// Every new write is the tagged shape, so a deduction can never be
+    /// mistaken for a bare legacy earning.
+    #[test]
+    fn a_deduction_line_is_written_under_its_own_tag() {
+        let json = serde_json::to_value(PayLineInstruction::Deduction(premium())).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({ "Deduction": { "MedicalAidPremium": 75_000 } })
+        );
+    }
+
+    #[test]
+    fn a_shape_that_is_neither_tagged_nor_a_bare_earning_is_refused() {
+        for json in [
+            serde_json::json!({ "Deduction": { "Pension": 100 } }),
+            serde_json::json!({ "MedicalAidPremium": 75_000 }),
+            serde_json::json!({ "Earning": { "BasicPay": 100 } }),
+        ] {
+            assert!(serde_json::from_value::<PayLineInstruction>(json).is_err());
+        }
+    }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()

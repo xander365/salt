@@ -1,4 +1,5 @@
-// The ten figures §0.29 names, shared verbatim between a working run's own
+// The ten figures §0.29 names, plus issue #78's medical aid premium, shared
+// verbatim between a working run's own
 // detail/calculate response (`PayrollRun.tsx`) and a finalized payroll's own
 // detail response (`FinalizedPayroll.tsx`, issue #66) — the same reason
 // `crates/salt-server/src/finalized_payroll.rs` reuses `payroll_runs.rs`'s
@@ -9,7 +10,10 @@ import { useId } from 'react';
 import type { FiguresDto } from '../../api/types';
 import { moneyDisplayText } from '../../money';
 
-/** The ten figures §0.29 names, in the order it names them. */
+/** The ten figures §0.29 names, in the order it names them, with issue #78's
+ * medical aid premium as its own classified line straight after the two
+ * statutory deductions — the order a payslip prints and net pay is derived
+ * in. */
 const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
   { key: 'basicPayCents', label: 'Basic Pay' },
   { key: 'taxableAllowancesCents', label: 'Taxable Allowances' },
@@ -18,6 +22,7 @@ const FIGURE_FIELDS: { key: keyof FiguresDto; label: string }[] = [
   { key: 'taxableRemunerationCents', label: 'Taxable Remuneration' },
   { key: 'payeCents', label: 'PAYE' },
   { key: 'employeeSscCents', label: 'Employee SSC' },
+  { key: 'medicalAidPremiumCents', label: 'Medical Aid Premium' },
   { key: 'employerSscCents', label: 'Employer SSC' },
   { key: 'totalDeductionsCents', label: 'Total Deductions' },
   { key: 'netCents', label: 'Net' },

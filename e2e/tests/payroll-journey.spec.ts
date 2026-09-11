@@ -25,8 +25,8 @@ import { readFile } from 'node:fs/promises';
 import { type Page, expect, test } from '@playwright/test';
 import { type BootstrappedOperator, CREDENTIALS_PATH } from '../global-setup.js';
 
-/** The ten figures §0.29 names and the accessible names the screen gives
- * them. Order is immaterial: each value is read by what a person calls it,
+/** The ten figures §0.29 names, plus issue #78's medical aid premium, and
+ * the accessible names the screen gives them. Order is immaterial: each value is read by what a person calls it,
  * never by where its definition happens to sit in the document. */
 const FIGURE_FIELDS = [
   { field: 'basicPayCents', name: 'Basic Pay' },
@@ -36,6 +36,7 @@ const FIGURE_FIELDS = [
   { field: 'taxableRemunerationCents', name: 'Taxable Remuneration' },
   { field: 'payeCents', name: 'PAYE' },
   { field: 'employeeSscCents', name: 'Employee SSC' },
+  { field: 'medicalAidPremiumCents', name: 'Medical Aid Premium' },
   { field: 'employerSscCents', name: 'Employer SSC' },
   { field: 'totalDeductionsCents', name: 'Total Deductions' },
   { field: 'netCents', name: 'Net' },
@@ -110,7 +111,7 @@ function parseCentsText(text: string): number {
   return Number(BigInt(whole.replace(/,/g, '')) * 100n + BigInt(fraction));
 }
 
-/** Reads the ten figures §0.29 names off whichever screen is showing them
+/** Reads every figure in `FIGURE_FIELDS` off whichever screen is showing them
  * — a payroll run's own calculated member, or a finalized payroll — both of
  * which share this one `Figures` component. Each named group is its own wait:
  * counting every `definition` on the page would accidentally include facts
@@ -251,10 +252,16 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await page.getByLabel('Overtime label (optional)').fill('Sunday overtime');
   await page.getByLabel('Hours', { exact: true }).fill('10');
   await expect(page.getByLabel('Multiplier')).toHaveValue('1.5');
+
+  // Withhold the employee's own medical aid premium (issue #78): a
+  // voluntary deduction, taken after PAYE and social security at exactly the
+  // amount entered.
+  await page.getByRole('button', { name: 'Add a medical aid premium' }).click();
+  await page.getByLabel('Premium amount').fill('500.00');
   await page.getByRole('button', { name: 'Save earnings' }).click();
   await expect(page.getByText('Earnings saved.')).toBeVisible();
 
-  // Calculate, then read the ten figures the wire carries (§0.29).
+  // Calculate, then read the figures the wire carries (§0.29, issue #78).
   await page.getByRole('button', { name: 'Calculate' }).click();
   const figures = await readFigures(page);
 
@@ -286,7 +293,12 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // `payroll_journey.rs`'s own comment on the same figure, for the same
   // reason: cumulative PAYE owes nothing yet this early in the tax year.
   expect(figures.payeCents).toBeGreaterThanOrEqual(0);
-  expect(figures.totalDeductionsCents).toBe(figures.payeCents + figures.employeeSscCents);
+  // The premium is its own figure, at exactly the amount entered, and the
+  // only thing between the statutory deductions and net pay (SC-OPEN-7).
+  expect(figures.medicalAidPremiumCents).toBe(50_000);
+  expect(figures.totalDeductionsCents).toBe(
+    figures.payeCents + figures.employeeSscCents + figures.medicalAidPremiumCents,
+  );
   expect(figures.netCents).toBe(figures.grossCents - figures.totalDeductionsCents);
 
   // Saving an unchanged earnings list is not a change and must not describe
@@ -314,7 +326,7 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   ).toBeVisible();
   // The warning *replaces* the figures rather than sitting above them
   // (§0's story 75: "say so and hide the old figures") — every one of the
-  // ten predates the edit that was just saved, so none of them is on the
+  // figures predates the edit that was just saved, so none of them is on the
   // screen to be read.
   await expect(page.getByRole('definition')).toHaveCount(0);
   await page.getByRole('button', { name: 'Calculate' }).click();

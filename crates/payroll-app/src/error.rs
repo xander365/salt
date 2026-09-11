@@ -148,6 +148,14 @@ pub enum PayrollAppError {
         payroll_run_id: PayrollRunId,
         employment_id: EmploymentId,
     },
+    /// `SetRunPayLines` was given a voluntary deduction of zero (issue #78,
+    /// parent #70 §D-4). `Money` already refuses a negative or fractional
+    /// amount; a zero one is refused here because it is not a line — it
+    /// withholds nothing. Unlike a zero-amount allowance, which an Employer
+    /// may deliberately state, a zero deduction only puts a line on a payslip
+    /// that says nothing happened. `index` is the line's position in the
+    /// `deductions` the caller sent.
+    VoluntaryDeductionAmountIsZero { index: usize },
     /// Working state — membership, Earnings, the working calculation — was
     /// asked to change on a run that is already `Finalized`. Once history
     /// has been written there is nothing left to overwrite (§4.7). A
@@ -712,6 +720,12 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "Employment {employment_id} is not an active member of PayrollRun {payroll_run_id}"
             ),
+            Self::VoluntaryDeductionAmountIsZero { index } => {
+                write!(
+                    f,
+                    "deduction line {index} withholds nothing: its amount is zero"
+                )
+            }
             Self::PayrollRunAlreadyFinalized { payroll_run_id, .. } => {
                 write!(f, "PayrollRun {payroll_run_id} is already Finalized")
             }
@@ -1140,6 +1154,7 @@ impl std::error::Error for PayrollAppError {
             | Self::PayrollRunIsNotOrdinary(_)
             | Self::RemovalReasonCannotBeEmpty
             | Self::EmploymentNotAnActiveRunMember { .. }
+            | Self::VoluntaryDeductionAmountIsZero { .. }
             | Self::PayrollRunAlreadyFinalized { .. }
             | Self::PayrollRunNotCalculated(_)
             | Self::FinalizationInputMismatch { .. }

@@ -322,8 +322,9 @@ export interface PayrollRunBlockerDto {
   details: unknown;
 }
 
-/** The ten figures §0.29 names for a member's current calculation, cents-exact
- * (INV-001). `null` until the run has been calculated at least once.
+/** The ten figures §0.29 names for a member's current calculation, plus the
+ * medical aid premium issue #78 adds, cents-exact (INV-001). `null` until
+ * the run has been calculated at least once.
  * `overtimeCents` is its own figure and never folded into
  * `taxableAllowancesCents`: overtime feeds PAYE and gross but never the
  * social security base. */
@@ -336,6 +337,10 @@ export interface FiguresDto {
   payeCents: number;
   employeeSscCents: number;
   employerSscCents: number;
+  /** Every medical aid premium withheld, summed (issue #78) — its own
+   * classified figure, after the two statutory ones, so `totalDeductionsCents`
+   * is never the only place a voluntary deduction shows. */
+  medicalAidPremiumCents: number;
   totalDeductionsCents: number;
   netCents: number;
 }

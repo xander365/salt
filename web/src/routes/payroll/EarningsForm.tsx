@@ -79,12 +79,8 @@ function earningsFailureMessage(caught: unknown): string {
     case 'invalid_overtime_hours':
       return 'Those overtime hours were refused. Enter hours above zero, to at most two decimal places.';
 
-    case 'deductions_exceed_gross_remuneration': {
-      const shortfall = (error.details as { shortfallCents?: unknown } | null)?.shortfallCents;
-      return typeof shortfall === 'number'
-        ? `This would take net pay below zero, by ${safeAmountText(shortfall)}. Lower the deduction.`
-        : 'This would take net pay below zero. Lower the deduction.';
-    }
+    case 'voluntary_deduction_amount_is_zero':
+      return 'A medical aid premium of zero is not a deduction. Enter an amount above zero, or remove the line.';
 
     default:
       return 'Something went wrong. Please try again.';
@@ -341,20 +337,22 @@ export function EarningsForm({
     return request;
   }
 
-  /** Every deduction line this form holds, validated the same way an
-   * allowance's amount is. Returns `null` once it has set the error naming
-   * the offending field. */
+  /** Every deduction line this form holds, validated. Unlike an allowance,
+   * a premium must be above zero: the server refuses a zero-amount deduction
+   * (`voluntary_deduction_amount_is_zero`), so this checks first and names
+   * the field. Returns `null` once it has set the error naming the
+   * offending field. */
   function buildDeductionsRequest(): DeductionLineDto[] | null {
     const request: DeductionLineDto[] = [];
 
     for (const [index, premium] of medicalAidPremiums.entries()) {
       const cents = parseCentsInput(premium.amount);
-      if (cents === null) {
+      if (cents === null || cents === 0) {
         setLineError({
           kind: 'medicalAidPremium',
           index,
           field: 'amount',
-          message: 'Enter a non-negative amount with no more than two decimal places, e.g. 500.00.',
+          message: 'Enter an amount above zero with no more than two decimal places, e.g. 500.00.',
         });
         return null;
       }
@@ -592,7 +590,7 @@ export function EarningsForm({
 
       <section aria-label="Medical aid premium" className="flex flex-col gap-3">
         {medicalAidPremiums.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No medical aid premium on this line.</p>
+          <p className="text-sm text-muted-foreground">No medical aid premium.</p>
         ) : (
           <ul className="flex flex-col gap-2">
             {medicalAidPremiums.map((premium, index) => {
@@ -606,7 +604,7 @@ export function EarningsForm({
                 <li key={index} className="flex flex-col gap-1">
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                     <div className="flex flex-col gap-1.5">
-                      <Label htmlFor={amountId}>Amount</Label>
+                      <Label htmlFor={amountId}>Premium amount</Label>
                       <Input
                         id={amountId}
                         type="text"

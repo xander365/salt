@@ -34,8 +34,8 @@ pub enum EarningPrePopulation {
     /// target's frozen `PayrollInput`.
     FromTarget { count: usize },
     /// The target's `snapshot_schema_version` is not one this build of Salt
-    /// deserializes, or (from `snapshot_schema_version`
-    /// [`DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION`] onward) its
+    /// deserializes, or (from `snapshot_schema_version` 4, where
+    /// `PayrollInput` gained `deductions`, onward) its
     /// `deductions` field could not be read. The run starts with no lines
     /// rather than guessing at an unreadable shape (§9.1) — this variant is
     /// how that degradation "says so" to the caller.

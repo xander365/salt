@@ -3068,24 +3068,89 @@ mod tests {
     fn salt_policy_a_medical_aid_premium_that_would_take_net_pay_below_zero_is_refused_naming_the_shortfall()
      {
         let ytd = ytd(dec!(0), dec!(0), 1);
-        // Basic pay 1,000.00 with a low-rate table and SSC leaves a small
-        // net pay; a premium larger than what is left must refuse rather
-        // than partially withhold.
-        let input = input_with_deductions(dec!(1000.00), ytd, vec![medical_aid(dec!(999999.00))]);
+        let available = calculate(
+            &input_with_deductions(dec!(15000.00), ytd, Vec::new()),
+            &test_rules(),
+        )
+        .unwrap()
+        .net_pay;
+        // N$12.34 more than the net pay left after PAYE and employee SSC.
+        let premium = available.checked_add(money(dec!(12.34))).unwrap();
+        let input = input_with_deductions(
+            dec!(15000.00),
+            ytd,
+            vec![VoluntaryDeductionInstruction::MedicalAidPremium(premium)],
+        );
 
-        let refusal = calculate(&input, &test_rules()).unwrap_err();
+        // Refused whole, naming the exact gap — never partially withheld.
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::DeductionsExceedGrossRemuneration {
+                shortfall: money(dec!(12.34))
+            })
+        );
+    }
 
-        let PayrollError::DeductionsExceedGrossRemuneration { shortfall } = refusal else {
-            panic!("expected DeductionsExceedGrossRemuneration, got {refusal:?}");
-        };
-        assert!(shortfall > Money::ZERO);
+    #[test]
+    fn salt_policy_a_medical_aid_premium_equal_to_the_available_net_pay_leaves_exactly_zero() {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let available = calculate(
+            &input_with_deductions(dec!(15000.00), ytd, Vec::new()),
+            &test_rules(),
+        )
+        .unwrap()
+        .net_pay;
+        let input = input_with_deductions(
+            dec!(15000.00),
+            ytd,
+            vec![VoluntaryDeductionInstruction::MedicalAidPremium(available)],
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()).unwrap().net_pay,
+            Money::ZERO
+        );
+    }
+
+    #[test]
+    fn salt_policy_the_shortfall_counts_every_medical_aid_line_together() {
+        let ytd = ytd(dec!(0), dec!(0), 1);
+        let available = calculate(
+            &input_with_deductions(dec!(15000.00), ytd, Vec::new()),
+            &test_rules(),
+        )
+        .unwrap()
+        .net_pay;
+        // Each line alone fits; together they exceed net pay by N$1.00.
+        let half = Money::from_cents(available.cents() / 2).unwrap();
+        let rest = available
+            .checked_sub(half)
+            .unwrap()
+            .checked_add(money(dec!(1.00)))
+            .unwrap();
+        let input = input_with_deductions(
+            dec!(15000.00),
+            ytd,
+            vec![
+                VoluntaryDeductionInstruction::MedicalAidPremium(half),
+                VoluntaryDeductionInstruction::MedicalAidPremium(rest),
+            ],
+        );
+
+        assert_eq!(
+            calculate(&input, &test_rules()),
+            Err(PayrollError::DeductionsExceedGrossRemuneration {
+                shortfall: money(dec!(1.00))
+            })
+        );
     }
 
     #[test]
     fn salt_policy_employer_paid_medical_aid_is_refused_by_name_before_any_arithmetic_runs() {
-        let kinds =
-            UnsupportedDeductionKinds::new(vec![UnsupportedDeductionKind::EmployerPaidMedicalAid])
-                .unwrap();
+        let kinds = UnsupportedDeductionKinds::new(vec![
+            UnsupportedDeductionKind::EmployerPaidMedicalAidBenefit,
+        ])
+        .unwrap();
         let input =
             input_with_unsupported_deductions(UnsupportedDeductionStatus::Present(kinds.clone()));
 

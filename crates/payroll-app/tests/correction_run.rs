@@ -1222,6 +1222,53 @@ async fn deductions_are_prepopulated_from_the_reversed_targets_frozen_snapshot(p
     // Marked as having come from the reversed target's frozen snapshot
     // (issue #78's own acceptance criterion), not `one_off`.
     assert_eq!(rows[1].2, "from_reversed_snapshot");
+
+    // Provenance matching applies to deduction lines exactly as to
+    // earnings (#77): restating the copied deduction keeps its source, and
+    // editing it makes it one-off.
+    let sources = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT source FROM payroll_run_pay_line
+             WHERE payroll_run_id = $1::uuid AND employment_id = $2 ORDER BY line",
+        )
+        .bind(run_id.as_str())
+        .bind(employment_id.as_str())
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let copied_earning = EarningInstruction::TaxableAllowance {
+        amount: Money::from_cents(20000).unwrap(),
+        label: None,
+    };
+    let copied_deduction =
+        VoluntaryDeductionInstruction::MedicalAidPremium(Money::from_cents(75000).unwrap());
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![copied_earning.clone()],
+        vec![copied_deduction],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sources().await,
+        ["from_reversed_snapshot", "from_reversed_snapshot"]
+    );
+
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![copied_earning],
+        vec![VoluntaryDeductionInstruction::MedicalAidPremium(
+            Money::from_cents(80000).unwrap(),
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(sources().await, ["from_reversed_snapshot", "one_off"]);
 }
 
 /// `deductions` joined `PayrollInput` at issue #78. A snapshot genuinely

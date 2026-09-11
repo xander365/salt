@@ -365,7 +365,7 @@ async fn finalize_a_fully_declared_employment_with_earnings(
                     .header("x-salt-request", "1")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        serde_json::json!({ "earnings": earnings }).to_string(),
+                        serde_json::json!({ "earnings": earnings, "deductions": [] }).to_string(),
                     ))
                     .unwrap(),
             )

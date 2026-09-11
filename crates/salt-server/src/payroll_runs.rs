@@ -454,12 +454,12 @@ fn blocker_to_dto(blocker: PayrollRunBlocker) -> BlockerDto {
     BlockerDto { code, details }
 }
 
-/// The ten figures §0.29 names for a member's current calculation — shared
-/// by a working run's own detail/calculate response and by
-/// [`crate::finalized_payroll`]'s finalized-payroll detail (issue #57), so
-/// the same ten names appear on the wire whether the run is `Calculated` or
-/// already `Finalized`. Cents-exact integers on the wire, never a JSON float
-/// (INV-001).
+/// The ten figures §0.29 names for a member's current calculation, plus the
+/// medical aid premium issue #78 adds — shared by a working run's own
+/// detail/calculate response and by [`crate::finalized_payroll`]'s
+/// finalized-payroll detail (issue #57), so the same names appear on the wire
+/// whether the run is `Calculated` or already `Finalized`. Cents-exact
+/// integers on the wire, never a JSON float (INV-001).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FiguresDto {
@@ -471,6 +471,7 @@ pub(crate) struct FiguresDto {
     paye_cents: i64,
     employee_ssc_cents: i64,
     employer_ssc_cents: i64,
+    medical_aid_premium_cents: i64,
     total_deductions_cents: i64,
     net_cents: i64,
 }
@@ -485,6 +486,7 @@ pub(crate) fn figures_to_dto(figures: PayrollFigures) -> FiguresDto {
         paye_cents: figures.paye.cents(),
         employee_ssc_cents: figures.employee_social_security.cents(),
         employer_ssc_cents: figures.employer_social_security.cents(),
+        medical_aid_premium_cents: figures.medical_aid_premium.cents(),
         total_deductions_cents: figures.total_deductions.cents(),
         net_cents: figures.net_pay.cents(),
     }

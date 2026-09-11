@@ -373,7 +373,9 @@ Two consequences: changing the rounding policy must not invalidate a single stat
 
 The premium is computed **after** PAYE and employee social security, from the earning lines exactly as if it did not exist — the earning-bases accumulator never sees it, so PAYE and both social security figures are bit-identical to the same input without the deduction. Deductions are ordered PAYE, employee social security, then voluntary — the order a payslip prints and net pay is derived in.
 
-A voluntary deduction that would take net pay below zero is refused — `PayrollError::DeductionsExceedGrossRemuneration` extended to carry the shortfall — rather than partially withheld. Salt invents no priority order, cap, or carry-forward to resolve this; the existing checked-subtraction chain is simply extended to include voluntary deductions in the sum it checks.
+A voluntary deduction that would take net pay below zero is refused — `PayrollError::DeductionsExceedGrossRemuneration` extended to carry the shortfall — rather than partially withheld. Salt invents no priority order, cap, or carry-forward to resolve this; the existing checked-subtraction chain is simply extended to include voluntary deductions in the sum it checks. The shortfall is exactly how far the total exceeds gross remuneration, which is the same as how far the voluntary deductions exceed the net pay left after PAYE and employee social security.
+
+A zero-amount premium is refused at the write boundary: it withholds nothing, so it is not a line. The worksheet and the finalized payroll show the premium as its own figure, **Medical Aid Premium**, after PAYE and employee SSC and inside Total Deductions.
 
 Salt grants **no relief against taxable income** for the employee's own medical aid premium. NamRA's four allowed deductions (§3.5) do not list medical aid, which supports that reading, but no primary source was read confirming it. Stamped SC-OPEN-7, `NEEDS NAMRA CONFIRMATION` — every test whose expected figure depends on this reading is `salt_policy_*`, never `statutory_*` (ADR-0008).
 

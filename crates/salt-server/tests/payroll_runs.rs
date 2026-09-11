@@ -565,6 +565,7 @@ async fn setting_earnings_replaces_the_whole_list() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [
                     { "kind": "taxableAllowance", "amountCents": 5000, "label": "  standby  " },
                     { "kind": "taxableAllowance", "amountCents": 2500, "label": "travel" },
@@ -598,6 +599,7 @@ async fn setting_earnings_replaces_the_whole_list() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "travel" }],
             }),
         ))
@@ -634,7 +636,7 @@ async fn setting_earnings_without_the_salt_request_header_is_refused() {
             &employment_id,
             &cookie,
             false,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ))
         .await
         .unwrap();
@@ -661,6 +663,7 @@ async fn a_basic_pay_line_is_a_malformed_request() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [{ "kind": "basicPay", "amountCents": 150000 }],
             }),
         ))
@@ -690,6 +693,7 @@ async fn overtime_is_set_and_read_back_as_hours_at_a_multiplier() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [
                     { "kind": "overtime", "hours": "12", "multiplier": "1.5",
                       "label": "  Sunday overtime  " },
@@ -747,6 +751,7 @@ async fn an_overtime_multiplier_outside_the_closed_set_is_refused_with_a_stated_
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [{ "kind": "overtime", "hours": "12", "multiplier": "1.75",
                                "label": "overtime" }],
             }),
@@ -787,6 +792,7 @@ async fn zero_or_negative_overtime_hours_are_refused() {
                 &cookie,
                 true,
                 serde_json::json!({
+                    "deductions": [],
                     "earnings": [{ "kind": "overtime", "hours": hours, "multiplier": "1.5",
                                    "label": "overtime" }],
                 }),
@@ -821,7 +827,7 @@ async fn an_employment_that_is_not_an_active_member_is_refused() {
             &employment_id,
             &cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ))
         .await
         .unwrap();
@@ -863,7 +869,7 @@ async fn a_run_id_belonging_to_another_employer_is_not_found_on_the_earnings_rou
             &employment_id,
             &other_cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ))
         .await
         .unwrap();
@@ -920,7 +926,7 @@ async fn without_membership_the_routes_answer_404() {
             &employment_id,
             &outsider_cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ),
         calculate_request(&employer_id, &run_id, &outsider_cookie, true),
         finalize_request(&employer_id, &run_id, &outsider_cookie, true),
@@ -970,7 +976,7 @@ async fn every_route_answers_401_without_a_session() {
             &employment_id,
             no_cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ),
         calculate_request(&employer_id, &run_id, no_cookie, true),
         finalize_request(&employer_id, &run_id, no_cookie, true),
@@ -1062,12 +1068,12 @@ async fn an_earning_line_salt_cannot_represent_is_a_bad_request() {
     let run_id = create_run(&employer_id, &cookie).await;
 
     for body in [
-        serde_json::json!({ "earnings": [{ "kind": "bonus", "amountCents": 1000 }] }),
-        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": -1 }] }),
-        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance" }] }),
-        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000 }] }),
-        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "  " }] }),
-        serde_json::json!({ "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "x".repeat(101) }] }),
+        serde_json::json!({ "deductions": [], "earnings": [{ "kind": "bonus", "amountCents": 1000 }] }),
+        serde_json::json!({ "deductions": [], "earnings": [{ "kind": "taxableAllowance", "amountCents": -1 }] }),
+        serde_json::json!({ "deductions": [], "earnings": [{ "kind": "taxableAllowance" }] }),
+        serde_json::json!({ "deductions": [], "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000 }] }),
+        serde_json::json!({ "deductions": [], "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "  " }] }),
+        serde_json::json!({ "deductions": [], "earnings": [{ "kind": "taxableAllowance", "amountCents": 1000, "label": "x".repeat(101) }] }),
     ] {
         let response = router()
             .await
@@ -1109,6 +1115,7 @@ async fn a_malformed_earning_line_leaves_the_existing_lines_alone() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
             }),
         ))
@@ -1125,6 +1132,7 @@ async fn a_malformed_earning_line_leaves_the_existing_lines_alone() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [
                     { "kind": "taxableAllowance", "amountCents": 1000, "label": "travel" },
                     { "kind": "bonus", "amountCents": 1000 },
@@ -1166,6 +1174,7 @@ async fn setting_no_earnings_at_all_clears_the_list() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
             }),
         ))
@@ -1180,7 +1189,7 @@ async fn setting_no_earnings_at_all_clears_the_list() {
             &employment_id,
             &cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ))
         .await
         .unwrap();
@@ -1274,7 +1283,7 @@ async fn a_payroll_operator_reaches_every_route() {
             &employment_id,
             &cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({ "earnings": [], "deductions": [] }),
         ),
         calculate_request(&employer_id, &run_id, &cookie, true),
         finalize_request(&employer_id, &run_id, &cookie, true),
@@ -1404,6 +1413,7 @@ async fn calculating_a_fully_declared_run_returns_figures_and_the_run_becomes_ca
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
             }),
         ))
@@ -1464,6 +1474,7 @@ async fn the_old_earnings_route_is_gone() {
                 .header("x-salt-request", "1")
                 .body(Body::from(
                     serde_json::json!({
+                        "deductions": [],
                         "earnings": [
                             { "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" },
                         ],
@@ -1506,6 +1517,7 @@ async fn a_written_line_reads_back_one_off_whatever_source_the_body_claims() {
             &cookie,
             true,
             serde_json::json!({
+                "deductions": [],
                 "earnings": [
                     {
                         "kind": "taxableAllowance",
@@ -2233,5 +2245,230 @@ async fn two_concurrent_finalizes_write_exactly_one_finalized_payroll() {
     assert_eq!(
         loser["error"]["details"]["finalizedPayrollId"],
         finalized_payroll_id
+    );
+}
+
+// ---- Medical aid premium deductions (issue #78) ----
+
+/// Deductions travel in their own `deductions` array and read back in the
+/// run detail beside the earnings, each with the source Salt recorded.
+#[tokio::test]
+async fn deductions_are_set_and_read_back_with_their_source() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
+                "deductions": [{ "kind": "medicalAidPremium", "amountCents": 75000, "source": "from_reversed_snapshot" }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let member = &detail["members"][0];
+    assert_eq!(member["earnings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        member["deductions"],
+        serde_json::json!([{ "kind": "medicalAidPremium", "amountCents": 75000, "source": "one_off" }]),
+        "a claimed source is ignored: provenance is Salt's record"
+    );
+}
+
+/// §D-4: a zero-amount deduction is not a line, refused under its own code
+/// naming which line, and nothing is written.
+#[tokio::test]
+async fn a_zero_amount_deduction_is_refused_with_its_own_code() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [],
+                "deductions": [
+                    { "kind": "medicalAidPremium", "amountCents": 75000 },
+                    { "kind": "medicalAidPremium", "amountCents": 0 },
+                ],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "voluntary_deduction_amount_is_zero");
+    assert_eq!(json["error"]["details"]["index"], 1);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["members"][0]["deductions"], serde_json::json!([]));
+}
+
+/// Exactly one deduction kind exists, and a body is a complete statement:
+/// an unknown kind, a negative or missing amount, or an absent `deductions`
+/// array is malformed — never read as "no deductions", which would silently
+/// delete the ones stored.
+#[tokio::test]
+async fn a_deduction_salt_cannot_represent_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    for body in [
+        serde_json::json!({ "earnings": [], "deductions": [{ "kind": "pension", "amountCents": 1000 }] }),
+        serde_json::json!({ "earnings": [], "deductions": [{ "kind": "other", "amountCents": 1000, "label": "gym" }] }),
+        serde_json::json!({ "earnings": [], "deductions": [{ "kind": "medicalAidPremium", "amountCents": -1 }] }),
+        serde_json::json!({ "earnings": [], "deductions": [{ "kind": "medicalAidPremium" }] }),
+        serde_json::json!({ "earnings": [] }),
+    ] {
+        let response = router()
+            .await
+            .oneshot(set_earnings_request(
+                &employer_id,
+                &run_id,
+                &employment_id,
+                &cookie,
+                true,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+/// Q-OPEN-22 over the wire: a premium above the net pay left after PAYE and
+/// social security is refused on Calculate, naming the exact shortfall in
+/// cents, and the member has no figures.
+#[tokio::test]
+async fn a_premium_above_available_net_pay_is_refused_naming_the_shortfall() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    fully_declare_employment(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let calculated = body_json(
+        router()
+            .await
+            .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let available = calculated["members"][0]["figures"]["netCents"]
+        .as_i64()
+        .unwrap();
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [],
+                "deductions": [{ "kind": "medicalAidPremium", "amountCents": available + 1234 }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let refused = body_json(
+        router()
+            .await
+            .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let member = &refused["members"][0];
+    assert!(member["figures"].is_null());
+    assert_eq!(
+        member["refusal"],
+        serde_json::json!({
+            "code": "deductions_exceed_gross_remuneration",
+            "details": { "shortfallCents": 1234 },
+        })
+    );
+}
+
+/// Employer-paid medical aid is declarable by its own code and blocks the
+/// member by name, before any pay line is set up.
+#[tokio::test]
+async fn employer_paid_medical_aid_is_declarable_and_blocks_by_name_on_the_wire() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+
+    let declared = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({
+                "effectiveFrom": "2026-01-01",
+                "status": "present",
+                "kinds": ["employer_paid_medical_aid"],
+                "acknowledgedDivergingPeriods": [],
+                "reason": "employer pays the medical aid",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::OK);
+
+    let run_id = create_run(&employer_id, &cookie).await;
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let present = detail["members"][0]["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|blocker| blocker["code"] == "unsupported_deductions_present")
+        .expect("employer-paid medical aid blocks under the present-kinds code")
+        .clone();
+    assert_eq!(
+        present["details"]["kinds"],
+        serde_json::json!(["employer_paid_medical_aid"])
     );
 }

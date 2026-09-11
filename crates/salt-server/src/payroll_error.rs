@@ -234,6 +234,11 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
                 "employmentId": employment_id.to_string(),
             })),
         ),
+        PayrollAppError::VoluntaryDeductionAmountIsZero { index } => Classification::Mapped(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "voluntary_deduction_amount_is_zero",
+            Some(json!({ "index": index })),
+        ),
         // §0.28: the client that lost a Finalize response reads this code
         // and shows the success that already happened, so `details` names
         // every `FinalizedPayroll` the run produced. `finalizedPayrollId`
@@ -936,7 +941,7 @@ const UNSUPPORTED_DEDUCTION_KIND_CODES: &[(UnsupportedDeductionKind, &str)] = &[
         "education_policy",
     ),
     (
-        UnsupportedDeductionKind::EmployerPaidMedicalAid,
+        UnsupportedDeductionKind::EmployerPaidMedicalAidBenefit,
         "employer_paid_medical_aid",
     ),
 ];
@@ -2031,7 +2036,7 @@ mod tests {
             payroll::UnsupportedDeductionKind::ProvidentFund,
             payroll::UnsupportedDeductionKind::RetirementAnnuityFund,
             payroll::UnsupportedDeductionKind::EducationPolicy,
-            payroll::UnsupportedDeductionKind::EmployerPaidMedicalAid,
+            payroll::UnsupportedDeductionKind::EmployerPaidMedicalAidBenefit,
         ] {
             assert_eq!(
                 parse_unsupported_deduction_kind(unsupported_deduction_kind_code(&kind)),
