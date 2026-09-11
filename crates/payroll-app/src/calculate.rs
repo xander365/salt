@@ -105,7 +105,7 @@ pub async fn calculate_payroll_run(
 
     let member_ids = active_member_ids(&mut tx, payroll_run_id).await?;
 
-    let mut earnings_by_member = run_earnings_by_member(&mut tx, payroll_run_id).await?;
+    let mut earnings_by_member = run_pay_lines_by_member(&mut tx, payroll_run_id).await?;
 
     let mut refusals = Vec::new();
     for member_id in member_ids {
@@ -152,15 +152,19 @@ pub async fn calculate_payroll_run(
     Ok(refusals)
 }
 
-/// Every `payroll_run_earning` row for `payroll_run_id`, in line order,
+/// Every `payroll_run_pay_line` row for `payroll_run_id`, in line order,
 /// bucketed by `employment_id`. One query rather than one per member: the
 /// table is already keyed and ordered for exactly this read.
-pub(crate) async fn run_earnings_by_member(
+///
+/// Reads every `source` alike: whether a line was typed directly onto the
+/// run or pre-populated from a reversed Correction target, it is one of this
+/// member's current Earning lines and calculates the same way (§4.5d).
+pub(crate) async fn run_pay_lines_by_member(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<HashMap<String, Vec<EarningInstruction>>, PayrollAppError> {
     let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
-        "SELECT employment_id, earning_json FROM payroll_run_earning
+        "SELECT employment_id, pay_line_json FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid ORDER BY employment_id, line",
     )
     .bind(payroll_run_id.as_str())
@@ -168,9 +172,9 @@ pub(crate) async fn run_earnings_by_member(
     .await?;
 
     let mut by_member: HashMap<String, Vec<EarningInstruction>> = HashMap::new();
-    for (employment_id, earning_json) in rows {
-        let earning: EarningInstruction = serde_json::from_value(earning_json)
-            .expect("payroll_run_earning.earning_json is always a serialized EarningInstruction");
+    for (employment_id, pay_line_json) in rows {
+        let earning: EarningInstruction = serde_json::from_value(pay_line_json)
+            .expect("payroll_run_pay_line.pay_line_json is always a serialized EarningInstruction");
         by_member.entry(employment_id).or_default().push(earning);
     }
     Ok(by_member)

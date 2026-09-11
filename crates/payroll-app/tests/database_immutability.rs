@@ -35,7 +35,7 @@ async fn migrations_create_the_schema_this_design_names(pool: PgPool) {
         "unsupported_deduction_declaration",
         "payroll_run",
         "payroll_run_employment",
-        "payroll_run_earning",
+        "payroll_run_pay_line",
         "working_payroll_calculation",
         "finalized_payroll",
         "live_finalized_payroll",
@@ -280,7 +280,7 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
         "session",
         "payroll_run",
         "payroll_run_employment",
-        "payroll_run_earning",
+        "payroll_run_pay_line",
         "working_payroll_calculation",
         "live_finalized_payroll",
     ];

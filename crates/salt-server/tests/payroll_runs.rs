@@ -260,7 +260,7 @@ fn set_earnings_request(
     let mut builder = Request::builder()
         .method("PUT")
         .uri(format!(
-            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/earnings"
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines"
         ))
         .header(header::COOKIE, cookie)
         .header(header::CONTENT_TYPE, "application/json");
@@ -1902,7 +1902,7 @@ async fn retrying_finalize_on_an_already_finalized_run_answers_409_with_the_fina
 /// of the member's `PayrollInput` re-reads and refuses on, unlike
 /// `payroll_run.status`, which stays `"calculated"` because declaring a
 /// standing fact is Employment-scoped and never reopens a run the way
-/// `set_run_earnings` and a membership removal do.
+/// `set_run_pay_lines` and a membership removal do.
 ///
 /// This lands as `finalization_rebuild_refused`, not one of the three named
 /// mismatch codes: those three name a rebuild that *succeeds* but disagrees

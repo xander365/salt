@@ -1,5 +1,5 @@
 //! Proves the use cases issue #29 introduces: `create_ordinary_payroll_run`,
-//! `remove_employment_from_run` and `set_run_earnings` — the Ordinary half
+//! `remove_employment_from_run` and `set_run_pay_lines` — the Ordinary half
 //! of `docs/domain/payroll-run-persistence.md` §4.6-§4.8 and §4.5d, reached
 //! through the public API a later ticket calls, not raw SQL.
 
@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use payroll::{DayOfMonth, EarningInstruction, EmploymentId, Money, PayPeriod, PeriodEndDay};
 use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunId, SaltDatabase, create_employer,
-    create_employment, create_ordinary_payroll_run, remove_employment_from_run, set_run_earnings,
+    create_employment, create_ordinary_payroll_run, remove_employment_from_run, set_run_pay_lines,
     void_employment,
 };
 use sqlx::{PgPool, Row};
@@ -566,7 +566,7 @@ async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_
     assert_eq!(context, serde_json::json!({ "reason": "on unpaid leave" }));
 }
 
-// ---- SetRunEarnings (§4.5d) ----
+// ---- SetRunPayLines (§4.5d, issue #77) ----
 
 #[sqlx::test]
 async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
@@ -574,12 +574,12 @@ async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
     let earnings = vec![allowance(50_000), allowance(10_000)];
 
-    set_run_earnings(&db, &run_id, &employment_id, earnings.clone())
+    set_run_pay_lines(&db, &run_id, &employment_id, earnings.clone())
         .await
         .unwrap();
 
     let rows: Vec<(i16, serde_json::Value)> = sqlx::query_as(
-        "SELECT line, earning_json FROM payroll_run_earning
+        "SELECT line, pay_line_json FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2 ORDER BY line",
     )
     .bind(run_id.as_str())
@@ -600,17 +600,80 @@ async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     );
 }
 
+/// A line typed directly onto a run is `one_off` (§0's own CONTEXT.md entry
+/// for `StandingPayItem`): never a StandingPayItem, and never recurring.
+#[sqlx::test]
+async fn earning_lines_written_through_set_run_pay_lines_are_sourced_one_off(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
+
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(50_000)])
+        .await
+        .unwrap();
+
+    let source: String = sqlx::query_scalar(
+        "SELECT source FROM payroll_run_pay_line
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2 AND line = 0",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(source, "one_off");
+}
+
+/// The real defect issue #77 closes: today's write left a member's
+/// `WorkingPayrollCalculation` in place, so the run detail's join could show
+/// figures older than the inputs beside them. A write, unconditionally, now
+/// deletes it in the same transaction — even one that resubmits the same
+/// lines, and even one that submits an empty list.
+#[sqlx::test]
+async fn writing_pay_lines_deletes_the_members_stale_working_calculation(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
+    sqlx::query(
+        "INSERT INTO working_payroll_calculation
+            (payroll_run_id, employment_id, payroll_input_json, payroll_rules_json,
+             payroll_calculation_json, calculated_by)
+         VALUES ($1::uuid, $2, '{}', '{}', '{}', 'calculator')",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)])
+        .await
+        .unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM working_payroll_calculation
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "a write must delete the stale WorkingCalculation in the same transaction"
+    );
+}
+
 #[sqlx::test]
 async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    set_run_earnings(&db, &run_id, &employment_id, Vec::new())
+    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new())
         .await
         .unwrap();
 
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM payroll_run_earning
+        "SELECT count(*) FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(run_id.as_str())
@@ -625,16 +688,16 @@ async fn no_earning_lines_is_a_complete_statement_of_no_additional_earnings(pool
 async fn setting_earnings_again_replaces_rather_than_appends(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
-    set_run_earnings(&db, &run_id, &employment_id, vec![allowance(50_000)])
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(50_000)])
         .await
         .unwrap();
 
-    set_run_earnings(&db, &run_id, &employment_id, Vec::new())
+    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new())
         .await
         .unwrap();
 
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM payroll_run_earning
+        "SELECT count(*) FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(run_id.as_str())
@@ -661,7 +724,7 @@ async fn changing_earnings_on_a_calculated_run_reopens_it(pool: PgPool) {
         .await
         .unwrap();
 
-    set_run_earnings(&db, &run_id, &employment_id, vec![allowance(10_000)])
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)])
         .await
         .unwrap();
 
@@ -683,7 +746,7 @@ async fn earnings_cannot_change_after_finalization(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = set_run_earnings(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
+    let result = set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
 
     assert_eq!(
         result,
@@ -700,7 +763,7 @@ async fn setting_earnings_for_an_employment_that_is_not_a_run_member_is_refused(
     let (employer_id, run_id, _) = a_run_with_one_member(&db).await;
     let outsider = an_employment(&db, &employer_id, "person-2", date(2026, 2, 26), None).await;
 
-    let result = set_run_earnings(&db, &run_id, &outsider, vec![allowance(10_000)]).await;
+    let result = set_run_pay_lines(&db, &run_id, &outsider, vec![allowance(10_000)]).await;
 
     assert_eq!(
         result,
@@ -722,7 +785,7 @@ async fn setting_earnings_for_a_removed_member_is_refused(pool: PgPool) {
         .await
         .unwrap();
 
-    let result = set_run_earnings(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
+    let result = set_run_pay_lines(&db, &run_id, &employment_id, vec![allowance(10_000)]).await;
 
     assert_eq!(
         result,
@@ -732,7 +795,7 @@ async fn setting_earnings_for_a_removed_member_is_refused(pool: PgPool) {
         })
     );
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM payroll_run_earning
+        "SELECT count(*) FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(run_id.as_str())

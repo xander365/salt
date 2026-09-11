@@ -56,7 +56,7 @@
 use std::collections::HashMap;
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
-use crate::calculate::{assemble_and_calculate, run_earnings_by_member};
+use crate::calculate::{assemble_and_calculate, run_pay_lines_by_member};
 use crate::correction::{validate_correction_target, verify_null_lineage_is_legitimate};
 use crate::database::{SaltDatabase, is_unique_violation};
 use crate::employer::pay_schedule_for_employer;
@@ -98,7 +98,7 @@ use payroll::{
 /// particulars present" is answered by reading that column, never by
 /// comparing this one against 2. This integer answers a narrower question:
 /// which decoder reads the JSONB blobs (see `KNOWN_JSON_SNAPSHOT_VERSIONS`
-/// and `crate::correction::prepopulate_earnings`).
+/// and `crate::correction::prepopulate_pay_lines`).
 pub const SNAPSHOT_SCHEMA_VERSION: i32 = 3;
 
 /// The `snapshot_schema_version` values whose `payroll_input_json` and
@@ -108,7 +108,7 @@ pub const SNAPSHOT_SCHEMA_VERSION: i32 = 3;
 /// compatible decoder. Version 3's new overtime variants are absent from old
 /// snapshots, so the same backward-compatible decoder also reads it. This
 /// list is the one place [`crate::finalized_payroll_read::calculation_from_snapshot`] and
-/// `crate::correction::prepopulate_earnings` both check against, rather than
+/// `crate::correction::prepopulate_pay_lines` both check against, rather than
 /// each comparing a stored version to [`SNAPSHOT_SCHEMA_VERSION`] directly —
 /// a row is not unreadable merely for having finalized under an earlier
 /// version whose earning lines this build can still decode.
@@ -309,7 +309,7 @@ pub async fn finalize_payroll_run(
         }
     }
 
-    let mut earnings_by_member = run_earnings_by_member(&mut tx, payroll_run_id).await?;
+    let mut earnings_by_member = run_pay_lines_by_member(&mut tx, payroll_run_id).await?;
 
     // Every member is reassembled and compared before anything is written
     // (§5.1): a mismatch on the last member must leave every earlier member

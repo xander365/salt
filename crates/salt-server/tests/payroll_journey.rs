@@ -522,7 +522,7 @@ fn set_earnings_request(
     let mut builder = Request::builder()
         .method("PUT")
         .uri(format!(
-            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/earnings"
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines"
         ))
         .header(header::COOKIE, cookie)
         .header(header::CONTENT_TYPE, "application/json");
@@ -1468,7 +1468,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/finalize",
-            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/earnings",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines",
             "/api/employers/{employer_id}/people/{person_id}/name",
             "/api/employers/{employer_id}/people/{person_id}/particulars",
             "/api/health",

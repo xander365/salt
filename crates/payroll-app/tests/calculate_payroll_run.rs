@@ -12,7 +12,7 @@ use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunCalculationRefusal, PayrollRunId, SaltDatabase,
     calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, record_compensation_terms,
-    remove_employment_from_run, set_run_earnings,
+    remove_employment_from_run, set_run_pay_lines,
 };
 use sqlx::{PgPool, Row};
 
@@ -159,7 +159,7 @@ async fn a_calculation_needs_only_the_one_connection_it_already_holds(pool: PgPo
         create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    set_run_earnings(&db, &run_id, &employment_id, Vec::new())
+    set_run_pay_lines(&db, &run_id, &employment_id, Vec::new())
         .await
         .unwrap();
 
@@ -290,7 +290,7 @@ async fn salt_policy_overtime_hours_are_priced_and_kept_out_of_the_social_securi
         create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,
@@ -350,7 +350,7 @@ async fn an_overtime_line_without_recorded_ordinary_hours_is_refused(pool: PgPoo
         create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 3, 1), "actor")
             .await
             .unwrap();
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,
@@ -408,7 +408,7 @@ async fn correcting_an_earning_reopens_a_calculated_run_and_the_next_calculation
         .unwrap();
     assert_eq!(run_status(&pool, &run_id).await, "calculated");
 
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,
@@ -608,7 +608,7 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
     )
     .await;
     // A second, unresolved member keeps the run Draft across both
-    // calculations, so `set_run_earnings` is still permitted between them.
+    // calculations, so `set_run_pay_lines` is still permitted between them.
     let (_, unresolved) = create_employment(
         &db,
         &employer_id,
@@ -632,7 +632,7 @@ async fn recalculating_overwrites_the_working_calculation_entirely(pool: PgPool)
         .unwrap();
     assert_eq!(before_input["earnings"], serde_json::json!([]));
 
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,

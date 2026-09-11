@@ -75,7 +75,7 @@ pub use operator::{
 pub use payroll_run::{
     PayrollFigures, PayrollRunBlocker, PayrollRunDetail, PayrollRunId, PayrollRunMember,
     PayrollRunSummary, RunStatus, create_correction_run, create_ordinary_payroll_run,
-    get_payroll_run_detail, list_payroll_runs, remove_employment_from_run, set_run_earnings,
+    get_payroll_run_detail, list_payroll_runs, remove_employment_from_run, set_run_pay_lines,
     verify_payroll_run_belongs_to_employer,
 };
 pub use person_particulars::{

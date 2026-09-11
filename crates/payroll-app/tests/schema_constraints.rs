@@ -1082,9 +1082,10 @@ async fn run_scoped_rows_require_run_membership(pool: PgPool) {
 
     for (row, statement) in [
         (
-            "an Earning line",
-            "INSERT INTO payroll_run_earning (payroll_run_id, employment_id, line, earning_json)
-             VALUES ($1::uuid, 'emp-1', 1, '{}')",
+            "a PayLine",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source)
+             VALUES ($1::uuid, 'emp-1', 1, '{}', 'one_off')",
         ),
         (
             "a WorkingCalculation",
@@ -1115,6 +1116,48 @@ async fn run_scoped_rows_require_run_membership(pool: PgPool) {
             "{row} for an Employment the run does not include must be refused"
         );
     }
+}
+
+/// The table is a generic, provenance-carrying PayLine store, not an
+/// Earning-only one (issue #77): nothing about its shape special-cases what
+/// `pay_line_json` holds. A deduction-shaped line is accepted exactly like an
+/// earning-shaped one, with a `source` recorded either way — this is what
+/// lets issue #78 add a voluntary deduction without a second migration on
+/// this table.
+#[sqlx::test]
+async fn a_pay_line_is_accepted_whatever_shape_its_json_carries(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'draft', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert ordinary run");
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("propose emp-1");
+
+    sqlx::query(
+        "INSERT INTO payroll_run_pay_line
+            (payroll_run_id, employment_id, line, pay_line_json, source)
+         VALUES ($1::uuid, 'emp-1', 0,
+                 '{\"VoluntaryDeduction\": {\"amount\": 5000}}', 'one_off')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("a deduction-shaped pay line is not refused for its shape");
 }
 
 /// A FinalizedPayroll names its Employment, its Employer and its PayPeriod

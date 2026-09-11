@@ -22,7 +22,7 @@ use payroll_app::{
     calculate_payroll_run, create_employer, create_employment, create_ordinary_payroll_run,
     declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
     get_finalized_payroll_detail, get_finalized_payroll_traces, get_payroll_run_detail,
-    record_compensation_terms, set_run_earnings,
+    record_compensation_terms, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -349,7 +349,7 @@ async fn the_traces_carry_each_overtime_lines_workings_and_its_salt_policy_stamp
         create_ordinary_payroll_run(&db, &overtime_employer, period(), pay_date(), "actor")
             .await
             .unwrap();
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,

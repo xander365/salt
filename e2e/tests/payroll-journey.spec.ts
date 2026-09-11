@@ -293,7 +293,7 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // the figures as stale.
   await Promise.all([
     page.waitForResponse(
-      (response) => response.request().method() === 'PUT' && response.url().endsWith('/earnings'),
+      (response) => response.request().method() === 'PUT' && response.url().endsWith('/pay-lines'),
     ),
     page.getByRole('button', { name: 'Save earnings' }).click(),
   ]);

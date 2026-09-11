@@ -1,17 +1,17 @@
 //! The four routes issue #53 adds (parent #49 Spec 2 of 3): `POST
 //! .../payroll-runs`, `GET .../payroll-runs`, `GET .../payroll-runs/{r}` and
-//! `PUT .../payroll-runs/{r}/members/{em}/earnings`, plus `POST
-//! .../payroll-runs/{r}/calculate` (issue #55) and `POST
+//! `PUT .../payroll-runs/{r}/members/{em}/pay-lines` (generalized from
+//! `.../earnings` by issue #77, which the old route does not stand beside),
+//! plus `POST .../payroll-runs/{r}/calculate` (issue #55) and `POST
 //! .../payroll-runs/{r}/finalize` (issue #56). An Operator creates the
 //! next Ordinary run for a period, sees the Employer's runs, opens one and
 //! reads every member it proposes to pay, sets one member's earning lines,
 //! calculates the run to see the figures — or the reason — for every
 //! member, and finalizes it into immutable history.
 //!
-//! Earnings is `PUT`, not `POST`: `payroll_app::set_run_earnings` replaces
-//! the member's whole earnings list, and naming that idempotence in the
-//! method is a decision, not a preference (issue #53's own Deep
-//! Instructions).
+//! Pay lines is `PUT`, not `POST`: `payroll_app::set_run_pay_lines` replaces
+//! the member's whole list, and naming that idempotence in the method is a
+//! decision, not a preference (issue #53's own Deep Instructions).
 //!
 //! The request body contains taxable allowance and overtime instructions.
 //! `BasicPay` is derived by the calculator from `CompensationTerms`, so it
@@ -582,19 +582,25 @@ pub(crate) async fn finalize_payroll_run(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SetRunEarningsRequest {
+pub(crate) struct SetRunPayLinesRequest {
     earnings: Vec<EarningLineDto>,
 }
 
-/// `PUT /api/employers/{e}/payroll-runs/{r}/members/{em}/earnings`: replaces
-/// that member's whole Earnings list. A run id belonging to another Employer
-/// is 404, checked here before `payroll_app::set_run_earnings` runs, since
-/// that use case takes no `EmployerId` of its own.
-pub(crate) async fn set_run_earnings(
+/// `PUT /api/employers/{e}/payroll-runs/{r}/members/{em}/pay-lines`: replaces
+/// that member's whole list of pay lines. A run id belonging to another
+/// Employer is 404, checked here before `payroll_app::set_run_pay_lines`
+/// runs, since that use case takes no `EmployerId` of its own.
+///
+/// The request body still names its array `earnings`: every line this route
+/// accepts today is an Earning, `DeductionInstruction` having no producer
+/// yet (issue #78). The route itself is renamed off `.../earnings` because
+/// what it replaces — and what `payroll_app::set_run_pay_lines` stores — is
+/// provenance-carrying pay lines, not an earnings-only concept (issue #77).
+pub(crate) async fn set_run_pay_lines(
     State(state): State<AppState>,
     context: AuthorizedEmployerContext,
     Path((_employer_id, payroll_run_id, employment_id)): Path<(String, String, String)>,
-    body: Result<Json<SetRunEarningsRequest>, JsonRejection>,
+    body: Result<Json<SetRunPayLinesRequest>, JsonRejection>,
 ) -> Result<Json<RecordedResponse>, ApiError> {
     let Json(request) = body.map_err(|_rejection| ApiError::malformed_request())?;
     let employer_id = EmployerId::new(context.employer_id().as_str());
@@ -612,7 +618,7 @@ pub(crate) async fn set_run_earnings(
         .map(parse_earning)
         .collect::<Result<Vec<_>, _>>()?;
 
-    payroll_app::set_run_earnings(state.db(), &payroll_run_id, &employment_id, earnings).await?;
+    payroll_app::set_run_pay_lines(state.db(), &payroll_run_id, &employment_id, earnings).await?;
 
     Ok(Json(RecordedResponse {}))
 }

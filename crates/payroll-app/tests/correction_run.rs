@@ -14,7 +14,7 @@ use payroll_app::{
     correct_compensation_terms, create_correction_run, create_employer, create_employment,
     create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
     finalize_payroll_run, record_compensation_terms, remove_employment_from_run,
-    reverse_finalized_payroll, set_run_earnings,
+    reverse_finalized_payroll, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -990,7 +990,7 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
         create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
             .await
             .unwrap();
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &ordinary_run_id,
         &employment_id,
@@ -1032,8 +1032,8 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
         pre_population,
         EarningPrePopulation::FromTarget { count: 1 }
     );
-    let earning_json: serde_json::Value = sqlx::query_scalar(
-        "SELECT earning_json FROM payroll_run_earning
+    let (pay_line_json, source): (serde_json::Value, String) = sqlx::query_as(
+        "SELECT pay_line_json, source FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(run_id.as_str())
@@ -1042,13 +1042,16 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     .await
     .unwrap();
     assert_eq!(
-        earning_json,
+        pay_line_json,
         serde_json::to_value(EarningInstruction::TaxableAllowance {
             amount: Money::from_cents(20000).unwrap(),
             label: None,
         })
         .unwrap()
     );
+    // Marked as having come from the reversed target's frozen snapshot
+    // (issue #77's own acceptance criteria), not `one_off`.
+    assert_eq!(source, "from_reversed_snapshot");
 }
 
 #[sqlx::test]
@@ -1175,7 +1178,7 @@ async fn an_unreadable_snapshot_schema_degrades_to_no_earnings_and_says_so(pool:
         }
     );
     let earning_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM payroll_run_earning
+        "SELECT count(*) FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(run_id.as_str())

@@ -359,7 +359,7 @@ async fn finalize_a_fully_declared_employment_with_earnings(
                     .method("PUT")
                     .uri(format!(
                         "/api/employers/{employer_id}/payroll-runs/{run_id}/members/\
-                         {employment_id}/earnings"
+                         {employment_id}/pay-lines"
                     ))
                     .header(header::COOKIE, cookie)
                     .header("x-salt-request", "1")

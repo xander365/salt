@@ -1,7 +1,7 @@
 //! Proves the two Employer-scoped read models issue #53 introduces —
 //! `list_payroll_runs` and `get_payroll_run_detail` — and the
 //! `verify_payroll_run_belongs_to_employer` check the earnings route needs
-//! because `set_run_earnings` takes no `EmployerId` of its own.
+//! because `set_run_pay_lines` takes no `EmployerId` of its own.
 //!
 //! Seam A of parent #49's Testing Decisions: every precondition is built
 //! through the same public use cases these functions are read back through,
@@ -18,7 +18,7 @@ use payroll_app::{
     EmploymentPerson, PayrollAppError, PayrollRunBlocker, PayrollRunId, RunStatus, SaltDatabase,
     create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
     declare_unsupported_deduction_status, get_payroll_run_detail, list_payroll_runs,
-    record_compensation_terms, remove_employment_from_run, set_run_earnings,
+    record_compensation_terms, remove_employment_from_run, set_run_pay_lines,
     verify_payroll_run_belongs_to_employer,
 };
 use sqlx::PgPool;
@@ -210,7 +210,7 @@ async fn a_runs_detail_names_every_member_and_their_earning_lines(pool: PgPool) 
     let employer_id = an_employer(&db, "Employer").await;
     let employment_id = an_employment(&db, &employer_id, "Ada Lovelace").await;
     let run_id = a_run(&db, &employer_id, february_period()).await;
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,
@@ -649,7 +649,7 @@ async fn overtime_on_terms_without_ordinary_hours_blocks_but_salary_alone_does_n
         .unwrap();
     assert_eq!(salary_only.members[0].blockers, Vec::new());
 
-    set_run_earnings(
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,

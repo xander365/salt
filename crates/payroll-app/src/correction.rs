@@ -132,7 +132,7 @@ pub async fn add_employment_to_correction_run(
 
     let pre_population = match target_snapshot {
         Some((schema_version, input_json)) => {
-            prepopulate_earnings(
+            prepopulate_pay_lines(
                 &mut tx,
                 payroll_run_id,
                 employment_id,
@@ -168,7 +168,7 @@ pub async fn add_employment_to_correction_run(
 /// Correction `payroll_run_id` — exists, names this Employment, this
 /// Employer and this run's own period end, and carries a `Reversal` (§4.8)
 /// — and returns its frozen snapshot version and input for
-/// [`prepopulate_earnings`] to read.
+/// [`prepopulate_pay_lines`] to read.
 ///
 /// Run twice: here, so a caller learns at once that its target is wrong, and
 /// again inside the finalization transaction (§5.3 step 3), because that is
@@ -222,12 +222,14 @@ pub(crate) async fn validate_correction_target(
     Ok((schema_version, input_json))
 }
 
-/// Copies `input_json`'s `earnings` array into `payroll_run_earning` rows
-/// for `(payroll_run_id, employment_id)`, when `schema_version` is one this
-/// build reads. Only the `earnings` field is read — never the whole frozen
-/// `PayrollInput` — because that is the only field this pre-population
-/// exists to carry forward (§4.5d); the rest of a Correction's
-/// `PayrollInput` comes fresh from current master data (§6.5).
+/// Copies `input_json`'s `earnings` array into `payroll_run_pay_line` rows
+/// for `(payroll_run_id, employment_id)`, each marked `source =
+/// 'from_reversed_snapshot'` so the run detail can say where it came from,
+/// when `schema_version` is one this build reads. Only the `earnings` field
+/// is read — never the whole frozen `PayrollInput` — because that is the
+/// only field this pre-population exists to carry forward (§4.5d); the rest
+/// of a Correction's `PayrollInput` comes fresh from current master data
+/// (§6.5).
 ///
 /// Checked against [`crate::finalize::KNOWN_JSON_SNAPSHOT_VERSIONS`], never
 /// against `schema_version != SNAPSHOT_SCHEMA_VERSION` (issue #73/#74):
@@ -237,7 +239,7 @@ pub(crate) async fn validate_correction_target(
 /// versions 1 and 2 are both readable here — "the version freshly written"
 /// and "a version whose `earnings` field this build can decode" are separate
 /// questions.
-async fn prepopulate_earnings(
+async fn prepopulate_pay_lines(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
@@ -271,16 +273,17 @@ async fn prepopulate_earnings(
     for (index, earning) in earnings.iter().enumerate() {
         let line = i16::try_from(index)
             .expect("a payroll run holds far fewer than i16::MAX earning lines");
-        let earning_json =
+        let pay_line_json =
             serde_json::to_value(earning).expect("EarningInstruction always serializes");
         sqlx::query(
-            "INSERT INTO payroll_run_earning (payroll_run_id, employment_id, line, earning_json)
-             VALUES ($1::uuid, $2, $3, $4)",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source)
+             VALUES ($1::uuid, $2, $3, $4, 'from_reversed_snapshot')",
         )
         .bind(payroll_run_id.as_str())
         .bind(employment_id.as_str())
         .bind(line)
-        .bind(earning_json)
+        .bind(pay_line_json)
         .execute(&mut **tx)
         .await?;
     }

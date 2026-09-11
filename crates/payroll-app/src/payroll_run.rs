@@ -1,5 +1,5 @@
 //! `CreateOrdinaryPayrollRun`, `RemoveEmploymentFromRun` and
-//! `SetRunEarnings` — the Ordinary half of §4.6-§4.8 and §4.5d, §12.
+//! `SetRunPayLines` — the Ordinary half of §4.6-§4.8 and §4.5d, §12.
 //! `CreateCorrectionRun`, calculation and finalization are separate, later
 //! use cases: Ordinary and Correction membership are opposites (§4.8,
 //! ADR-0015), so a single entry point taking a `kind` would branch on its
@@ -619,16 +619,26 @@ pub async fn remove_employment_from_run(
 }
 
 /// Replaces the classified `Earning` lines held for `(payroll_run_id,
-/// employment_id)` with `earnings`, in the order given (§4.5d). An empty
-/// `earnings` is a complete statement — no additional Earnings this period —
-/// and clears whatever was there, rather than being refused or ignored:
-/// Earnings are the Employer's own act of paying, so there is no unasked
-/// question here to confirm-none the way `PriorEmployment` and
-/// `UnsupportedDeductionStatus` have one.
+/// employment_id)` with `earnings`, in the order given (§4.5d), each stored
+/// with `source = 'one_off'` — a line typed directly onto a run, never a
+/// StandingPayItem, and never recurring. An empty `earnings` is a complete
+/// statement — no additional Earnings this period — and clears whatever was
+/// there, rather than being refused or ignored: Earnings are the Employer's
+/// own act of paying, so there is no unasked question here to confirm-none
+/// the way `PriorEmployment` and `UnsupportedDeductionStatus` have one.
 ///
 /// An Employment that is not an *active* member of the run is refused too:
 /// one that was never proposed, and one that was removed with a reason.
-pub async fn set_run_earnings(
+///
+/// **Closes the run detail's stale-figures defect (issue #77).** Writing,
+/// changing or clearing a member's lines deletes that member's
+/// `WorkingPayrollCalculation` in this same transaction, unconditionally —
+/// so the run detail's join can never again show figures older than the
+/// inputs beside them. A member whose calculation this leaves absent is
+/// exactly `Draft`'s own definition: the stored calculations are no longer
+/// current the moment a line changes, and `lock_and_reopen_run` above has
+/// already put the run back there.
+pub async fn set_run_pay_lines(
     db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
@@ -666,9 +676,13 @@ pub async fn set_run_earnings(
 
     // Replace, not merge: the whole point of §4.5d is that this call states
     // the complete list, so a prior call's leftover lines must not survive
-    // alongside a shorter new list.
+    // alongside a shorter new list. Every source is cleared, not only
+    // 'one_off': this call states the complete truth about the member's
+    // lines from here on, so a line a Correction run pre-populated from a
+    // reversed snapshot is replaced exactly like one typed by hand once this
+    // is what the caller says the lines are.
     sqlx::query(
-        "DELETE FROM payroll_run_earning WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+        "DELETE FROM payroll_run_pay_line WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(payroll_run_id.as_str())
     .bind(employment_id.as_str())
@@ -678,19 +692,34 @@ pub async fn set_run_earnings(
     for (index, earning) in earnings.iter().enumerate() {
         let line = i16::try_from(index)
             .expect("a payroll run holds far fewer than i16::MAX earning lines");
-        let earning_json =
+        let pay_line_json =
             serde_json::to_value(earning).expect("EarningInstruction always serializes");
         sqlx::query(
-            "INSERT INTO payroll_run_earning (payroll_run_id, employment_id, line, earning_json)
-             VALUES ($1::uuid, $2, $3, $4)",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source)
+             VALUES ($1::uuid, $2, $3, $4, 'one_off')",
         )
         .bind(payroll_run_id.as_str())
         .bind(employment_id.as_str())
         .bind(line)
-        .bind(earning_json)
+        .bind(pay_line_json)
         .execute(&mut *tx)
         .await?;
     }
+
+    // The real defect this ticket closes (§0's own words): today's write left
+    // the WorkingCalculation in place, so the run detail's join could show
+    // figures older than the inputs beside them. Unconditional, in the same
+    // transaction as the replace above, so no commit can ever leave a stale
+    // calculation beside a line that postdates it.
+    sqlx::query(
+        "DELETE FROM working_payroll_calculation
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     Ok(())
@@ -715,7 +744,7 @@ fn parse_payroll_run_id(payroll_run_id: &str) -> Result<PayrollRunId, PayrollApp
 /// Confirms `payroll_run_id` belongs to `employer_id`, refusing exactly like
 /// a missing run when it does not (ADR-0017), and hands back the wrapped
 /// [`PayrollRunId`]. Mirrors [`crate::verify_employment_belongs_to_employer`],
-/// for the same reason: [`set_run_earnings`] takes no `EmployerId` of its
+/// for the same reason: [`set_run_pay_lines`] takes no `EmployerId` of its
 /// own, so a handler that only holds one from `AuthorizedEmployerContext`
 /// needs this check first (issue #53).
 ///
@@ -1016,10 +1045,10 @@ pub async fn get_payroll_run_detail(
            ON person.id = employment.person_id
           AND person.employer_id = employment.employer_id
          LEFT JOIN LATERAL (
-             SELECT jsonb_agg(earning_json ORDER BY line) AS earning_jsons
-             FROM payroll_run_earning
-             WHERE payroll_run_earning.payroll_run_id = payroll_run_employment.payroll_run_id
-               AND payroll_run_earning.employment_id = payroll_run_employment.employment_id
+             SELECT jsonb_agg(pay_line_json ORDER BY line) AS earning_jsons
+             FROM payroll_run_pay_line
+             WHERE payroll_run_pay_line.payroll_run_id = payroll_run_employment.payroll_run_id
+               AND payroll_run_pay_line.employment_id = payroll_run_employment.employment_id
          ) AS earnings ON TRUE
          LEFT JOIN working_payroll_calculation
            ON working_payroll_calculation.payroll_run_id = payroll_run_employment.payroll_run_id
@@ -1042,7 +1071,7 @@ pub async fn get_payroll_run_detail(
         let earnings = earning_jsons
             .map(|value| {
                 serde_json::from_value::<Vec<EarningInstruction>>(value).expect(
-                    "payroll_run_earning.earning_json always serializes an EarningInstruction",
+                    "payroll_run_pay_line.pay_line_json always serializes an EarningInstruction",
                 )
             })
             .unwrap_or_default();

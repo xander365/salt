@@ -76,15 +76,22 @@ export function useCreatePayrollRun() {
 }
 
 /**
- * `PUT .../payroll-runs/{r}/members/{em}/earnings` (issue #65): replaces one
- * member's whole Earnings list, matching `set_run_earnings`'s own contract —
- * the caller sends every line every time, never a delta.
+ * `PUT .../payroll-runs/{r}/members/{em}/pay-lines` (issue #65, route
+ * generalized by issue #77): replaces one member's whole list of pay lines,
+ * matching `set_run_pay_lines`'s own contract — the caller sends every line
+ * every time, never a delta. The request still names its array `earnings`:
+ * every line this form can send today is an Earning.
  *
  * Invalidates the run detail on success rather than patching it locally.
  * That refetch is a plain `GET`, which always answers `refusal: null` for
  * every member (§0.31) — so editing one member's earnings honestly retires
  * whatever the last Calculate said about every member, not just this one.
  * Nothing here remembers a `refusal` past the response that carried it.
+ *
+ * The refetch also carries the true `figures` state: writing pay lines now
+ * always clears the member's stored calculation server-side (issue #77), so
+ * a reload after this call shows the figures absent, not merely a client-
+ * side stale warning.
  */
 export function useSetRunEarnings(payrollRunId: string) {
   const employerId = useEmployerId();
@@ -99,7 +106,7 @@ export function useSetRunEarnings(payrollRunId: string) {
       earnings: EarningLineDto[];
     }) =>
       apiFetch<RecordedResponse>(
-        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/members/${encodeURIComponent(employmentId)}/earnings`,
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/members/${encodeURIComponent(employmentId)}/pay-lines`,
         { method: 'PUT', body: JSON.stringify({ earnings }) },
       ),
     onSuccess: () =>

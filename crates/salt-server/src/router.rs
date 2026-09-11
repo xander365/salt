@@ -108,8 +108,8 @@ fn production_routes() -> Router<AppState> {
             get(payroll_runs::get_payroll_run),
         )
         .route(
-            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/earnings",
-            axum::routing::put(payroll_runs::set_run_earnings),
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines",
+            axum::routing::put(payroll_runs::set_run_pay_lines),
         )
         .route(
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
