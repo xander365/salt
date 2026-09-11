@@ -1160,6 +1160,157 @@ async fn a_pay_line_is_accepted_whatever_shape_its_json_carries(pool: PgPool) {
     .expect("a deduction-shaped pay line is not refused for its shape");
 }
 
+/// Provenance rules live in SQL, not in discipline (parent #70 §D-6,
+/// migration 0038): a line names a StandingPayItem exactly when it is
+/// `standing`; only a standing line carries an override or a removal; a
+/// removal always says why; and one StandingPayItem appears at most once per
+/// member of a run, which is what makes #79's proposal and refresh
+/// idempotent however often they are retried.
+#[sqlx::test]
+async fn pay_line_provenance_is_enforced_by_the_schema(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    an_employer_and_two_employments(&mut conn).await;
+
+    let run_id: String = sqlx::query_scalar(
+        "INSERT INTO payroll_run
+            (employer_id, period_start, period_end, pay_date, kind, status, created_by)
+         VALUES
+            ('employer-1', '2026-03-01', '2026-03-31', '2026-04-05', 'ordinary', 'draft', 'actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert ordinary run");
+    sqlx::query(
+        "INSERT INTO payroll_run_employment (payroll_run_id, employment_id)
+         VALUES ($1::uuid, 'emp-1')",
+    )
+    .bind(&run_id)
+    .execute(&mut *conn)
+    .await
+    .expect("propose emp-1");
+
+    const ITEM: &str = "7d4f6a3e-0000-4000-8000-000000000001";
+    const OTHER_ITEM: &str = "7d4f6a3e-0000-4000-8000-000000000002";
+
+    for (row, statement) in [
+        (
+            "a one-off line naming a StandingPayItem",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source, standing_pay_item_id)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'one_off', $2::uuid)",
+        ),
+        (
+            "a snapshot line naming a StandingPayItem",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source, standing_pay_item_id)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'from_reversed_snapshot', $2::uuid)",
+        ),
+        (
+            "a standing line naming no StandingPayItem",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'standing')",
+        ),
+        (
+            "an override on a one-off line",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source, override_reason)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'one_off', 'halved this month')",
+        ),
+        (
+            "a removed snapshot line",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source, removed,
+                 removed_reason)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'from_reversed_snapshot', TRUE, 'paused')",
+        ),
+        (
+            "a removed standing line with no reason",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source,
+                 standing_pay_item_id, removed)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'standing', $2::uuid, TRUE)",
+        ),
+        (
+            "a removal reason on a line that is not removed",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source,
+                 standing_pay_item_id, removed_reason)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'standing', $2::uuid, 'paused')",
+        ),
+        (
+            "a source outside the three",
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source)
+             VALUES ($1::uuid, 'emp-1', 10, '{}', 'typed')",
+        ),
+    ] {
+        let result = sqlx::query(statement)
+            .bind(&run_id)
+            .bind(ITEM)
+            .execute(&mut *conn)
+            .await;
+        assert!(result.is_err(), "{row} must be refused");
+    }
+
+    // What the rules permit: a plain standing line, an overridden one and a
+    // reasoned removal, beside two one-off lines the unique index ignores.
+    for (line, source, item, override_reason, removed, removed_reason) in [
+        (
+            0_i16,
+            "standing",
+            Some(ITEM),
+            Some("halved this month"),
+            false,
+            None,
+        ),
+        (
+            1,
+            "standing",
+            Some(OTHER_ITEM),
+            None,
+            true,
+            Some("paused this month"),
+        ),
+        (2, "one_off", None, None, false, None),
+        (3, "one_off", None, None, false, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source,
+                 standing_pay_item_id, override_reason, removed, removed_reason)
+             VALUES ($1::uuid, 'emp-1', $2, '{}', $3, $4::uuid, $5, $6, $7)",
+        )
+        .bind(&run_id)
+        .bind(line)
+        .bind(source)
+        .bind(item)
+        .bind(override_reason)
+        .bind(removed)
+        .bind(removed_reason)
+        .execute(&mut *conn)
+        .await
+        .unwrap_or_else(|error| panic!("line {line} is a legitimate pay line: {error}"));
+    }
+
+    // The partial unique index: a retried proposal cannot put the same
+    // StandingPayItem on this member twice, whatever line number it tries.
+    let duplicate = sqlx::query(
+        "INSERT INTO payroll_run_pay_line
+            (payroll_run_id, employment_id, line, pay_line_json, source, standing_pay_item_id)
+         VALUES ($1::uuid, 'emp-1', 4, '{}', 'standing', $2::uuid)",
+    )
+    .bind(&run_id)
+    .bind(ITEM)
+    .execute(&mut *conn)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "a second line for one StandingPayItem must be refused"
+    );
+}
+
 /// A FinalizedPayroll names its Employment, its Employer and its PayPeriod
 /// independently of the run it came from. No role may correct this table, so a
 /// disagreement between those columns and the run would be permanent.

@@ -1,6 +1,6 @@
 // One member's earnings editor on a payroll run's own screen (issue #65,
-// §0.22/§0.31; overtime added by issue #76). `PUT .../members/{em}/earnings`
-// replaces the member's whole Earnings list, so this form always sends every
+// §0.22/§0.31; overtime added by issue #76). `PUT .../members/{em}/pay-lines`
+// (issue #77) replaces the member's whole list, so this form always sends every
 // line it holds, not just the one an Operator just typed — editing twice this
 // way can never leave a stale line behind (issue #65's own first acceptance
 // criterion).
@@ -25,7 +25,9 @@
 // `Figures` stale (`PayrollRun.tsx`'s own `onChanged`, issue #88): they were
 // true of the last Calculate, and this form just changed what the next one
 // will see. Saving the same lines again is not a change and therefore does
-// not raise a false stale warning.
+// not raise a false stale warning — and the server agrees, writing nothing
+// for it (issue #77). Lines are sent without a `source`: where each line came
+// from is the server's record, not something this form can claim.
 
 import { type SubmitEvent, useId, useState } from 'react';
 import { Plus, X } from 'lucide-react';
@@ -33,7 +35,7 @@ import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type { EarningLineDto, OvertimeLineDto, TaxableAllowanceLineDto } from '../../api/types';
 import { formatCents, parseCentsInput } from '../../money';
-import { useSetRunEarnings } from '../../payrollRuns/usePayrollRuns';
+import { useSetRunPayLines } from '../../payrollRuns/usePayrollRuns';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
@@ -140,7 +142,7 @@ export function EarningsForm({
   earnings: EarningLineDto[];
   onChanged?: () => void;
 }) {
-  const setEarnings = useSetRunEarnings(payrollRunId);
+  const setEarnings = useSetRunPayLines(payrollRunId);
 
   const [allowances, setAllowances] = useState(() =>
     earnings
@@ -247,13 +249,7 @@ export function EarningsForm({
         });
         return null;
       }
-      const line: EarningLineDto = {
-        kind: 'taxableAllowance',
-        amountCents: cents,
-        label,
-        source: 'one_off',
-      };
-      request.push({ ...line, source: sourceFor(line, earnings) });
+      request.push({ kind: 'taxableAllowance', amountCents: cents, label });
     }
 
     for (const [index, overtime] of overtimes.entries()) {
@@ -287,14 +283,12 @@ export function EarningsForm({
         });
         return null;
       }
-      const line: EarningLineDto = {
+      request.push({
         kind: 'overtime',
         hours,
         multiplier: overtime.multiplier,
         label: label.length === 0 ? null : label,
-        source: 'one_off',
-      };
-      request.push({ ...line, source: sourceFor(line, earnings) });
+      });
     }
 
     return request;
@@ -526,12 +520,6 @@ export function EarningsForm({
       </p>
     </form>
   );
-}
-
-/** Retain a line's recorded provenance only while its instruction is exactly
- * unchanged. An edited or newly added instruction is a direct one-off line. */
-function sourceFor(line: EarningLineDto, stored: EarningLineDto[]): EarningLineDto['source'] {
-  return stored.find((candidate) => sameLine(line, candidate))?.source ?? 'one_off';
 }
 
 /** Whether a line about to be sent is the same one already stored, so saving

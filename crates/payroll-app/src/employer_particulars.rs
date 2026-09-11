@@ -224,7 +224,7 @@ pub async fn get_employer_particulars(
 /// generalized to a fact with no `effective_from` to derive a span from: the
 /// divergence this write is checked against is every Live finalized
 /// `PayPeriod` this Employer has, not a dated slice of them
-/// ([`live_finalized_periods_for_employer`]) — the same warning-never-a-
+/// (`live_finalized_periods_for_employer`) — the same warning-never-a-
 /// refusal contract, the same acknowledgement guard, and one
 /// `EmployerParticularsCorrected` `ActionLog` entry as the record of the
 /// acknowledgement (no second sign-off table).

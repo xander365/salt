@@ -221,17 +221,8 @@ fn set_employer_particulars_request(
     employer_id: &str,
     cookie: &str,
     salt_header: bool,
-    mut body: Value,
+    body: Value,
 ) -> Request<Body> {
-    if let Some(earnings) = body.get_mut("earnings").and_then(Value::as_array_mut) {
-        for earning in earnings {
-            if let Some(object) = earning.as_object_mut() {
-                object
-                    .entry("source".to_owned())
-                    .or_insert_with(|| Value::String("one_off".to_owned()));
-            }
-        }
-    }
     let mut builder = Request::builder()
         .method("PUT")
         .uri(format!("/api/employers/{employer_id}/particulars"))

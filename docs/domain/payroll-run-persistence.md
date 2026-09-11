@@ -415,13 +415,39 @@ representable (`unsupported_deduction.rs`), so `Present` can never collapse into
 **It does not freeze** (§4.0): it is a gate read once per period and frozen into
 that period's snapshot. Corrections follow §6.5.
 
-### 4.5d Run earnings
+### 4.5d Run pay lines
 
 ```text
-PayrollRunEarning
-- PayrollRunId, EmploymentId, line
-- the EarningInstruction: TaxableAllowance amount and human label
+PayrollRunPayLine                              (payroll_run_pay_line, issue #77)
+- PayrollRunId, EmploymentId, line             -- PK, ordered
+- pay_line_json          the classified instruction
+- source                 one_off | from_reversed_snapshot | standing
+- standing_pay_item_id   UUID, set iff source = standing
+- override_reason        only on a standing line
+- removed, removed_reason  only on a standing line; a removal states why
 ```
+
+Today every line is an `EarningInstruction` — a labelled `TaxableAllowance` or
+`Overtime` hours at a multiplier. The table holds deductions beside earnings
+once a deduction kind exists (issue #78); nothing in its shape is
+earning-specific. `standing` and its columns are written by issue #79; the
+schema already enforces their rules (migration 0038), including a partial
+unique index on `(payroll_run_id, employment_id, standing_pay_item_id)` that
+makes proposal and refresh idempotent.
+
+**Provenance is Salt's record, not the caller's claim.** `PUT
+.../members/{em}/pay-lines` (which replaced `PUT .../earnings`) carries
+instructions only. A line is `from_reversed_snapshot` exactly while it is one
+of the lines a Correction's pre-population copied, matched one-for-one;
+every other line written through the route is `one_off`. A resave of
+untouched lines therefore cannot wipe where they came from.
+
+**A figure is never older than the inputs beside it.** A write that changes a
+member's lines deletes that member's `WorkingPayrollCalculation` in the same
+transaction and reopens the run. The run detail reports each member's
+`calculation_state` — `current`, `not_calculated`, or `pay_lines_saved` when a
+write retired figures that existed — so the worksheet can say why figures are
+absent. A write that states exactly the stored lines writes nothing.
 
 **Run-scoped**, because that is what an allowance is: a fact about paying this
 Employment for this period. `BasicPay` is never here — `calculate` adds it from
@@ -438,10 +464,11 @@ confirm-none. A per-employee, per-month "no allowances this period" checkbox
 would fire for every employee in every run and enforce no invariant — the
 ceremony ADR-0010 rejected.
 
-A Correction run's earnings are pre-populated from the reversed
-`FinalizedPayroll`'s frozen `payroll_input_json` and then edited (§6.3). Where
-that snapshot's `snapshot_schema_version` is not one the running Salt
-deserializes, the run starts with no earning lines and says so. ADR-0004
+A Correction run's lines are pre-populated from the reversed
+`FinalizedPayroll`'s frozen `payroll_input_json`, marked
+`from_reversed_snapshot`, and then edited (§6.3). Where that snapshot's
+`snapshot_schema_version` is not one the running Salt deserializes, the run
+starts with no lines and says so. ADR-0004
 promises history is explainable, never that every old snapshot deserializes
 forever, so the convenience has to degrade honestly rather than pretend.
 
@@ -1315,7 +1342,7 @@ GetFinalizedPayroll         BuildYearToDateContext
 
 RecordOpeningBalance                  DeclarePriorEmployment
 DeclareUnsupportedDeductionStatus     CorrectCompensationTerms
-SetRunEarnings
+SetRunPayLines
 ```
 
 `CreateOrdinaryPayrollRun` and `CreateCorrectionRun` are separate functions

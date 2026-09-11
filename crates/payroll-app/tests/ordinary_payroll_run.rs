@@ -625,9 +625,9 @@ async fn earning_lines_written_through_set_run_pay_lines_are_sourced_one_off(poo
 
 /// The real defect issue #77 closes: today's write left a member's
 /// `WorkingPayrollCalculation` in place, so the run detail's join could show
-/// figures older than the inputs beside them. A write, unconditionally, now
-/// deletes it in the same transaction — even one that resubmits the same
-/// lines, and even one that submits an empty list.
+/// figures older than the inputs beside them. A write that changes the lines
+/// now deletes it in the same transaction (`pay_line_staleness.rs` proves
+/// the clearing and resubmitting cases through real calculations).
 #[sqlx::test]
 async fn writing_pay_lines_deletes_the_members_stale_working_calculation(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());

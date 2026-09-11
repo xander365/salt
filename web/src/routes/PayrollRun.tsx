@@ -104,7 +104,7 @@ function blockerFixPath(
 }
 
 /** A finalized run's Earnings, read back rather than edited. `PUT
- * .../earnings` refuses once history is written (`payroll_run_already_finalized`),
+ * .../pay-lines` refuses once history is written (`payroll_run_already_finalized`),
  * so offering the editor here would be a form whose every save is a refusal
  * — the same reason Finalize and Calculate are both gone by this point. */
 function FinalizedEarnings({ earnings }: { earnings: EarningLineDto[] }) {
@@ -211,9 +211,12 @@ function Member({
           edit, and a number an Operator can still read is a number they can
           still act on — so the only honest thing on screen is the sentence
           saying they are gone until Calculate runs again. */}
-      {member.figures === null && member.figuresAbsence === 'pay_lines_changed' ? (
+      {/* `pay_lines_saved` is the server's own record that a save retired
+          this member's figures (issue #77), so the sentence survives a
+          reload; `figuresAreStale` covers the moment before the refetch. */}
+      {member.calculationState === 'pay_lines_saved' ? (
         <StaleBanner>
-          Pay lines changed since these figures were calculated. The figures are hidden until you
+          Earnings changed since these figures were calculated. The figures are hidden until you
           calculate again.
         </StaleBanner>
       ) : member.figures === null ? (

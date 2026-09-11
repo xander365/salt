@@ -22,11 +22,21 @@ use payroll::{
     TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
 };
 
-/// Why a member currently has no figures in the payroll-run detail.
+/// Whether a member's figures in the run detail are current, and why not
+/// when they are absent (§D-6's `calculation_state`, issue #77). A figure
+/// on screen is never older than the inputs beside it, so an absent
+/// calculation always says which of these two it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PayrollFiguresAbsence {
+pub enum CalculationState {
+    /// A `WorkingPayrollCalculation` exists, and no pay-line write has
+    /// happened since it was stored.
+    Current,
+    /// No calculation is stored: the member has not been calculated yet, or
+    /// the last Calculate refused them.
     NotCalculated,
-    PayLinesChanged,
+    /// A pay-line write retired this member's figures. They stay hidden
+    /// until the next Calculate.
+    PayLinesSaved,
 }
 
 /// Where a run pay line came from. The database's `standing` source arrives
@@ -59,15 +69,6 @@ impl PayLineSource {
 pub struct RunPayLine {
     pub earning: EarningInstruction,
     pub source: PayLineSource,
-}
-
-impl From<EarningInstruction> for RunPayLine {
-    fn from(earning: EarningInstruction) -> Self {
-        RunPayLine {
-            earning,
-            source: PayLineSource::OneOff,
-        }
-    }
 }
 
 app_id! {
@@ -546,6 +547,17 @@ pub(crate) async fn lock_and_reopen_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<LockedRun, PayrollAppError> {
+    let run = lock_editable_run(tx, payroll_run_id).await?;
+    reopen_run(tx, payroll_run_id).await?;
+    Ok(run)
+}
+
+/// The lock-and-refuse half of [`lock_and_reopen_run`], for a caller that
+/// must decide whether it changes anything before it reopens the run.
+async fn lock_editable_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<LockedRun, PayrollAppError> {
     let run = lock_run(tx, payroll_run_id).await?;
     if run.status == RunStatus::Finalized {
         let finalized_payrolls =
@@ -555,15 +567,21 @@ pub(crate) async fn lock_and_reopen_run(
             finalized_payrolls,
         });
     }
+    Ok(run)
+}
 
+/// Puts a locked, non-finalized run back to `Draft`.
+async fn reopen_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+) -> Result<(), PayrollAppError> {
     sqlx::query(
         "UPDATE payroll_run SET status = 'draft' WHERE id = $1::uuid AND status <> 'draft'",
     )
     .bind(payroll_run_id.as_str())
     .execute(&mut **tx)
     .await?;
-
-    Ok(run)
+    Ok(())
 }
 
 /// Removes `employment_id` from `payroll_run_id`'s working membership.
@@ -667,52 +685,39 @@ pub async fn remove_employment_from_run(
 }
 
 /// Replaces the classified `Earning` lines held for `(payroll_run_id,
-/// employment_id)` with `earnings`, in the order given (§4.5d), each stored
-/// with `source = 'one_off'` — a line typed directly onto a run, never a
-/// StandingPayItem, and never recurring. An empty `earnings` is a complete
-/// statement — no additional Earnings this period — and clears whatever was
-/// there, rather than being refused or ignored: Earnings are the Employer's
-/// own act of paying, so there is no unasked question here to confirm-none
-/// the way `PriorEmployment` and `UnsupportedDeductionStatus` have one.
+/// employment_id)` with `earnings`, in the order given (§4.5d). An empty
+/// `earnings` is a complete statement — no additional Earnings this period —
+/// and clears whatever was there, rather than being refused or ignored:
+/// Earnings are the Employer's own act of paying, so there is no unasked
+/// question here to confirm-none the way `PriorEmployment` and
+/// `UnsupportedDeductionStatus` have one.
 ///
 /// An Employment that is not an *active* member of the run is refused too:
 /// one that was never proposed, and one that was removed with a reason.
 ///
+/// **Provenance is recorded by Salt, never asserted by the caller.** The
+/// caller states only the instructions. A line that is exactly one this
+/// member's Correction pre-population copied from the reversed snapshot
+/// keeps `source = 'from_reversed_snapshot'` — so a resave of untouched
+/// lines cannot silently rewrite where they came from (§D-10) — and every
+/// other line is `one_off`: typed directly onto this run, never recurring.
+/// Matching is one-for-one, so a second copy of a copied line is one-off.
+///
 /// **Closes the run detail's stale-figures defect (issue #77).** Writing,
 /// changing or clearing a member's lines deletes that member's
-/// `WorkingPayrollCalculation` in this same transaction, unconditionally —
-/// so the run detail's join can never again show figures older than the
-/// inputs beside them. A member whose calculation this leaves absent is
-/// exactly `Draft`'s own definition: the stored calculations are no longer
-/// current the moment a line changes, and `lock_and_reopen_run` above has
-/// already put the run back there.
+/// `WorkingPayrollCalculation` in this same transaction — so the run
+/// detail's join can never again show figures older than the inputs beside
+/// them — and puts the run back to `Draft`. A call that states exactly the
+/// lines already stored writes nothing at all, so it neither retires true
+/// figures nor reopens the run.
 pub async fn set_run_pay_lines(
     db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
     employment_id: &EmploymentId,
     earnings: Vec<EarningInstruction>,
 ) -> Result<(), PayrollAppError> {
-    set_run_pay_lines_with_provenance(
-        db,
-        payroll_run_id,
-        employment_id,
-        earnings.into_iter().map(RunPayLine::from).collect(),
-    )
-    .await
-}
-
-/// Replaces a member's pay lines while retaining each line's provenance.
-/// Callers that type new lines directly should use [`set_run_pay_lines`]; the
-/// browser uses this entry point to faithfully send back a correction line
-/// that was pre-populated from a reversed frozen snapshot.
-pub async fn set_run_pay_lines_with_provenance(
-    db: &SaltDatabase,
-    payroll_run_id: &PayrollRunId,
-    employment_id: &EmploymentId,
-    mut pay_lines: Vec<RunPayLine>,
-) -> Result<(), PayrollAppError> {
     let mut tx = db.pool().begin().await?;
-    lock_and_reopen_run(&mut tx, payroll_run_id).await?;
+    lock_editable_run(&mut tx, payroll_run_id).await?;
 
     // Earning lines are a fact about paying this Employment for this
     // period, so a run that is not paying it has nowhere to put them. The
@@ -741,37 +746,58 @@ pub async fn set_run_pay_lines_with_provenance(
         });
     }
 
-    // Provenance is recorded by Salt, not asserted by an HTTP caller. A
-    // correction line keeps its frozen-snapshot source only when the exact
-    // instruction still exists; an edited or new instruction is one-off.
-    let snapshot_jsons: Vec<serde_json::Value> = sqlx::query_scalar(
-        "SELECT pay_line_json FROM payroll_run_pay_line
+    // A copied line keeps its frozen-snapshot source only while the exact
+    // instruction is still stated; an edited or new instruction is one-off.
+    let stored_rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
+        "SELECT pay_line_json, source FROM payroll_run_pay_line
          WHERE payroll_run_id = $1::uuid AND employment_id = $2
-           AND source = 'from_reversed_snapshot'
          ORDER BY line",
     )
     .bind(payroll_run_id.as_str())
     .bind(employment_id.as_str())
     .fetch_all(&mut *tx)
     .await?;
-    let mut remaining_snapshot_earnings: Vec<EarningInstruction> = snapshot_jsons
+    let stored: Vec<RunPayLine> = stored_rows
         .into_iter()
-        .map(|value| {
-            serde_json::from_value(value)
-                .expect("payroll_run_pay_line.pay_line_json is always an EarningInstruction")
+        .map(|(pay_line_json, source)| RunPayLine {
+            earning: serde_json::from_value(pay_line_json)
+                .expect("payroll_run_pay_line.pay_line_json is always an EarningInstruction"),
+            source: PayLineSource::from_column(&source),
         })
         .collect();
-    for pay_line in &mut pay_lines {
-        if let Some(index) = remaining_snapshot_earnings
-            .iter()
-            .position(|earning| earning == &pay_line.earning)
-        {
-            pay_line.source = PayLineSource::FromReversedSnapshot;
-            remaining_snapshot_earnings.remove(index);
-        } else {
-            pay_line.source = PayLineSource::OneOff;
-        }
+    let mut remaining_snapshot_earnings: Vec<&EarningInstruction> = stored
+        .iter()
+        .filter(|line| line.source == PayLineSource::FromReversedSnapshot)
+        .map(|line| &line.earning)
+        .collect();
+    let pay_lines: Vec<RunPayLine> = earnings
+        .into_iter()
+        .map(|earning| {
+            let source = match remaining_snapshot_earnings
+                .iter()
+                .position(|copied| **copied == earning)
+            {
+                Some(index) => {
+                    remaining_snapshot_earnings.remove(index);
+                    PayLineSource::FromReversedSnapshot
+                }
+                None => PayLineSource::OneOff,
+            };
+            RunPayLine { earning, source }
+        })
+        .collect();
+
+    // A write stating exactly the lines already stored — same instructions,
+    // same order, same sources — changes no input, so it writes nothing:
+    // the figures beside those lines are exactly as current as they were,
+    // and retiring them would hide true numbers behind a false "changed"
+    // (issue #88's "saving the same lines again is not a change"). The same
+    // rule §D-6 gives a refresh that finds nothing changed.
+    if stored == pay_lines {
+        tx.commit().await?;
+        return Ok(());
     }
+    reopen_run(&mut tx, payroll_run_id).await?;
 
     // Replace, not merge: the whole point of §4.5d is that this call states
     // the complete list, so a prior call's leftover lines must not survive
@@ -812,22 +838,30 @@ pub async fn set_run_pay_lines_with_provenance(
     // figures older than the inputs beside them. Unconditional, in the same
     // transaction as the replace above, so no commit can ever leave a stale
     // calculation beside a line that postdates it.
-    sqlx::query(
+    let retired_a_calculation = sqlx::query(
         "DELETE FROM working_payroll_calculation
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(payroll_run_id.as_str())
     .bind(employment_id.as_str())
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
 
+    // Remembered so the run detail can say *why* the figures are absent
+    // after a reload. Only a write that actually retired figures raises it
+    // (or one that follows such a write before any Calculate): a member who
+    // was never calculated has no figures to call stale, and saying
+    // otherwise would be a false sentence on the worksheet.
     sqlx::query(
         "UPDATE payroll_run_employment
-         SET figures_invalidated_by_pay_line_write = TRUE
+         SET figures_invalidated_by_pay_line_write = figures_invalidated_by_pay_line_write OR $3
          WHERE payroll_run_id = $1::uuid AND employment_id = $2",
     )
     .bind(payroll_run_id.as_str())
     .bind(employment_id.as_str())
+    .bind(retired_a_calculation)
     .execute(&mut *tx)
     .await?;
 
@@ -1085,7 +1119,8 @@ pub struct PayrollRunMember {
     pub pay_lines: Vec<RunPayLine>,
     pub blockers: Vec<PayrollRunBlocker>,
     pub figures: Option<PayrollFigures>,
-    pub figures_absence: Option<PayrollFiguresAbsence>,
+    /// `Current` exactly when `figures` is `Some`.
+    pub calculation_state: CalculationState,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -1221,12 +1256,12 @@ pub async fn get_payroll_run_detail(
             );
             PayrollFigures::from_calculation(&calculation)
         });
-        let figures_absence = if figures.is_some() {
-            None
+        let calculation_state = if figures.is_some() {
+            CalculationState::Current
         } else if figures_invalidated_by_pay_line_write {
-            Some(PayrollFiguresAbsence::PayLinesChanged)
+            CalculationState::PayLinesSaved
         } else {
-            Some(PayrollFiguresAbsence::NotCalculated)
+            CalculationState::NotCalculated
         };
         let employment_id = EmploymentId::new(employment_id);
         let blockers = member_blockers(db, &employment_id, period, &earnings).await?;
@@ -1237,7 +1272,7 @@ pub async fn get_payroll_run_detail(
             pay_lines,
             blockers,
             figures,
-            figures_absence,
+            calculation_state,
         });
     }
 

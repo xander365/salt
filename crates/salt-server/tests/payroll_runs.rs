@@ -1,8 +1,8 @@
 //! Proves `POST /api/employers/{e}/payroll-runs`, `GET
 //! /api/employers/{e}/payroll-runs`, `GET
 //! /api/employers/{e}/payroll-runs/{r}` and `PUT
-//! /api/employers/{e}/payroll-runs/{r}/members/{em}/earnings` (issue #53,
-//! parent #49 Spec 2 of 3), plus `POST
+//! /api/employers/{e}/payroll-runs/{r}/members/{em}/pay-lines` (issue #53,
+//! parent #49 Spec 2 of 3; renamed from `.../earnings` by issue #77), plus `POST
 //! /api/employers/{e}/payroll-runs/{r}/calculate` (issue #55) and `POST
 //! /api/employers/{e}/payroll-runs/{r}/finalize` (issue #56). Driven with
 //! `tower::ServiceExt::oneshot` against the real router, the same
@@ -176,17 +176,8 @@ fn create_run_request(
     employer_id: &str,
     cookie: &str,
     salt_header: bool,
-    mut body: Value,
+    body: Value,
 ) -> Request<Body> {
-    if let Some(earnings) = body.get_mut("earnings").and_then(Value::as_array_mut) {
-        for earning in earnings {
-            if let Some(object) = earning.as_object_mut() {
-                object
-                    .entry("source".to_owned())
-                    .or_insert_with(|| Value::String("one_off".to_owned()));
-            }
-        }
-    }
     let mut builder = Request::builder()
         .method("POST")
         .uri(format!("/api/employers/{employer_id}/payroll-runs"))
@@ -1397,11 +1388,13 @@ async fn calculating_a_fully_declared_run_returns_figures_and_the_run_becomes_ca
     .await;
     assert_eq!(refreshed["status"], "calculated");
     assert_eq!(refreshed["members"][0]["figures"], *figures);
+    assert_eq!(refreshed["members"][0]["calculationState"], "current");
     assert!(refreshed["members"][0]["refusal"].is_null());
 
-    // A pay-line write removes the old calculation in the same transaction.
-    // The later plain GET names that absence as an edit, rather than making
-    // the worksheet guess whether this member was never calculated at all.
+    // A pay-line write removes the old calculation in the same transaction
+    // (issue #77). The later plain GET names that absence as a save, rather
+    // than making the worksheet guess whether this member was never
+    // calculated at all.
     let response = router()
         .await
         .oneshot(set_earnings_request(
@@ -1410,7 +1403,9 @@ async fn calculating_a_fully_declared_run_returns_figures_and_the_run_becomes_ca
             &employment_id,
             &cookie,
             true,
-            serde_json::json!({ "earnings": [] }),
+            serde_json::json!({
+                "earnings": [{ "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" }],
+            }),
         ))
         .await
         .unwrap();
@@ -1423,11 +1418,122 @@ async fn calculating_a_fully_declared_run_returns_figures_and_the_run_becomes_ca
             .unwrap(),
     )
     .await;
+    assert_eq!(after_edit["status"], "draft");
     assert!(after_edit["members"][0]["figures"].is_null());
     assert_eq!(
-        after_edit["members"][0]["figuresAbsence"],
-        "pay_lines_changed"
+        after_edit["members"][0]["calculationState"],
+        "pay_lines_saved"
     );
+
+    // The next Calculate makes the figures current again, from the new line.
+    let recalculated = body_json(
+        router()
+            .await
+            .oneshot(calculate_request(&employer_id, &run_id, &cookie, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(recalculated["members"][0]["calculationState"], "current");
+    assert_eq!(
+        recalculated["members"][0]["figures"]["taxableAllowancesCents"],
+        5000
+    );
+}
+
+/// `PUT .../pay-lines` replaced `PUT .../earnings` (issue #77); the old
+/// route is removed, not left standing beside the new one where a caller
+/// could still wipe provenance. It answers exactly like any path that does
+/// not exist, and writes nothing.
+#[tokio::test]
+async fn the_old_earnings_route_is_gone() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/earnings"
+                ))
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-salt-request", "1")
+                .body(Body::from(
+                    serde_json::json!({
+                        "earnings": [
+                            { "kind": "taxableAllowance", "amountCents": 5000, "label": "standby" },
+                        ],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["members"][0]["earnings"], serde_json::json!([]));
+}
+
+/// Provenance is Salt's record, not the caller's claim (issue #77): every
+/// line typed through the route reads back `one_off`, even when the body
+/// asserts otherwise, and writing lines for a member who was never
+/// calculated does not claim stale figures that never existed.
+#[tokio::test]
+async fn a_written_line_reads_back_one_off_whatever_source_the_body_claims() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({
+                "earnings": [
+                    {
+                        "kind": "taxableAllowance",
+                        "amountCents": 5000,
+                        "label": "standby",
+                        "source": "from_reversed_snapshot",
+                    },
+                    { "kind": "overtime", "hours": "4", "multiplier": "1.5", "label": null },
+                ],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let member = &detail["members"][0];
+    assert_eq!(member["earnings"][0]["source"], "one_off");
+    assert_eq!(member["earnings"][1]["source"], "one_off");
+    assert!(member["figures"].is_null());
+    assert_eq!(member["calculationState"], "not_calculated");
 }
 
 /// A member missing its `CompensationTerms` cannot calculate — but the

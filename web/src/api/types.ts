@@ -231,6 +231,12 @@ export interface PayrollRunsResponse {
 }
 
 export type EarningKind = 'taxableAllowance' | 'overtime';
+
+/**
+ * Where a stored pay line came from (issue #77): typed directly on this run,
+ * or copied from a reversed payroll's frozen snapshot. Recorded by the
+ * server and returned, never sent — a write carries instructions only.
+ */
 export type PayLineSourceDto = 'one_off' | 'from_reversed_snapshot';
 
 /** A taxable allowance: money an Operator decided. */
@@ -239,7 +245,6 @@ export interface TaxableAllowanceLineDto {
   amountCents: number;
   /** Null only for unlabelled lines preserved from a version-1 snapshot. */
   label: string | null;
-  source: PayLineSourceDto;
 }
 
 /**
@@ -257,10 +262,21 @@ export interface OvertimeLineDto {
   hours: string;
   multiplier: string;
   label: string | null;
-  source: PayLineSourceDto;
 }
 
+/** One earning instruction: the shape `PUT .../pay-lines` accepts. */
 export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
+
+/** One stored line as the run detail returns it: its instruction and the
+ * source the server recorded beside it. */
+export type PayLineDto = EarningLineDto & { source: PayLineSourceDto };
+
+/**
+ * Whether a member's `figures` are current, and why not when absent (§D-6).
+ * `pay_lines_saved` means a pay-line write retired figures that existed; the
+ * worksheet says so rather than showing numbers older than the lines.
+ */
+export type CalculationStateDto = 'current' | 'not_calculated' | 'pay_lines_saved';
 
 /**
  * The six blocker codes (§0.31) and no others — the run detail's own
@@ -312,10 +328,10 @@ export interface PayrollRunMemberDto {
   employmentId: string;
   finalizedPayrollId: string | null;
   fullName: string;
-  earnings: EarningLineDto[];
+  earnings: PayLineDto[];
   blockers: PayrollRunBlockerDto[];
   figures: FiguresDto | null;
-  figuresAbsence: 'not_calculated' | 'pay_lines_changed' | null;
+  calculationState: CalculationStateDto;
   refusal: RefusalDto | null;
 }
 

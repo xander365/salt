@@ -9,13 +9,12 @@ use payroll::{
     TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayLineSource, PayrollAppError,
-    PayrollRunId, RunPayLine, SNAPSHOT_SCHEMA_VERSION, SaltDatabase,
-    add_employment_to_correction_run, calculate_payroll_run, correct_compensation_terms,
-    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
-    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    record_compensation_terms, remove_employment_from_run, reverse_finalized_payroll,
-    set_run_pay_lines, set_run_pay_lines_with_provenance,
+    EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayrollAppError, PayrollRunId,
+    SNAPSHOT_SCHEMA_VERSION, SaltDatabase, add_employment_to_correction_run, calculate_payroll_run,
+    correct_compensation_terms, create_correction_run, create_employer, create_employment,
+    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
+    finalize_payroll_run, record_compensation_terms, remove_employment_from_run,
+    reverse_finalized_payroll, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -1054,32 +1053,62 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     // (issue #77's own acceptance criteria), not `one_off`.
     assert_eq!(source, "from_reversed_snapshot");
 
-    // The pay-lines route carries provenance back on every replacement, so a
-    // no-op save does not rewrite this copied line as a direct one-off.
-    set_run_pay_lines_with_provenance(
+    let sources = |pool: PgPool| {
+        let run_id = run_id.clone();
+        let employment_id = employment_id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT source FROM payroll_run_pay_line
+                 WHERE payroll_run_id = $1::uuid AND employment_id = $2 ORDER BY line",
+            )
+            .bind(run_id.as_str())
+            .bind(employment_id.as_str())
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let copied = EarningInstruction::TaxableAllowance {
+        amount: Money::from_cents(20000).unwrap(),
+        label: None,
+    };
+
+    // Salt decides provenance, not the caller: resaving the untouched copied
+    // line keeps its frozen-snapshot source, so a no-op save cannot wipe it.
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![copied.clone()])
+        .await
+        .unwrap();
+    assert_eq!(sources(pool.clone()).await, ["from_reversed_snapshot"]);
+
+    // Matching is one-for-one: a second, identical line is typed by hand, so
+    // it is one-off even though its instruction equals the copied one.
+    set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,
-        vec![RunPayLine {
-            earning: EarningInstruction::TaxableAllowance {
-                amount: Money::from_cents(20000).unwrap(),
-                label: None,
-            },
-            source: PayLineSource::FromReversedSnapshot,
-        }],
+        vec![copied.clone(), copied.clone()],
     )
     .await
     .unwrap();
-    let source_after_resave: String = sqlx::query_scalar(
-        "SELECT source FROM payroll_run_pay_line
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(run_id.as_str())
-    .bind(employment_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(source_after_resave, "from_reversed_snapshot");
+    assert_eq!(
+        sources(pool.clone()).await,
+        ["from_reversed_snapshot", "one_off"]
+    );
+
+    // An edited instruction is no longer what the snapshot said, so it is
+    // one-off — and once gone, the copied provenance does not come back.
+    let edited = EarningInstruction::TaxableAllowance {
+        amount: Money::from_cents(25000).unwrap(),
+        label: None,
+    };
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![edited])
+        .await
+        .unwrap();
+    assert_eq!(sources(pool.clone()).await, ["one_off"]);
+    set_run_pay_lines(&db, &run_id, &employment_id, vec![copied])
+        .await
+        .unwrap();
+    assert_eq!(sources(pool.clone()).await, ["one_off"]);
 }
 
 #[sqlx::test]

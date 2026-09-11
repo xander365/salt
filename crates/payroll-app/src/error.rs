@@ -141,7 +141,7 @@ pub enum PayrollAppError {
     /// "already void" any further than it needs to — either way there is no
     /// live membership to act on.
     ///
-    /// Both `RemoveEmploymentFromRun` and `SetRunEarnings` refuse with it.
+    /// Both `RemoveEmploymentFromRun` and `SetRunPayLines` refuse with it.
     /// Earning lines are a fact about paying this Employment for this
     /// period, so a run that is not paying it has nowhere to put them.
     EmploymentNotAnActiveRunMember {

@@ -80,7 +80,8 @@ export function useCreatePayrollRun() {
  * generalized by issue #77): replaces one member's whole list of pay lines,
  * matching `set_run_pay_lines`'s own contract — the caller sends every line
  * every time, never a delta. The request still names its array `earnings`:
- * every line this form can send today is an Earning.
+ * every line this form can send today is an Earning. Lines carry no
+ * `source`: the server records where each line came from.
  *
  * Invalidates the run detail on success rather than patching it locally.
  * That refetch is a plain `GET`, which always answers `refusal: null` for
@@ -88,12 +89,11 @@ export function useCreatePayrollRun() {
  * whatever the last Calculate said about every member, not just this one.
  * Nothing here remembers a `refusal` past the response that carried it.
  *
- * The refetch also carries the true `figures` state: writing pay lines now
- * always clears the member's stored calculation server-side (issue #77), so
- * a reload after this call shows the figures absent, not merely a client-
- * side stale warning.
+ * The refetch also carries the true `figures` state: every write clears the
+ * member's stored calculation server-side (issue #77), so the refetch
+ * answers `calculationState: 'pay_lines_saved'` with no figures.
  */
-export function useSetRunEarnings(payrollRunId: string) {
+export function useSetRunPayLines(payrollRunId: string) {
   const employerId = useEmployerId();
   const queryClient = useQueryClient();
 
