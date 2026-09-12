@@ -20,3 +20,13 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 disallowed_types = "warn"
 float_arithmetic = "warn"
+
+# Debug builds kept one ~120 MB copy of full debug info per test binary, which
+# grew `target/` to 62 GB. Line tables alone still give file and line numbers in
+# panics and backtraces; only step-through variable inspection is lost.
+# Dependencies get no debug info at all, since we never step into them.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
