@@ -341,9 +341,14 @@ export interface OvertimeLineDto {
 export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
 
 /** One stored line as the run detail returns it: its instruction and the
- * source the server recorded beside it. */
-export type PayLineDto = EarningLineDto &
-  (StandingPayLineProvenanceDto<EarningLineDto> | NonStandingPayLineProvenanceDto);
+ * source the server recorded beside it. Overtime cannot be standing (D14),
+ * and a standing allowance's own instruction is another allowance, so the
+ * type preserves those server invariants instead of admitting impossible
+ * combinations every consumer then has to defend. */
+export type PayLineDto =
+  | (TaxableAllowanceLineDto &
+      (StandingPayLineProvenanceDto<TaxableAllowanceLineDto> | NonStandingPayLineProvenanceDto))
+  | (OvertimeLineDto & NonStandingPayLineProvenanceDto);
 
 /**
  * A medical aid premium withheld from the employee's own pay (issue #78) —

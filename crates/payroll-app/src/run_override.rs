@@ -175,7 +175,7 @@ fn same_pay_line_kind(a: &PayLineInstruction, b: &PayLineInstruction) -> bool {
 /// ([`PayrollAppError::OverrideChangesPayLineKind`]).
 ///
 /// Runs under the run's existing lock, in one transaction, through
-/// [`crate::payroll_run::write_member_pay_lines`] — the one write path every
+/// `write_member_pay_lines` — the one write path every
 /// pay-line change shares (§D-6's own "no second bookkeeping list"). Writes
 /// an `ActionLog` entry only when something actually changed.
 pub async fn override_standing_pay_line(

@@ -51,7 +51,7 @@ pub enum CalculationState {
 /// a `StandingPayItem` at run creation).
 ///
 /// `Serialize`/`Deserialize` since issue #80, with `rename_all = "snake_case"`
-/// deliberately matching [`Self::as_column`]'s own three strings exactly —
+/// deliberately matching `PayLineSource::as_column`'s own three strings exactly —
 /// `crate::provenance`'s frozen snapshot reuses this type directly rather
 /// than inventing a parallel wire enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

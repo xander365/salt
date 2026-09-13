@@ -17,7 +17,6 @@ import { sharedFactRefusalMessage } from '../../api/refusal';
 import type {
   DeductionLineDto,
   DeductionPayLineDto,
-  EarningLineDto,
   MedicalAidPremiumLineDto,
   PayLineDto,
   RemovedPayLineDto,
@@ -37,6 +36,8 @@ import { Label } from '../../components/ui/label';
 import { ValidationError } from '../../components/states/ValidationError';
 import { employmentPath } from '../paths';
 import { Link } from 'react-router-dom';
+
+const MAX_LABEL_LENGTH = 100;
 
 function standingLineFailureMessage(caught: unknown): string {
   const shared = sharedFactRefusalMessage(caught);
@@ -67,12 +68,11 @@ function standingLineFailureMessage(caught: unknown): string {
 }
 
 /** An active standing allowance line — never `overtime`, which no
- * `StandingPayItem` can ever be (D14). The wire type still declares
- * `standingPayLine` as the wider `EarningLineDto`, because `PayLineDto`
- * shares one generic parameter across both its earning kinds;
- * `standingAmountCents` below is the one place that guards it back down to
- * the allowance it always actually is. */
-type StandingAllowanceLine = TaxableAllowanceLineDto & StandingPayLineProvenanceDto<EarningLineDto>;
+ * `StandingPayItem` can ever be (D14). Narrow the item's own instruction to
+ * the same kind here as well, so an impossible wire mismatch cannot be
+ * rendered as an invented zero standing amount. */
+type StandingAllowanceLine = TaxableAllowanceLineDto &
+  StandingPayLineProvenanceDto<TaxableAllowanceLineDto>;
 
 /** An active standing premium line. */
 type StandingPremiumLine = MedicalAidPremiumLineDto &
@@ -84,9 +84,6 @@ type StandingPremiumLine = MedicalAidPremiumLineDto &
  * (a `StandingPayItem`'s own instruction is always the same kind as the
  * line it proposed). */
 function standingAmountCents(line: StandingAllowanceLine | StandingPremiumLine): number {
-  if (line.kind === 'taxableAllowance') {
-    return line.standingPayLine.kind === 'taxableAllowance' ? line.standingPayLine.amountCents : 0;
-  }
   return line.standingPayLine.amountCents;
 }
 
@@ -146,6 +143,11 @@ function StandingLine({
     const trimmedLabel = label.trim();
     if (line.kind === 'taxableAllowance' && trimmedLabel.length === 0) {
       setError('Enter a label for this allowance.');
+      setErrorField('label');
+      return;
+    }
+    if (line.kind === 'taxableAllowance' && Array.from(trimmedLabel).length > MAX_LABEL_LENGTH) {
+      setError(`Use ${MAX_LABEL_LENGTH} characters or fewer for the allowance label.`);
       setErrorField('label');
       return;
     }
@@ -398,12 +400,18 @@ export function StandingLines({
             return null;
           }
           return (
-            <li key={line.standingPayItemId}>
-              {line.kind === 'taxableAllowance'
-                ? `Taxable allowance — ${line.label ?? 'unlabelled'}`
-                : 'Medical aid premium'}{' '}
-              <Money cents={line.amountCents} /> · Removed for this run only: {line.removedReason}.
-              Not paid.
+            <li key={line.standingPayItemId} className="flex flex-col gap-0.5">
+              <span>
+                {line.kind === 'taxableAllowance'
+                  ? `Taxable allowance — ${line.label ?? 'unlabelled'}`
+                  : 'Medical aid premium'}{' '}
+                <Money cents={line.amountCents} /> · Standing since{' '}
+                <span className="text-foreground">{humanDate(line.standingEffectiveFrom)}</span>
+              </span>
+              {line.overrideReason !== undefined && (
+                <span>Changed for this run only: {line.overrideReason}.</span>
+              )}
+              <span>Removed for this run only: {line.removedReason}. Not paid.</span>
             </li>
           );
         })}

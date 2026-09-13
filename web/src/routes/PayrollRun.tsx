@@ -27,6 +27,7 @@ import type {
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDate, humanDateRange } from '../format';
+import { moneyDisplayText } from '../money';
 import { Money } from '../components/Money';
 import {
   useCalculatePayrollRun,
@@ -162,9 +163,53 @@ function standingItemsChangedIsEmpty(changed: StandingItemsChangedDto): boolean 
 }
 
 function proposalSentence(item: StandingItemProposalDto): string {
-  return item.kind === 'taxableAllowance'
-    ? `Taxable allowance — ${item.label}`
-    : 'Medical aid premium';
+  const line =
+    item.kind === 'taxableAllowance' ? `Taxable allowance — ${item.label}` : 'Medical aid premium';
+  return `${line} ${moneyDisplayText(item.amountCents)}, standing since ${humanDate(item.effectiveFrom)}`;
+}
+
+/** Names a deliberately preserved line in a refresh report. The refresh
+ * response intentionally carries only StandingPayItem ids for these two
+ * lists, so resolve those ids against the run detail already on screen
+ * instead of reducing the result to an ambiguous count. */
+function standingLineSentence(member: PayrollRunMemberDto, standingPayItemId: string): string {
+  const line = [...member.earnings, ...member.deductions, ...member.removedPayLines].find(
+    (candidate) =>
+      'standingPayItemId' in candidate && candidate.standingPayItemId === standingPayItemId,
+  );
+  if (line === undefined) {
+    return `standing item ${standingPayItemId}`;
+  }
+  if (line.kind === 'overtime') {
+    // A StandingPayItem can never be overtime (D14). Keep an honest fallback
+    // for a future wire shape rather than silently dropping the report row.
+    return `overtime — ${line.label ?? 'unlabelled'}`;
+  }
+  const name =
+    line.kind === 'taxableAllowance'
+      ? `taxable allowance — ${line.label ?? 'unlabelled'}`
+      : 'medical aid premium';
+  return `${name} ${moneyDisplayText(line.amountCents)}`;
+}
+
+function refreshFailureMessage(caught: unknown): string {
+  if (!(caught instanceof ApiError)) {
+    return 'We could not refresh these proposals. Please try again.';
+  }
+  switch (caught.code) {
+    case 'payroll_run_already_finalized':
+      return 'This payroll run was finalized before the proposals could be refreshed. Reload the page.';
+    case 'payroll_run_is_not_ordinary':
+      return 'Correction runs do not have standing proposals to refresh.';
+    case 'internal_error': {
+      const requestId = requestIdOf(caught.details);
+      return requestId === null
+        ? 'We could not refresh these proposals. Please try again.'
+        : `We could not refresh these proposals. Try again, and quote reference ${requestId} if the problem continues.`;
+    }
+    default:
+      return 'We could not refresh these proposals. Please try again.';
+  }
 }
 
 /**
@@ -223,15 +268,16 @@ function StandingItemsChangedBanner({
                   {member.standingItemsChanged.changed.length > 0 && (
                     <>
                       {' '}
-                      Changed: {member.standingItemsChanged.changed.map(proposalSentence).join(', ')}.
+                      Changed:{' '}
+                      {member.standingItemsChanged.changed.map(proposalSentence).join(', ')}.
                     </>
                   )}
                   {member.standingItemsChanged.ended.length > 0 && (
                     <>
                       {' '}
                       Ended but still on this run:{' '}
-                      {member.standingItemsChanged.ended.map(proposalSentence).join(', ')} — remove it
-                      for this run if it should not be paid.
+                      {member.standingItemsChanged.ended.map(proposalSentence).join(', ')} — remove
+                      it for this run if it should not be paid.
                     </>
                   )}
                 </li>
@@ -247,11 +293,7 @@ function StandingItemsChangedBanner({
               <RefreshCw className="size-4" aria-hidden="true" />
               {refresh.isPending ? 'Refreshing…' : 'Refresh proposals'}
             </Button>
-            {refresh.isError && (
-              <PayrollAlert>
-                Something went wrong refreshing proposals. Please try again.
-              </PayrollAlert>
-            )}
+            {refresh.isError && <PayrollAlert>{refreshFailureMessage(refresh.error)}</PayrollAlert>}
           </div>
         </StaleBanner>
       )}
@@ -263,9 +305,10 @@ function StandingItemsChangedBanner({
           ) : (
             <ul className="flex flex-col gap-1">
               {report.map((member) => {
-                const memberName =
-                  run.members.find((candidate) => candidate.employmentId === member.employmentId)
-                    ?.fullName ?? member.employmentId;
+                const runMember = run.members.find(
+                  (candidate) => candidate.employmentId === member.employmentId,
+                );
+                const memberName = runMember?.fullName ?? member.employmentId;
                 return (
                   <li key={member.employmentId}>
                     <span className="font-medium">{memberName}</span>
@@ -276,10 +319,28 @@ function StandingItemsChangedBanner({
                       <> Updated: {member.updated.map(proposalSentence).join(', ')}.</>
                     )}
                     {member.keptOverridden.length > 0 && (
-                      <> Left alone, changed for this run: {member.keptOverridden.length}.</>
+                      <>
+                        {' '}
+                        Left alone, changed for this run:{' '}
+                        {member.keptOverridden
+                          .map((id) =>
+                            runMember === undefined ? id : standingLineSentence(runMember, id),
+                          )
+                          .join(', ')}
+                        .
+                      </>
                     )}
                     {member.keptRemoved.length > 0 && (
-                      <> Left alone, removed for this run: {member.keptRemoved.length}.</>
+                      <>
+                        {' '}
+                        Left alone, removed for this run:{' '}
+                        {member.keptRemoved
+                          .map((id) =>
+                            runMember === undefined ? id : standingLineSentence(runMember, id),
+                          )
+                          .join(', ')}
+                        .
+                      </>
                     )}
                     {member.endedStillProposed.length > 0 && (
                       <>
