@@ -489,6 +489,51 @@ unreadable like any other corrupt shape, never guessed at. ADR-0004 promises
 history is explainable, never that every old snapshot deserializes forever,
 so the convenience has to degrade honestly rather than pretend.
 
+### 4.5e StandingPayItem
+
+```text
+StandingPayItem                                (standing_pay_item, issue #79)
+- id                     UUID
+- employment_id          the Employment that carries it
+- pay_line_json          a TaxableAllowance (always labelled) or a MedicalAidPremium
+- effective_from         a PayPeriod start (INV-014's own check)
+- created_at, created_by
+- ended_at, ended_by, ended_reason   all three or none; a reason is non-blank
+```
+
+An Employment's recurring allowance or medical aid premium. **Every new
+Ordinary run proposes the items in force at its `PayPeriod` end** — the same
+selector ADR-0005 and ADR-0007 use for the `PayeTable`, the `SscRuleset` and
+the `TaxYear` — as `source = standing` pay lines. The proposal is written by
+`create_ordinary_payroll_run`, in the transaction that inserts membership and
+under its Employer `FOR UPDATE` lock; ending an item takes that same lock, so
+a run and an ending always commit in one order or the other. A draft holds a
+stated proposal, never a live view.
+
+- **Ordering.** Proposed lines are earnings first, then deductions, each by
+  `effective_from`, `created_at`, `id` — the one order `set_run_pay_lines`
+  stores, so an Operator's unchanged resave writes nothing.
+- **Never prorated.** Only `BasicPay` is (§8.2 of the calculation doc). A
+  joiner's or leaver's part month proposes the full amount; the run detail's
+  `basic_pay_prorated` lets the worksheet say so beside that member.
+- **Idempotent by structure.** Migration 0038's partial unique index refuses a
+  second line for one item on one member of one run, and a failed creation
+  rolls its proposal back with the run.
+- **A CorrectionRun proposes nothing.** Its lines come only from the reversed
+  payroll's frozen snapshot, and carry no `standing_pay_item_id`.
+- **Ended, never deleted or rewritten.** The restricted role has `INSERT` and
+  `SELECT` on the table and `UPDATE` on the three `ended_*` columns only
+  (migration 0040). A changed amount is a new item with the old one ended.
+- **Refusals.** A date that is not a period start answers the existing
+  `effective_from_not_a_period_start`; a zero premium,
+  `standing_medical_aid_premium_is_zero`; a blank end reason,
+  `standing_pay_item_end_reason_cannot_be_empty`; ending twice,
+  `standing_pay_item_already_ended`; an item not on that Employment,
+  `standing_pay_item_not_found`.
+
+Changing or removing a proposed line for one run only, and refreshing a draft
+when the standing records change, are issue #80.
+
 ### 4.6 PayrollRun
 
 ```text

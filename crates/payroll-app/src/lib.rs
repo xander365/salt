@@ -90,7 +90,8 @@ pub use session::{
     delete_session, load_session,
 };
 pub use standing_pay_item::{
-    StandingPayItemId, StandingPayItemInstruction, create_standing_pay_item, end_standing_pay_item,
+    StandingPayItem, StandingPayItemEnding, StandingPayItemId, StandingPayItemInstruction,
+    create_standing_pay_item, end_standing_pay_item, list_standing_pay_items,
 };
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,

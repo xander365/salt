@@ -39,7 +39,7 @@ use crate::state::AppState;
 /// Resolves the caller's authorized `EmployerId` and the path's
 /// `EmploymentId`, then confirms the latter belongs to the former — the
 /// shared first step of all four handlers below.
-async fn authorized_employment(
+pub(crate) async fn authorized_employment(
     state: &AppState,
     context: &AuthorizedEmployerContext,
     employment_id: String,

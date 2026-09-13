@@ -190,7 +190,8 @@ function StandingPayItemProposals({
         ))}
         {standingDeductions.map((line) => (
           <li key={line.standingPayItemId}>
-            Medical aid premium <Money cents={line.amountCents} />{' · '}Standing since{' '}
+            Medical aid premium <Money cents={line.amountCents} />
+            {' · '}Standing since{' '}
             <span className="text-foreground">{humanDate(line.standingEffectiveFrom)}</span>
           </li>
         ))}
@@ -231,6 +232,20 @@ function Member({
       )}
 
       <StandingPayItemProposals earnings={member.earnings} deductions={member.deductions} />
+
+      {/* Only BasicPay is prorated (issue #79's own Deep Instructions): a
+          joiner's or leaver's standing items are proposed at their full
+          amount, and Salt has no rule for prorating them, so the worksheet
+          says so rather than let a full allowance beside a smaller salary
+          look like a mistake Salt made. */}
+      {member.basicPayProrated && (
+        <p className="text-sm text-muted-foreground">
+          <span className="font-medium text-foreground">Part period.</span> Basic pay is prorated by
+          the days employed in this period. Nothing else is: standing items and other lines are paid
+          at their full amount.{' '}
+          {!runIsFinalized && <>Change a line on this run if it should be less.</>}
+        </p>
+      )}
 
       {/* The hours column slot (issue #88's own Deep Instructions): hourly
           pay is out of this milestone, but the worksheet already reserves

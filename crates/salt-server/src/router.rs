@@ -22,6 +22,7 @@ use crate::payroll_runs;
 use crate::person_particulars;
 use crate::request_id;
 use crate::session;
+use crate::standing_pay_items;
 use crate::state::AppState;
 
 /// §0.19's own number: bodies are capped at 256 KB.
@@ -89,6 +90,15 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
             axum::routing::post(employment_facts::record_opening_balance),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items",
+            get(standing_pay_items::list_standing_pay_items)
+                .post(standing_pay_items::create_standing_pay_item),
+        )
+        .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items/{standing_pay_item_id}/end",
+            axum::routing::post(standing_pay_items::end_standing_pay_item),
         )
         .route(
             "/api/employers/{employer_id}/people/{person_id}/particulars",

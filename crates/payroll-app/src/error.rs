@@ -604,6 +604,11 @@ pub enum PayrollAppError {
     /// point at, so a blank reason states nothing while looking like it
     /// states something.
     StandingPayItemEndReasonCannotBeEmpty,
+    /// `CreateStandingPayItem` was given a medical aid premium of zero. It
+    /// withholds nothing and is not a deduction (§D-4) — the same rule
+    /// `VoluntaryDeductionAmountIsZero` applies to a line typed on a run,
+    /// stated here without a line index because an item is not a list.
+    StandingMedicalAidPremiumIsZero,
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -1136,6 +1141,10 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "ending a StandingPayItem requires a reason that is not empty or only whitespace"
             ),
+            Self::StandingMedicalAidPremiumIsZero => write!(
+                f,
+                "a standing medical aid premium of zero withholds nothing and is not a deduction"
+            ),
         }
     }
 }
@@ -1239,7 +1248,8 @@ impl std::error::Error for PayrollAppError {
             | Self::BootstrapPeriodEndDayInvalid { .. }
             | Self::StandingPayItemNotFound(_)
             | Self::StandingPayItemAlreadyEnded(_)
-            | Self::StandingPayItemEndReasonCannotBeEmpty => None,
+            | Self::StandingPayItemEndReasonCannotBeEmpty
+            | Self::StandingMedicalAidPremiumIsZero => None,
         }
     }
 }

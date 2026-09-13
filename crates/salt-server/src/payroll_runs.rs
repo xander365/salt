@@ -220,7 +220,7 @@ fn invalid_overtime_hours(message: String, supplied: &str) -> ApiError {
 
 /// A non-blank label is required on every new line. `None` is readable on the
 /// way out — a version-1 allowance really had none — but never writable.
-fn parse_label(label: Option<String>) -> Result<EarningLabel, ApiError> {
+pub(crate) fn parse_label(label: Option<String>) -> Result<EarningLabel, ApiError> {
     label
         .ok_or_else(ApiError::malformed_request)
         .and_then(|label| EarningLabel::new(label).map_err(|_| ApiError::malformed_request()))
@@ -465,6 +465,9 @@ struct PayrollRunMemberDto {
     figures: Option<FiguresDto>,
     calculation_state: &'static str,
     refusal: Option<RefusalDto>,
+    /// A joiner or leaver in this period: `BasicPay` is prorated, and
+    /// nothing else is — the worksheet says so beside any standing item.
+    basic_pay_prorated: bool,
 }
 
 /// One entry of a member's `blockers` list, under the same stable `code`s
@@ -571,6 +574,7 @@ fn payroll_run_detail_to_response(
                     figures: member.figures.map(figures_to_dto),
                     calculation_state: calculation_state_str(member.calculation_state),
                     refusal,
+                    basic_pay_prorated: member.basic_pay_prorated,
                 }
             })
             .collect(),

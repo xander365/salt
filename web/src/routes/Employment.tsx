@@ -2,10 +2,11 @@
 // Spec 3 of 3, §0.35; rebuilt for issue #88). An Operator opens one
 // Employment and records everything it needs to become payable: what it is
 // paid and from when, whether the employee had earlier taxable employment
-// this tax year, whether they have deductions Salt does not support, and an
-// opening balance when Salt was adopted mid-year.
+// this tax year, whether they have deductions Salt does not support, an
+// opening balance when Salt was adopted mid-year, and the standing pay items
+// every new run proposes (issue #79).
 //
-// Each of the four forms below owns its own submission, its own refusal
+// Each of the forms below owns its own submission, its own refusal
 // message and its own saved-confirmation text — none of this screen's state
 // is shared between them, because a refusal or a save in one has nothing to
 // say about the others.
@@ -21,6 +22,7 @@ import { CompensationTermsForm } from './employment/CompensationTermsForm';
 import { OpeningBalanceForm } from './employment/OpeningBalanceForm';
 import { PersonParticularsSection } from './employment/PersonParticularsForm';
 import { PriorEmploymentForm } from './employment/PriorEmploymentForm';
+import { StandingPayItemsSection } from './employment/StandingPayItemsSection';
 import { UnsupportedDeductionStatusForm } from './employment/UnsupportedDeductionStatusForm';
 import { useScrollToSection } from './employment/useScrollToSection';
 import { NotFound } from './NotFound';
@@ -119,6 +121,7 @@ export function Employment() {
           <div className="flex flex-col gap-6">
             <PersonParticularsSection personId={employment.data.personId} />
             <CompensationTermsForm employmentId={employmentId} />
+            <StandingPayItemsSection employmentId={employmentId} />
             <PriorEmploymentForm employmentId={employmentId} />
             <UnsupportedDeductionStatusForm employmentId={employmentId} />
             <OpeningBalanceForm employmentId={employmentId} />

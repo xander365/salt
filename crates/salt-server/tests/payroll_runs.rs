@@ -1562,7 +1562,7 @@ async fn a_standing_pay_line_reads_back_with_its_effective_from_date() {
         &payroll::EmploymentId::new(employment_id.clone()),
         StandingPayItemInstruction::TaxableAllowance {
             amount: payroll::Money::from_cents(5_000).unwrap(),
-            label: Some(payroll::EarningLabel::new("standby").unwrap()),
+            label: payroll::EarningLabel::new("standby").unwrap(),
         },
         chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         "test-setup",

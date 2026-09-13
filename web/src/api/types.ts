@@ -206,6 +206,52 @@ export interface RecordOpeningBalanceRequest {
 /** The body of a route that records a fact and has nothing to report back. */
 export type RecordedResponse = Record<string, never>;
 
+// `crates/salt-server/src/standing_pay_items.rs` (issue #79, parent #70
+// §D-5): an Employment's effective-dated StandingPayItems. Every new
+// Ordinary run proposes the ones in force at its period end.
+
+/** What a StandingPayItem holds — the same spellings a run's pay lines use.
+ * A standing allowance always carries a label; overtime is never standing. */
+export type StandingPayItemInstructionDto =
+  | { kind: 'taxableAllowance'; amountCents: number; label: string }
+  | { kind: 'medicalAidPremium'; amountCents: number };
+
+/** `POST .../standing-pay-items`. `effectiveFrom` must be a pay period start. */
+export type CreateStandingPayItemRequest = StandingPayItemInstructionDto & {
+  effectiveFrom: string;
+};
+
+export interface CreateStandingPayItemResponse {
+  standingPayItemId: string;
+}
+
+/** `POST .../standing-pay-items/{s}/end`. The server refuses a blank reason. */
+export interface EndStandingPayItemRequest {
+  reason: string;
+}
+
+/** How an item was ended. Ending never deletes it: a past proposal still
+ * points at it. */
+export interface StandingPayItemEndingDto {
+  endedAt: string;
+  endedBy: string;
+  reason: string;
+}
+
+export type StandingPayItemDto = StandingPayItemInstructionDto & {
+  standingPayItemId: string;
+  effectiveFrom: string;
+  createdAt: string;
+  createdBy: string;
+  /** `null` while the item is in force. */
+  ended: StandingPayItemEndingDto | null;
+};
+
+/** `GET .../standing-pay-items`: every item, ended ones included. */
+export interface StandingPayItemsResponse {
+  standingPayItems: StandingPayItemDto[];
+}
+
 // `crates/salt-server/src/payroll_runs.rs` (issue #64, parent #59 Spec 3 of
 // 3, §0.22/§0.29/§0.31): an Employer's payroll runs, the members each one
 // proposes to pay, and why a member cannot be paid yet.
@@ -379,6 +425,9 @@ export interface PayrollRunMemberDto {
   figures: FiguresDto | null;
   calculationState: CalculationStateDto;
   refusal: RefusalDto | null;
+  /** A joiner or leaver in this period: `BasicPay` is prorated by employed
+   * days, and nothing else is (issue #79). */
+  basicPayProrated: boolean;
 }
 
 export interface PayrollRunDetailResponse {

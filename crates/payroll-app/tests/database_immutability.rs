@@ -261,6 +261,13 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
         "reversal",
         "action_log_entry",
         "person",
+        // Never deleted and never rewritten (issue #79): a run already
+        // proposed from a StandingPayItem still names it, so a historical
+        // proposal must always have something to point at, and what it
+        // points at must still say what was proposed. Ending one updates
+        // only its three `ended_*` columns — a column grant, proved by
+        // `the_restricted_role_can_only_end_a_standing_pay_item`.
+        "standing_pay_item",
     ];
     // Master data, working run state, and liveness. Liveness needs DELETE
     // because a reversal deletes the row (§6.2).
@@ -288,11 +295,8 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
     // (issue #38 §6), and the audit trail keeps naming the id of one that is
     // gone, so `UPDATE` is exactly what disabling needs and `DELETE` is the
     // one thing no use case should ever be able to do. An EmployerMembership
-    // is revoked the same way (issue #43), for the same reason. A
-    // StandingPayItem is ended the same way too (issue #79): a run already
-    // proposed from one still names it, so a historical proposal must
-    // always have something to point at.
-    let no_delete = ["operator", "employer_membership", "standing_pay_item"];
+    // is revoked the same way (issue #43), for the same reason.
+    let no_delete = ["operator", "employer_membership"];
 
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -465,4 +469,78 @@ async fn the_restricted_role_can_update_only_person_full_name(pool: PgPool) {
         is_insufficient_privilege(&err),
         "expected an insufficient_privilege refusal while updating employer_id, got {err:?}"
     );
+}
+
+/// `standing_pay_item` is append-only at the table level, but migration 0040
+/// grants `UPDATE` on exactly the three columns `end_standing_pay_item`
+/// writes (issue #79). Proved as the restricted role: an item can be ended
+/// — including the `SELECT ... FOR UPDATE` that ending takes first, which
+/// PostgreSQL allows only with `UPDATE` on at least one column — but its
+/// amount, Employment and effective-from date cannot be rewritten under the
+/// runs already proposed from it, and it cannot be deleted.
+#[sqlx::test]
+async fn the_restricted_role_can_only_end_a_standing_pay_item(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    a_finalized_payroll(&mut conn).await;
+    let item_id: String = sqlx::query_scalar(
+        "INSERT INTO standing_pay_item (employment_id, pay_line_json, effective_from, created_by)
+         VALUES ('employment-1', '{}', '2026-03-01', 'test-actor')
+         RETURNING id::text",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("insert standing_pay_item");
+
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .expect("switch to the restricted role");
+
+    sqlx::query("SELECT id FROM standing_pay_item WHERE id = $1::uuid FOR UPDATE")
+        .bind(&item_id)
+        .execute(&mut *conn)
+        .await
+        .expect("the restricted role can lock an item before ending it");
+    sqlx::query(
+        "UPDATE standing_pay_item
+         SET ended_at = now(), ended_by = 'test-actor', ended_reason = 'opted out'
+         WHERE id = $1::uuid",
+    )
+    .bind(&item_id)
+    .execute(&mut *conn)
+    .await
+    .expect("the restricted role can end an item");
+
+    for (column, statement) in [
+        (
+            "pay_line_json",
+            "UPDATE standing_pay_item SET pay_line_json = '{}' WHERE id = $1::uuid",
+        ),
+        (
+            "effective_from",
+            "UPDATE standing_pay_item SET effective_from = '2026-04-01' WHERE id = $1::uuid",
+        ),
+        (
+            "employment_id",
+            "UPDATE standing_pay_item SET employment_id = 'employment-1' WHERE id = $1::uuid",
+        ),
+        (
+            "created_by",
+            "UPDATE standing_pay_item SET created_by = 'someone-else' WHERE id = $1::uuid",
+        ),
+        (
+            "a delete",
+            "DELETE FROM standing_pay_item WHERE id = $1::uuid",
+        ),
+    ] {
+        let err = sqlx::query(statement)
+            .bind(&item_id)
+            .execute(&mut *conn)
+            .await
+            .expect_err("the restricted role cannot rewrite or delete a StandingPayItem");
+        assert!(
+            is_insufficient_privilege(&err),
+            "expected an insufficient_privilege refusal for {column}, got {err:?}"
+        );
+    }
 }

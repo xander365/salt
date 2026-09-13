@@ -737,6 +737,11 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "standing_pay_item_end_reason_cannot_be_empty",
             None,
         ),
+        PayrollAppError::StandingMedicalAidPremiumIsZero => Classification::Mapped(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "standing_medical_aid_premium_is_zero",
+            None,
+        ),
     }
 }
 

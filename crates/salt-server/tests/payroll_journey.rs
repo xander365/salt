@@ -405,6 +405,74 @@ fn record_opening_balance_request(
         .unwrap()
 }
 
+fn list_standing_pay_items_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items"
+        ))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn create_standing_pay_item_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder
+        .body(Body::from(
+            json!({
+                "kind": "taxableAllowance",
+                "effectiveFrom": "2026-01-01",
+                "amountCents": 10_000,
+                "label": "standby",
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+fn end_standing_pay_item_request(
+    employer_id: &str,
+    employment_id: &str,
+    standing_pay_item_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items/{standing_pay_item_id}/end"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder
+        .body(Body::from(
+            json!({ "reason": "no longer applies" }).to_string(),
+        ))
+        .unwrap()
+}
+
 /// Declares every fact `calculate` needs for `employment_id` under
 /// `january_period()`'s own `PaySchedule` and `TaxYear`: `CompensationTerms`
 /// effective from the start of that period, and a confirmed absence of
@@ -1078,7 +1146,54 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
         StatusCode::OK
     );
 
+    let created_item = router()
+        .await
+        .oneshot(create_standing_pay_item_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_item.status(), StatusCode::OK);
+    let standing_pay_item_id = body_json(created_item).await["standingPayItemId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        router()
+            .await
+            .oneshot(list_standing_pay_items_request(
+                &employer_id,
+                &employment_id,
+                &cookie
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
     let run_id = create_run(&employer_id, &cookie).await;
+
+    // Ending the item now changes nothing about the run just proposed from
+    // it: a draft holds a stated proposal (issue #79).
+    assert_eq!(
+        router()
+            .await
+            .oneshot(end_standing_pay_item_request(
+                &employer_id,
+                &employment_id,
+                &standing_pay_item_id,
+                &cookie,
+                true
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 
     assert_eq!(
         router()
@@ -1223,6 +1338,9 @@ async fn every_payroll_route_answers_401_without_a_session() {
         declare_prior_employment_request(e, em, no_cookie, true, 2025),
         declare_unsupported_deductions_request(e, em, no_cookie, true),
         record_opening_balance_request(e, em, no_cookie, true),
+        list_standing_pay_items_request(e, em, no_cookie),
+        create_standing_pay_item_request(e, em, no_cookie, true),
+        end_standing_pay_item_request(e, em, "placeholder-item", no_cookie, true),
         create_run_request(
             e,
             no_cookie,
@@ -1307,6 +1425,8 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
         declare_prior_employment_request(&employer_id, em, &cookie, false, 2025),
         declare_unsupported_deductions_request(&employer_id, em, &cookie, false),
         record_opening_balance_request(&employer_id, em, &cookie, false),
+        create_standing_pay_item_request(&employer_id, em, &cookie, false),
+        end_standing_pay_item_request(&employer_id, em, "placeholder-item", &cookie, false),
         create_run_request(
             &employer_id,
             &cookie,
@@ -1475,6 +1595,8 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/employments/{employment_id}/compensation-terms",
             "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
             "/api/employers/{employer_id}/employments/{employment_id}/prior-employment",
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items",
+            "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items/{standing_pay_item_id}/end",
             "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
@@ -1501,7 +1623,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 20, "{paths:?}");
+    assert_eq!(paths.len(), 22, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

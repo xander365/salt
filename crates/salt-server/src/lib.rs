@@ -37,6 +37,7 @@ mod person_particulars;
 mod request_id;
 mod router;
 mod session;
+mod standing_pay_items;
 mod state;
 
 pub use bootstrap_cli::{BootstrapArgs, BootstrapArgsError, parse as parse_bootstrap_args};

@@ -451,7 +451,18 @@ async fn propose_standing_pay_lines(
     employment_id: &EmploymentId,
     period_end: NaiveDate,
 ) -> Result<(), PayrollAppError> {
-    let standing_items = standing_pay_lines_in_force(tx, employment_id, period_end).await?;
+    let mut standing_items = standing_pay_lines_in_force(tx, employment_id, period_end).await?;
+
+    // Earnings first, then deductions, each kept in the order they were
+    // read — the one canonical order `set_run_pay_lines` stores a member's
+    // lines in. Proposing in any other order would make an Operator's
+    // unchanged resave look like a change, retiring true figures and
+    // reopening the run for nothing.
+    standing_items.sort_by_key(|(_, pay_line_json, _)| {
+        let instruction: PayLineInstruction = serde_json::from_value(pay_line_json.clone())
+            .expect("standing_pay_item.pay_line_json is always a PayLineInstruction");
+        matches!(instruction, PayLineInstruction::Deduction(_))
+    });
 
     for (index, (standing_pay_item_id, pay_line_json, _effective_from)) in
         standing_items.into_iter().enumerate()
@@ -1341,6 +1352,14 @@ pub struct PayrollRunMember {
     pub figures: Option<PayrollFigures>,
     /// `Current` exactly when `figures` is `Some`.
     pub calculation_state: CalculationState,
+    /// Whether this member is employed for only part of the run's period —
+    /// a joiner or a leaver — so their `BasicPay` is prorated by employed
+    /// calendar days (§8.2). Read from the Employment's own dates, the same
+    /// `employed_days < period_days` test the calculator applies, so the
+    /// worksheet can say so before any Calculate. Nothing else is prorated:
+    /// a standing item on this member is proposed at its full amount
+    /// (issue #79), and the worksheet says that beside them.
+    pub basic_pay_prorated: bool,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -1400,12 +1419,15 @@ pub async fn get_payroll_run_detail(
         Option<serde_json::Value>,
         Option<serde_json::Value>,
         bool,
+        NaiveDate,
+        Option<NaiveDate>,
     );
 
     let member_rows: Vec<MemberRow> = sqlx::query_as(
         "SELECT employment.id, finalized_payroll.id::text, person.full_name, pay_lines.pay_line_jsons,
                 working_payroll_calculation.payroll_calculation_json,
-                payroll_run_employment.figures_invalidated_by_pay_line_write
+                payroll_run_employment.figures_invalidated_by_pay_line_write,
+                employment.start_date, employment.end_date
          FROM payroll_run_employment
          JOIN employment
            ON employment.id = payroll_run_employment.employment_id
@@ -1450,6 +1472,8 @@ pub async fn get_payroll_run_detail(
         pay_line_jsons,
         calculation_json,
         figures_invalidated_by_pay_line_write,
+        start_date,
+        end_date,
     ) in member_rows
     {
         let pay_lines: Vec<RunPayLine> = pay_line_jsons
@@ -1510,6 +1534,8 @@ pub async fn get_payroll_run_detail(
             blockers,
             figures,
             calculation_state,
+            basic_pay_prorated: start_date > period.start()
+                || end_date.is_some_and(|end_date| end_date < period.end()),
         });
     }
 

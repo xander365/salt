@@ -6,10 +6,10 @@
 //! under the same transaction and Employer lock that run creation already
 //! takes.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use payroll::{
-    EarningInstruction, EmployerId, EmploymentId, Money, VoluntaryDeductionInstruction,
-    validate_effective_from_is_a_period_start,
+    EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money,
+    VoluntaryDeductionInstruction, validate_effective_from_is_a_period_start,
 };
 
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
@@ -30,20 +30,44 @@ app_id! {
 /// a recurring fact, so it is not constructible here at all rather than
 /// refused at a write boundary (§0's own words for `StandingPayItem`, "An
 /// Earning or Deduction").
+///
+/// A standing allowance always carries its label. `EarningInstruction`'s
+/// label is optional only so a version-1 snapshot reads back honestly as
+/// "unlabelled" (§D-2); a new item has no such history, and an unlabelled
+/// proposal would be a line the worksheet refuses to resave until someone
+/// types a label onto it — which would silently turn it one-off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StandingPayItemInstruction {
-    TaxableAllowance {
-        amount: Money,
-        label: Option<payroll::EarningLabel>,
-    },
+    TaxableAllowance { amount: Money, label: EarningLabel },
     MedicalAidPremium(Money),
 }
 
 impl StandingPayItemInstruction {
+    /// Reads a stored `pay_line_json` back. Only this module writes that
+    /// column, and only from this type, so any other shape is a broken
+    /// invariant rather than a refusal.
+    fn from_pay_line_json(pay_line_json: serde_json::Value) -> Self {
+        let instruction: PayLineInstruction = serde_json::from_value(pay_line_json)
+            .expect("standing_pay_item.pay_line_json is always a PayLineInstruction");
+        match instruction {
+            PayLineInstruction::Earning(EarningInstruction::TaxableAllowance {
+                amount,
+                label: Some(label),
+            }) => Self::TaxableAllowance { amount, label },
+            PayLineInstruction::Deduction(VoluntaryDeductionInstruction::MedicalAidPremium(
+                amount,
+            )) => Self::MedicalAidPremium(amount),
+            other => panic!("standing_pay_item.pay_line_json holds {other:?}, not a standing kind"),
+        }
+    }
+
     fn into_pay_line_instruction(self) -> PayLineInstruction {
         match self {
             Self::TaxableAllowance { amount, label } => {
-                PayLineInstruction::Earning(EarningInstruction::TaxableAllowance { amount, label })
+                PayLineInstruction::Earning(EarningInstruction::TaxableAllowance {
+                    amount,
+                    label: Some(label),
+                })
             }
             Self::MedicalAidPremium(amount) => PayLineInstruction::Deduction(
                 VoluntaryDeductionInstruction::MedicalAidPremium(amount),
@@ -63,6 +87,11 @@ impl StandingPayItemInstruction {
 /// before the row is written, using the pure crate's own
 /// `validate_effective_from_is_a_period_start` so the refusal is worded
 /// exactly as it already is for those two facts.
+///
+/// A medical aid premium of zero is refused before anything is read: it
+/// withholds nothing (§D-4), and `set_run_pay_lines` refuses the same line,
+/// so proposing one would leave every run it lands on unsaveable until an
+/// Operator deleted it by hand.
 pub async fn create_standing_pay_item(
     db: &SaltDatabase,
     employment_id: &EmploymentId,
@@ -70,6 +99,10 @@ pub async fn create_standing_pay_item(
     effective_from: NaiveDate,
     created_by: &str,
 ) -> Result<StandingPayItemId, PayrollAppError> {
+    if instruction == StandingPayItemInstruction::MedicalAidPremium(Money::ZERO) {
+        return Err(PayrollAppError::StandingMedicalAidPremiumIsZero);
+    }
+
     let mut tx = db.pool().begin().await?;
 
     // Locks the governing Employer row `FOR SHARE`, the same guard
@@ -137,7 +170,8 @@ pub async fn create_standing_pay_item(
     Ok(standing_pay_item_id)
 }
 
-/// Ends `standing_pay_item_id`: no future Ordinary run proposes it again.
+/// Ends `standing_pay_item_id` on `employment_id`: no future Ordinary run
+/// proposes it again.
 /// Recorded by `ended_at`/`ended_by`/`ended_reason`, never a delete — a run
 /// already proposed from this item still names it, and a historical
 /// proposal must always have something to point at.
@@ -145,14 +179,31 @@ pub async fn create_standing_pay_item(
 /// Demands a non-empty `reason`, refused before anything is read, the same
 /// discipline every other reasoned act in this crate applies
 /// (`RemovalReasonCannotBeEmpty`, `ReversalReasonCannotBeEmpty`).
+///
+/// An item that exists but belongs to a different Employment is refused
+/// exactly like one that does not exist (ADR-0017): a caller holding one
+/// Employment's authorization learns nothing about another's items. So is an
+/// id that is not a UUID at all — it cannot name a row, and casting it in
+/// SQL would answer a database error rather than a refusal.
+///
+/// Takes the id as `&str`, like
+/// [`crate::verify_payroll_run_belongs_to_employer`]: this is the boundary
+/// where a caller's id, read off an HTTP path, becomes the wrapped type.
 pub async fn end_standing_pay_item(
     db: &SaltDatabase,
-    standing_pay_item_id: &StandingPayItemId,
+    employment_id: &EmploymentId,
+    standing_pay_item_id: &str,
     reason: &str,
     ended_by: &str,
 ) -> Result<(), PayrollAppError> {
     if reason.trim().is_empty() {
         return Err(PayrollAppError::StandingPayItemEndReasonCannotBeEmpty);
+    }
+    let standing_pay_item_id = StandingPayItemId::new(standing_pay_item_id);
+    if uuid::Uuid::parse_str(standing_pay_item_id.as_str()).is_err() {
+        return Err(PayrollAppError::StandingPayItemNotFound(
+            standing_pay_item_id,
+        ));
     }
 
     let mut tx = db.pool().begin().await?;
@@ -162,19 +213,20 @@ pub async fn end_standing_pay_item(
     // could commit between that snapshot and the run's commit, leaving a
     // newly-created run proposing an item already ended by the time it is
     // visible. The common lock makes either order a complete stated fact.
-    type ItemRow = (String, String, Option<chrono::DateTime<chrono::Utc>>);
+    type ItemRow = (String, Option<DateTime<Utc>>);
     let row: Option<ItemRow> = sqlx::query_as(
-        "SELECT standing_pay_item.employment_id, employment.employer_id, standing_pay_item.ended_at
+        "SELECT employment.employer_id, standing_pay_item.ended_at
          FROM standing_pay_item
          JOIN employment ON employment.id = standing_pay_item.employment_id
          JOIN employer ON employer.id = employment.employer_id
-         WHERE standing_pay_item.id = $1::uuid
+         WHERE standing_pay_item.id = $1::uuid AND standing_pay_item.employment_id = $2
          FOR UPDATE OF standing_pay_item, employer",
     )
     .bind(standing_pay_item_id.as_str())
+    .bind(employment_id.as_str())
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((employment_id, employer_id, ended_at)) = row else {
+    let Some((employer_id, ended_at)) = row else {
         return Err(PayrollAppError::StandingPayItemNotFound(
             standing_pay_item_id.clone(),
         ));
@@ -203,7 +255,7 @@ pub async fn end_standing_pay_item(
             actor: ended_by,
             action_type: ActionType::StandingPayItemEnded,
             target_type: "employment",
-            target_id: &employment_id,
+            target_id: employment_id.as_str(),
             context: Some(serde_json::json!({
                 "standing_pay_item_id": standing_pay_item_id.as_str(),
                 "reason": reason,
@@ -214,6 +266,90 @@ pub async fn end_standing_pay_item(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// How a `StandingPayItem` was ended: when, by whom and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingPayItemEnding {
+    pub ended_at: DateTime<Utc>,
+    pub ended_by: String,
+    pub reason: String,
+}
+
+/// One `StandingPayItem` as the Employment screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingPayItem {
+    pub id: StandingPayItemId,
+    pub instruction: StandingPayItemInstruction,
+    pub effective_from: NaiveDate,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+    /// `None` while the item is still in force from `effective_from`.
+    pub ended: Option<StandingPayItemEnding>,
+}
+
+/// Every `StandingPayItem` `employment_id` has ever carried, ended ones
+/// included — an ended item is history a past proposal still points at, not
+/// something to hide. In the order a run proposes them: `effective_from`,
+/// then `created_at`, then `id`.
+///
+/// Takes no `EmployerId`: like every Employment-scoped use case here, the
+/// caller proves the Employment is theirs first
+/// ([`crate::verify_employment_belongs_to_employer`]).
+pub async fn list_standing_pay_items(
+    db: &SaltDatabase,
+    employment_id: &EmploymentId,
+) -> Result<Vec<StandingPayItem>, PayrollAppError> {
+    type Row = (
+        String,
+        serde_json::Value,
+        NaiveDate,
+        DateTime<Utc>,
+        String,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id::text, pay_line_json, effective_from, created_at, created_by,
+                ended_at, ended_by, ended_reason
+         FROM standing_pay_item
+         WHERE employment_id = $1
+         ORDER BY effective_from, created_at, id",
+    )
+    .bind(employment_id.as_str())
+    .fetch_all(db.pool())
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                pay_line_json,
+                effective_from,
+                created_at,
+                created_by,
+                ended_at,
+                ended_by,
+                reason,
+            )| {
+                let ended = ended_at.map(|ended_at| StandingPayItemEnding {
+                    ended_at,
+                    ended_by: ended_by.expect("an ended StandingPayItem names who ended it"),
+                    reason: reason.expect("an ended StandingPayItem states why"),
+                });
+                StandingPayItem {
+                    id: StandingPayItemId::new(id),
+                    instruction: StandingPayItemInstruction::from_pay_line_json(pay_line_json),
+                    effective_from,
+                    created_at,
+                    created_by,
+                    ended,
+                }
+            },
+        )
+        .collect())
 }
 
 /// The `StandingPayItem`s in force on `employment_id` as of `as_of` — every
