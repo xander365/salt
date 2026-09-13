@@ -722,6 +722,21 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "bootstrap_period_end_day_invalid",
             Some(json!({ "day": day })),
         ),
+        PayrollAppError::StandingPayItemNotFound(id) => Classification::Mapped(
+            StatusCode::NOT_FOUND,
+            "standing_pay_item_not_found",
+            Some(json!({ "standingPayItemId": id.to_string() })),
+        ),
+        PayrollAppError::StandingPayItemAlreadyEnded(id) => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "standing_pay_item_already_ended",
+            Some(json!({ "standingPayItemId": id.to_string() })),
+        ),
+        PayrollAppError::StandingPayItemEndReasonCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "standing_pay_item_end_reason_cannot_be_empty",
+            None,
+        ),
     }
 }
 

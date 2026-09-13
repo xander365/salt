@@ -7,6 +7,7 @@ use payroll::{
 use crate::finalize::FinalizedPayrollId;
 use crate::operator::OperatorId;
 use crate::payroll_run::PayrollRunId;
+use crate::standing_pay_item::StandingPayItemId;
 
 /// `payroll-app`'s own error type. It wraps [`PayrollError`] rather than
 /// re-exporting it, because "PostgreSQL unavailable" and "run already
@@ -590,6 +591,19 @@ pub enum PayrollAppError {
     /// [`payroll::DayOfMonth`], so it is enforced here rather than
     /// duplicated in `salt-server`'s argument parser.
     BootstrapPeriodEndDayInvalid { day: u8 },
+    /// No `StandingPayItem` exists with this id.
+    StandingPayItemNotFound(StandingPayItemId),
+    /// `EndStandingPayItem` was asked to end an item already ended. The
+    /// ending has already happened, so a second one would record an act
+    /// that did not (the same reasoning `EmployerMembershipAlreadyRevoked`
+    /// applies to a membership).
+    StandingPayItemAlreadyEnded(StandingPayItemId),
+    /// `EndStandingPayItem` was given a reason that is empty or only
+    /// whitespace. Ending a `StandingPayItem` is a deliberate, attributed
+    /// act (§0) — a historical proposal must always have something to
+    /// point at, so a blank reason states nothing while looking like it
+    /// states something.
+    StandingPayItemEndReasonCannotBeEmpty,
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -1112,6 +1126,16 @@ impl std::fmt::Display for PayrollAppError {
                 "--period-end-day {day} is not a day of month in 1..=28; use a day in that range \
                  or \"last-day-of-month\""
             ),
+            Self::StandingPayItemNotFound(id) => {
+                write!(f, "no StandingPayItem exists with id {id}")
+            }
+            Self::StandingPayItemAlreadyEnded(id) => {
+                write!(f, "StandingPayItem {id} is already ended")
+            }
+            Self::StandingPayItemEndReasonCannotBeEmpty => write!(
+                f,
+                "ending a StandingPayItem requires a reason that is not empty or only whitespace"
+            ),
         }
     }
 }
@@ -1212,7 +1236,10 @@ impl std::error::Error for PayrollAppError {
             | Self::EmployerMembershipAlreadyRevoked { .. }
             | Self::BootstrapOperatorAlreadyExists
             | Self::BootstrapOperatorTableBusy
-            | Self::BootstrapPeriodEndDayInvalid { .. } => None,
+            | Self::BootstrapPeriodEndDayInvalid { .. }
+            | Self::StandingPayItemNotFound(_)
+            | Self::StandingPayItemAlreadyEnded(_)
+            | Self::StandingPayItemEndReasonCannotBeEmpty => None,
         }
     }
 }

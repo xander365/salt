@@ -136,6 +136,8 @@ pub(crate) struct PayLineDto {
     #[serde(flatten)]
     line: EarningLineDto,
     source: PayLineSourceDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_pay_item_id: Option<String>,
 }
 
 /// One stored deduction line on the way out, the same shape `PayLineDto`
@@ -145,19 +147,26 @@ pub(crate) struct DeductionPayLineDto {
     #[serde(flatten)]
     line: DeductionLineDto,
     source: PayLineSourceDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_pay_item_id: Option<String>,
 }
 
+/// `standing` arrives with issue #79: a line proposed from a
+/// `StandingPayItem` at run creation, carrying that item's id alongside so a
+/// caller can say which one and, by looking it up, since when.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PayLineSourceDto {
     OneOff,
     FromReversedSnapshot,
+    Standing,
 }
 
 fn pay_line_source_to_dto(source: PayLineSource) -> PayLineSourceDto {
     match source {
         PayLineSource::OneOff => PayLineSourceDto::OneOff,
         PayLineSource::FromReversedSnapshot => PayLineSourceDto::FromReversedSnapshot,
+        PayLineSource::Standing => PayLineSourceDto::Standing,
     }
 }
 
@@ -302,14 +311,20 @@ fn pay_lines_to_dtos(
     let mut deductions = Vec::new();
     for pay_line in pay_lines {
         let source = pay_line_source_to_dto(pay_line.source);
+        let standing_pay_item_id = pay_line
+            .standing_pay_item_id
+            .as_ref()
+            .map(ToString::to_string);
         match pay_line.instruction {
             PayLineInstruction::Earning(earning) => earnings.push(PayLineDto {
                 line: earning_line_to_dto(earning),
                 source,
+                standing_pay_item_id,
             }),
             PayLineInstruction::Deduction(deduction) => deductions.push(DeductionPayLineDto {
                 line: deduction_line_to_dto(deduction),
                 source,
+                standing_pay_item_id,
             }),
         }
     }

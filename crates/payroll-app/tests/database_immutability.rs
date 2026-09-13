@@ -288,8 +288,11 @@ async fn the_restricted_role_holds_exactly_the_permissions_the_design_intends(po
     // (issue #38 §6), and the audit trail keeps naming the id of one that is
     // gone, so `UPDATE` is exactly what disabling needs and `DELETE` is the
     // one thing no use case should ever be able to do. An EmployerMembership
-    // is revoked the same way (issue #43), for the same reason.
-    let no_delete = ["operator", "employer_membership"];
+    // is revoked the same way (issue #43), for the same reason. A
+    // StandingPayItem is ended the same way too (issue #79): a run already
+    // proposed from one still names it, so a historical proposal must
+    // always have something to point at.
+    let no_delete = ["operator", "employer_membership", "standing_pay_item"];
 
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",

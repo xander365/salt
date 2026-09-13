@@ -33,12 +33,14 @@ pub enum ActionType {
     EmployerParticularsCorrected,
     PersonParticularsCorrected,
     PersonFullNameCorrected,
+    StandingPayItemCreated,
+    StandingPayItemEnded,
 }
 
 impl ActionType {
     /// Every variant, so a test can walk the whole enum and compare it with
     /// the database's own `action_type` CHECK.
-    pub const ALL: [ActionType; 16] = [
+    pub const ALL: [ActionType; 18] = [
         Self::PayrollRunCreated,
         Self::EmploymentRemovedFromRun,
         Self::EmploymentAddedToCorrectionRun,
@@ -55,6 +57,8 @@ impl ActionType {
         Self::EmployerParticularsCorrected,
         Self::PersonParticularsCorrected,
         Self::PersonFullNameCorrected,
+        Self::StandingPayItemCreated,
+        Self::StandingPayItemEnded,
     ];
 
     /// The exact string `action_log_entry.action_type`'s CHECK accepts.
@@ -76,6 +80,8 @@ impl ActionType {
             Self::EmployerParticularsCorrected => "employer_particulars_corrected",
             Self::PersonParticularsCorrected => "person_particulars_corrected",
             Self::PersonFullNameCorrected => "person_full_name_corrected",
+            Self::StandingPayItemCreated => "standing_pay_item_created",
+            Self::StandingPayItemEnded => "standing_pay_item_ended",
         }
     }
 }
@@ -223,6 +229,11 @@ mod tests {
                 ActionType::PersonFullNameCorrected,
                 "person_full_name_corrected",
             ),
+            (
+                ActionType::StandingPayItemCreated,
+                "standing_pay_item_created",
+            ),
+            (ActionType::StandingPayItemEnded, "standing_pay_item_ended"),
         ];
 
         for (action_type, expected_str) in expected {

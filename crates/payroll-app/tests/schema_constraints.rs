@@ -1193,6 +1193,20 @@ async fn pay_line_provenance_is_enforced_by_the_schema(pool: PgPool) {
     const ITEM: &str = "7d4f6a3e-0000-4000-8000-000000000001";
     const OTHER_ITEM: &str = "7d4f6a3e-0000-4000-8000-000000000002";
 
+    // A `standing_pay_item_id` names a real row (issue #79's own foreign
+    // key, migration 0039) rather than an arbitrary UUID.
+    sqlx::query(
+        "INSERT INTO standing_pay_item (id, employment_id, pay_line_json, effective_from, created_by)
+         VALUES
+            ($1::uuid, 'emp-1', '{}', '2026-03-01', 'actor'),
+            ($2::uuid, 'emp-1', '{}', '2026-03-01', 'actor')",
+    )
+    .bind(ITEM)
+    .bind(OTHER_ITEM)
+    .execute(&mut *conn)
+    .await
+    .expect("insert two StandingPayItems");
+
     for (row, statement) in [
         (
             "a one-off line naming a StandingPayItem",

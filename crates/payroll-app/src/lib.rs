@@ -31,6 +31,7 @@ mod prior_employment;
 mod reversal;
 mod sequencing;
 mod session;
+mod standing_pay_item;
 mod unsupported_deduction_status;
 mod year_to_date;
 
@@ -87,6 +88,9 @@ pub use reversal::reverse_finalized_payroll;
 pub use session::{
     CreatedSession, SessionId, SessionSnapshot, create_session, create_session_for_active_operator,
     delete_session, load_session,
+};
+pub use standing_pay_item::{
+    StandingPayItemId, StandingPayItemInstruction, create_standing_pay_item, end_standing_pay_item,
 };
 pub use unsupported_deduction_status::{
     declare_unsupported_deduction_status, get_unsupported_deduction_status,
