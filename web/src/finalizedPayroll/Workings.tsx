@@ -21,12 +21,15 @@ import { useState } from 'react';
 import { ApiError } from '../api/client';
 import type {
   BandContributionDto,
+  FrozenPayLineDto,
   OvertimeTraceDto,
   PayeTraceDto,
+  PayLineSourceDto,
   SscClampDto,
   SscTraceDto,
 } from '../api/types';
 import { requestIdOf } from '../api/refusal';
+import { humanDate } from '../format';
 import { Money } from '../components/Money';
 import { FailedRequestState } from '../components/states/FailedRequestState';
 import { LoadingState } from '../components/states/LoadingState';
@@ -332,7 +335,94 @@ function OvertimeWorkings({ trace, index }: { trace: OvertimeTraceDto; index: nu
   );
 }
 
-export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string }) {
+/** `source`'s three wire values as words, the same "code is the contract,
+ * words are ours" rule `clampText` and `policyStatusText` already follow
+ * (§0.23). */
+function sourceText(source: PayLineSourceDto): string {
+  switch (source) {
+    case 'standing':
+      return 'Standing';
+    case 'one_off':
+      return 'Typed on this run';
+    case 'from_reversed_snapshot':
+      return 'Copied from reversed payroll';
+    default:
+      return source;
+  }
+}
+
+/** One frozen line: its own instruction, its source, and — for a standing
+ * line — any override or removal reason recorded for this run (issue #80).
+ * Never re-derived from today's standing records (ADR-0004): this is
+ * exactly what froze at finalization, however the standing record reads
+ * now. */
+function PayLineProvenanceLine({ line }: { line: FrozenPayLineDto }) {
+  const label =
+    line.kind === 'taxableAllowance'
+      ? `Taxable allowance — ${line.label ?? 'unlabelled'}`
+      : line.kind === 'overtime'
+        ? `Overtime — ${line.label ?? 'unlabelled'}`
+        : 'Medical aid premium';
+  return (
+    <li className="flex flex-col gap-0.5">
+      <span>
+        {label}
+        {line.kind !== 'overtime' && (
+          <>
+            {' '}
+            <Money cents={line.amountCents} />
+          </>
+        )}
+        {' · '}
+        {sourceText(line.source)}
+        {line.standingEffectiveFrom !== undefined && (
+          <> since {humanDate(line.standingEffectiveFrom)}</>
+        )}
+      </span>
+      {line.overrideReason !== undefined && (
+        <span className="text-xs text-muted-foreground">
+          Changed for this run: {line.overrideReason}
+        </span>
+      )}
+      {line.removedReason !== undefined && (
+        <span className="text-xs text-muted-foreground">
+          Removed for this run: {line.removedReason}. Not paid.
+        </span>
+      )}
+    </li>
+  );
+}
+
+/** The frozen pay-line provenance (issue #80): `null` for a payroll
+ * finalized before this shipped, which never froze one at all — said
+ * plainly rather than shown as an empty list, which would read as "there
+ * were no lines" instead of "this predates the freeze". */
+function PayLineProvenanceWorkings({ lines }: { lines: FrozenPayLineDto[] | null }) {
+  return (
+    <section aria-label="Pay line sources" className="flex flex-col gap-3">
+      <h3 className="text-base font-semibold">Pay line sources</h3>
+      {lines === null ? (
+        <p className="text-sm text-muted-foreground">
+          Line sources were not recorded for payrolls finalized before this was built.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-2 text-sm">
+          {lines.map((line, index) => (
+            <PayLineProvenanceLine key={index} line={line} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+export function Workings({
+  finalizedPayrollId,
+  payLineProvenance,
+}: {
+  finalizedPayrollId: string;
+  payLineProvenance: FrozenPayLineDto[] | null;
+}) {
   const [open, setOpen] = useState(false);
   const traces = useFinalizedPayrollTraces(finalizedPayrollId, open);
 
@@ -345,6 +435,8 @@ export function Workings({ finalizedPayrollId }: { finalizedPayrollId: string })
       <summary className="cursor-pointer text-sm font-medium">How this pay was worked out</summary>
 
       <div className="mt-4 flex flex-col gap-6">
+        <PayLineProvenanceWorkings lines={payLineProvenance} />
+
         {/* `role="status"` because this appears in answer to the Operator's
             own click, long after the page settled: without it a screen
             reader reaches an empty disclosure and is told nothing is

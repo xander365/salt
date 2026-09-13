@@ -139,6 +139,35 @@ async fn the_restricted_role_cannot_update_a_finalized_payroll(pool: PgPool) {
     );
 }
 
+/// Issue #80's own new column is covered by the same blanket `REVOKE
+/// UPDATE ... ON finalized_payroll` migration 0041 restates, not a
+/// column-scoped grant of its own (unlike `standing_pay_item.ended_*`) — so
+/// this pins that column specifically, rather than trusting the blanket
+/// case above to have caught it too.
+#[sqlx::test]
+async fn the_restricted_role_cannot_update_pay_line_provenance(pool: PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    let finalized_payroll_id = a_finalized_payroll(&mut conn).await;
+
+    sqlx::query("SET ROLE payroll_app")
+        .execute(&mut *conn)
+        .await
+        .expect("switch to the restricted role");
+
+    let result = sqlx::query(
+        "UPDATE finalized_payroll SET pay_line_provenance_json = '{}'::jsonb WHERE id = $1::uuid",
+    )
+    .bind(&finalized_payroll_id)
+    .execute(&mut *conn)
+    .await;
+
+    let err = result.expect_err("the restricted role's UPDATE must be refused");
+    assert!(
+        is_insufficient_privilege(&err),
+        "expected an insufficient_privilege refusal, got {err:?}"
+    );
+}
+
 #[sqlx::test]
 async fn the_restricted_role_cannot_delete_a_finalized_payroll(pool: PgPool) {
     let mut conn = pool.acquire().await.expect("acquire connection");

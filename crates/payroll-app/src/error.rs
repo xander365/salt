@@ -608,7 +608,74 @@ pub enum PayrollAppError {
     /// withholds nothing and is not a deduction (§D-4) — the same rule
     /// `VoluntaryDeductionAmountIsZero` applies to a line typed on a run,
     /// stated here without a line index because an item is not a list.
+    ///
+    /// [`crate::override_standing_pay_line`] (issue #80) reuses this same
+    /// variant for the same reason: overriding a standing premium to zero
+    /// withholds nothing either, and the UI tells the operator to remove the
+    /// line for this run instead.
     StandingMedicalAidPremiumIsZero,
+    /// `OverrideStandingPayLine` was given a reason that is empty or only
+    /// whitespace (issue #80, §0). Overriding a standing line for one run
+    /// only is a deliberate, attributed act, the same demand every other
+    /// mandatory reason in this crate makes of its own text.
+    OverrideReasonCannotBeEmpty,
+    /// `RemoveStandingPayLine` was given a reason that is empty or only
+    /// whitespace (issue #80, §0), for the same reason
+    /// [`Self::OverrideReasonCannotBeEmpty`] is refused.
+    PayLineRemovalReasonCannotBeEmpty,
+    /// `OverrideStandingPayLine` or `RemoveStandingPayLine` named a
+    /// `standing_pay_item_id` this member's run has no line for — the item
+    /// does not exist, belongs to a different Employment, was never
+    /// proposed onto this run, or the id is not even a well-formed UUID. The
+    /// cases are not distinguished, for the same "unknown and cross-scope
+    /// are indistinguishable" reasoning ADR-0017 already applies elsewhere.
+    StandingPayLineNotFound {
+        payroll_run_id: PayrollRunId,
+        employment_id: EmploymentId,
+        standing_pay_item_id: StandingPayItemId,
+    },
+    /// `OverrideStandingPayLine` named a line already removed for this run
+    /// (issue #80). A removed line contributes nothing and is not the
+    /// override target it once was; the operator types a one-off line
+    /// instead if that is what is actually wanted.
+    StandingPayLineIsRemoved {
+        payroll_run_id: PayrollRunId,
+        employment_id: EmploymentId,
+        standing_pay_item_id: StandingPayItemId,
+    },
+    /// `RemoveStandingPayLine` named a line already removed for this run.
+    /// The removal has already happened, so a second one would record an
+    /// act that did not (the same reasoning
+    /// [`Self::StandingPayItemAlreadyEnded`] applies to ending an item).
+    StandingPayLineAlreadyRemoved {
+        payroll_run_id: PayrollRunId,
+        employment_id: EmploymentId,
+        standing_pay_item_id: StandingPayItemId,
+    },
+    /// `OverrideStandingPayLine` was given an instruction of a different
+    /// kind than the `StandingPayItem` it names — an allowance overridden
+    /// into a premium, or the reverse (issue #80, §0). An override changes
+    /// an amount or a label for one run; it is never how a standing item's
+    /// own kind is changed, which does not exist as an operation at all —
+    /// the operator ends the item and records a new one.
+    OverrideChangesPayLineKind {
+        payroll_run_id: PayrollRunId,
+        employment_id: EmploymentId,
+        standing_pay_item_id: StandingPayItemId,
+    },
+    /// `SetRunPayLines` was given a body that edits or drops an active
+    /// (not removed) standing line without going through
+    /// `OverrideStandingPayLine` or `RemoveStandingPayLine` (issue #80,
+    /// decision 2). Before this variant existed, such a write silently
+    /// downgraded the line to `one_off` — which then looked "not proposed",
+    /// so a later Refresh would add it again and double the payment. Every
+    /// active standing line must now be restated exactly, or the whole
+    /// write is refused, naming the first line it could not match.
+    StandingPayLineChangedWithoutOverride {
+        payroll_run_id: PayrollRunId,
+        employment_id: EmploymentId,
+        standing_pay_item_id: StandingPayItemId,
+    },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -1145,6 +1212,59 @@ impl std::fmt::Display for PayrollAppError {
                 f,
                 "a standing medical aid premium of zero withholds nothing and is not a deduction"
             ),
+            Self::OverrideReasonCannotBeEmpty => {
+                write!(f, "an override reason must not be empty")
+            }
+            Self::PayLineRemovalReasonCannotBeEmpty => {
+                write!(f, "a pay line removal reason must not be empty")
+            }
+            Self::StandingPayLineNotFound {
+                payroll_run_id,
+                employment_id,
+                standing_pay_item_id,
+            } => write!(
+                f,
+                "PayrollRun {payroll_run_id} has no line for StandingPayItem \
+                 {standing_pay_item_id} on Employment {employment_id}"
+            ),
+            Self::StandingPayLineIsRemoved {
+                payroll_run_id,
+                employment_id,
+                standing_pay_item_id,
+            } => write!(
+                f,
+                "StandingPayItem {standing_pay_item_id}'s line on Employment {employment_id} in \
+                 PayrollRun {payroll_run_id} is already removed for this run"
+            ),
+            Self::StandingPayLineAlreadyRemoved {
+                payroll_run_id,
+                employment_id,
+                standing_pay_item_id,
+            } => write!(
+                f,
+                "StandingPayItem {standing_pay_item_id}'s line on Employment {employment_id} in \
+                 PayrollRun {payroll_run_id} is already removed for this run"
+            ),
+            Self::OverrideChangesPayLineKind {
+                payroll_run_id,
+                employment_id,
+                standing_pay_item_id,
+            } => write!(
+                f,
+                "overriding StandingPayItem {standing_pay_item_id}'s line on Employment \
+                 {employment_id} in PayrollRun {payroll_run_id} would change its kind, which an \
+                 override cannot do"
+            ),
+            Self::StandingPayLineChangedWithoutOverride {
+                payroll_run_id,
+                employment_id,
+                standing_pay_item_id,
+            } => write!(
+                f,
+                "PayrollRun {payroll_run_id}'s pay lines for Employment {employment_id} edit or \
+                 drop the active standing line for StandingPayItem {standing_pay_item_id} without \
+                 going through an override or removal"
+            ),
         }
     }
 }
@@ -1249,7 +1369,14 @@ impl std::error::Error for PayrollAppError {
             | Self::StandingPayItemNotFound(_)
             | Self::StandingPayItemAlreadyEnded(_)
             | Self::StandingPayItemEndReasonCannotBeEmpty
-            | Self::StandingMedicalAidPremiumIsZero => None,
+            | Self::StandingMedicalAidPremiumIsZero
+            | Self::OverrideReasonCannotBeEmpty
+            | Self::PayLineRemovalReasonCannotBeEmpty
+            | Self::StandingPayLineNotFound { .. }
+            | Self::StandingPayLineIsRemoved { .. }
+            | Self::StandingPayLineAlreadyRemoved { .. }
+            | Self::OverrideChangesPayLineKind { .. }
+            | Self::StandingPayLineChangedWithoutOverride { .. } => None,
         }
     }
 }

@@ -65,9 +65,10 @@ use crate::error::PayrollAppError;
 use crate::ids::app_id;
 use crate::payroll_run::{
     EmploymentSpan, PayrollRunId, RunKind, RunStatus, active_member_ids,
-    finalized_payrolls_for_run, lock_run,
+    finalized_payrolls_for_run, lock_run, read_member_pay_lines,
 };
 use crate::person_particulars::person_particulars_snapshot;
+use crate::provenance::build_pay_line_provenance;
 use crate::sequencing::verify_the_preceding_period_is_resolved_for_every_member;
 use chrono::NaiveDate;
 use payroll::{
@@ -99,7 +100,14 @@ use payroll::{
 /// comparing this one against 2. This integer answers a narrower question:
 /// which decoder reads the JSONB blobs (see `KNOWN_JSON_SNAPSHOT_VERSIONS`
 /// and `crate::correction::prepopulate_pay_lines`).
-pub const SNAPSHOT_SCHEMA_VERSION: i32 = 4;
+///
+/// Version 5 (issue #80) adds the sibling column `pay_line_provenance_json`
+/// — a new column beside the existing JSONB blobs, following #73's own
+/// precedent for bumping on a new sibling column, never a change to
+/// `payroll_input_json` or `payroll_calculation_json` themselves. A reader
+/// tests the new column's presence directly, never this version number (see
+/// this constant's own "what this integer is not for").
+pub const SNAPSHOT_SCHEMA_VERSION: i32 = 5;
 
 /// The `snapshot_schema_version` values whose `payroll_input_json` and
 /// `payroll_calculation_json` this build can deserialize (§9.1). Version 2
@@ -117,7 +125,7 @@ pub const SNAPSHOT_SCHEMA_VERSION: i32 = 4;
 /// each comparing a stored version to [`SNAPSHOT_SCHEMA_VERSION`] directly —
 /// a row is not unreadable merely for having finalized under an earlier
 /// version whose lines this build can still decode.
-pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2, 3, 4];
+pub(crate) const KNOWN_JSON_SNAPSHOT_VERSIONS: &[i32] = &[1, 2, 3, 4, 5];
 
 /// The first `snapshot_schema_version` whose frozen `payroll_input_json`
 /// carries a `deductions` field at all (issue #78). A snapshot strictly
@@ -394,6 +402,17 @@ pub async fn finalize_payroll_run(
         // `correct_person_full_name` (`freeze.rs`'s module doc).
         let person_particulars_json = person_particulars_snapshot(&mut tx, person_id).await?;
 
+        // Frozen at finalization, under the run lock already held (issue
+        // #80): the complete, canonically ordered pay lines this member's
+        // `PayrollInput` was built from, provenance and override/removal
+        // reasons included — never re-derived from today's standing records
+        // (ADR-0004).
+        let stored_pay_lines =
+            read_member_pay_lines(&mut tx, payroll_run_id, &employment_id).await?;
+        let pay_line_provenance_json =
+            serde_json::to_value(build_pay_line_provenance(&stored_pay_lines))
+                .expect("PayLineProvenanceSnapshot always serializes");
+
         let finalized_payroll_id = insert_finalized_payroll(
             &mut tx,
             payroll_run_id,
@@ -409,6 +428,7 @@ pub async fn finalize_payroll_run(
                 .map(FinalizedPayrollId::as_str),
             employer_particulars_json.clone(),
             person_particulars_json,
+            pay_line_provenance_json,
             PAYSLIP_TEMPLATE_VERSION,
             finalized_by,
         )
@@ -677,6 +697,7 @@ async fn insert_finalized_payroll(
     replaces_finalized_payroll_id: Option<&str>,
     employer_particulars_json: Option<serde_json::Value>,
     person_particulars_json: serde_json::Value,
+    pay_line_provenance_json: serde_json::Value,
     payslip_template_version: &str,
     finalized_by: &str,
 ) -> Result<FinalizedPayrollId, PayrollAppError> {
@@ -692,9 +713,10 @@ async fn insert_finalized_payroll(
              payroll_input_json, payroll_rules_json, payroll_calculation_json,
              taxable_remuneration, paye, paye_table_id, ssc_rules_id, salt_version,
              snapshot_schema_version, finalized_by,
-             employer_particulars_json, person_particulars_json, payslip_template_version)
+             employer_particulars_json, person_particulars_json, payslip_template_version,
+             pay_line_provenance_json)
          VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::uuid, $8, $9, $10, $11, $12, $13, $14, $15,
-                 $16, $17, $18, $19, $20)
+                 $16, $17, $18, $19, $20, $21)
          RETURNING id::text",
     )
     .bind(payroll_run_id.as_str())
@@ -717,6 +739,7 @@ async fn insert_finalized_payroll(
     .bind(employer_particulars_json)
     .bind(person_particulars_json)
     .bind(payslip_template_version)
+    .bind(pay_line_provenance_json)
     .fetch_one(&mut **tx)
     .await;
 

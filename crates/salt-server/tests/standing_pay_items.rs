@@ -515,6 +515,11 @@ async fn a_run_created_over_http_proposes_the_items_once_and_says_since_when() {
             "source": "standing",
             "standingPayItemId": allowance_id,
             "standingEffectiveFrom": "2026-04-01",
+            "standingPayLine": {
+                "kind": "taxableAllowance",
+                "amountCents": 50_000,
+                "label": "standby",
+            },
         }])
     );
     assert_eq!(
@@ -525,6 +530,10 @@ async fn a_run_created_over_http_proposes_the_items_once_and_says_since_when() {
             "source": "standing",
             "standingPayItemId": premium_id,
             "standingEffectiveFrom": "2026-04-01",
+            "standingPayLine": {
+                "kind": "medicalAidPremium",
+                "amountCents": 75_000,
+            },
         }])
     );
     assert_eq!(member["basicPayProrated"], false);

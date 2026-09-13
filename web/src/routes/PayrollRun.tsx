@@ -11,19 +11,19 @@
 // that a member is ready, and nothing else here decides that.
 
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, CircleAlert, CircleCheck } from 'lucide-react';
+import { ArrowLeft, CircleAlert, CircleCheck, RefreshCw } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import type {
   DeductionLineDto,
-  DeductionPayLineDto,
   EarningLineDto,
+  MemberProposalRefreshDto,
   PayrollRunBlockerDto,
   PayrollRunDetailResponse,
   PayrollRunMemberDto,
-  PayLineDto,
-  StandingPayLineProvenanceDto,
+  StandingItemProposalDto,
+  StandingItemsChangedDto,
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDate, humanDateRange } from '../format';
@@ -32,6 +32,7 @@ import {
   useCalculatePayrollRun,
   useFinalizePayrollRun,
   usePayrollRun,
+  useRefreshStandingProposals,
 } from '../payrollRuns/usePayrollRuns';
 import { NotFound } from './NotFound';
 import { employmentPath, finalizedPayrollPath } from './paths';
@@ -44,6 +45,7 @@ import {
 } from './payroll/finalizeText';
 import { Figures } from './payroll/Figures';
 import { refusalSentence } from './payroll/refusalText';
+import { StandingLines } from './payroll/StandingLines';
 import { Button } from '../components/ui/button';
 import { LoadingState } from '../components/states/LoadingState';
 import { EmptyState } from '../components/states/EmptyState';
@@ -155,48 +157,145 @@ function FinalizedEarnings({
   );
 }
 
-/** The source recorded beside a proposed line is operational information:
- * an Operator needs to know both that it will recur and the date from which
- * it has done so before deciding whether this run needs an override. */
-function StandingPayItemProposals({
-  earnings,
-  deductions,
+function standingItemsChangedIsEmpty(changed: StandingItemsChangedDto): boolean {
+  return changed.added.length === 0 && changed.changed.length === 0 && changed.ended.length === 0;
+}
+
+function proposalSentence(item: StandingItemProposalDto): string {
+  return item.kind === 'taxableAllowance'
+    ? `Taxable allowance — ${item.label}`
+    : 'Medical aid premium';
+}
+
+/**
+ * The run-level change banner and refresh action (issue #80, §0, §D-6). A
+ * draft never refreshes silently: this reports what the standing records
+ * now say that the draft does not yet, per person, and refreshing is one
+ * explicit click away, never automatic.
+ *
+ * The report after a refresh (`role="status"`) says what was added and
+ * updated, and what was deliberately left alone — an empty `members` array
+ * on the response means nothing changed and nothing was written, which is
+ * said plainly rather than left silent.
+ */
+function StandingItemsChangedBanner({
+  run,
+  payrollRunId,
 }: {
-  earnings: PayLineDto[];
-  deductions: DeductionPayLineDto[];
+  run: PayrollRunDetailResponse;
+  payrollRunId: string;
 }) {
-  const standingEarnings = earnings.filter(
-    (line): line is PayLineDto & StandingPayLineProvenanceDto & { kind: 'taxableAllowance' } =>
-      line.source === 'standing' && line.kind === 'taxableAllowance',
+  const refresh = useRefreshStandingProposals(payrollRunId);
+  const [report, setReport] = useState<MemberProposalRefreshDto[] | null>(null);
+
+  const membersWithChanges = run.members.filter(
+    (member) => !standingItemsChangedIsEmpty(member.standingItemsChanged),
   );
-  const standingDeductions = deductions.filter(
-    (line): line is DeductionPayLineDto & StandingPayLineProvenanceDto =>
-      line.source === 'standing',
-  );
-  if (standingEarnings.length === 0 && standingDeductions.length === 0) {
-    return null;
+
+  async function handleRefresh() {
+    try {
+      const result = await refresh.mutateAsync();
+      setReport(result.members);
+    } catch {
+      // `refresh.isError`/`refresh.error` already carry this for the
+      // render below — nothing further to do here.
+    }
   }
 
   return (
-    <section aria-label="Standing pay items" className="flex flex-col gap-2 text-sm">
-      <h4 className="font-medium">Standing pay items</h4>
-      <ul className="flex flex-col gap-1 text-muted-foreground">
-        {standingEarnings.map((line) => (
-          <li key={line.standingPayItemId}>
-            Taxable allowance — {line.label ?? 'unlabelled'} <Money cents={line.amountCents} />
-            {' · '}Standing since{' '}
-            <span className="text-foreground">{humanDate(line.standingEffectiveFrom)}</span>
-          </li>
-        ))}
-        {standingDeductions.map((line) => (
-          <li key={line.standingPayItemId}>
-            Medical aid premium <Money cents={line.amountCents} />
-            {' · '}Standing since{' '}
-            <span className="text-foreground">{humanDate(line.standingEffectiveFrom)}</span>
-          </li>
-        ))}
-      </ul>
-    </section>
+    <>
+      {membersWithChanges.length > 0 && (
+        <StaleBanner>
+          <div className="flex flex-col gap-2">
+            <p className="font-medium text-foreground">
+              The standing records changed since these proposals were made.
+            </p>
+            <ul className="flex flex-col gap-1">
+              {membersWithChanges.map((member) => (
+                <li key={member.employmentId}>
+                  <span className="text-foreground">{member.fullName}</span>
+                  {member.standingItemsChanged.added.length > 0 && (
+                    <>
+                      {' '}
+                      — Added: {member.standingItemsChanged.added.map(proposalSentence).join(', ')}.
+                    </>
+                  )}
+                  {member.standingItemsChanged.changed.length > 0 && (
+                    <>
+                      {' '}
+                      Changed: {member.standingItemsChanged.changed.map(proposalSentence).join(', ')}.
+                    </>
+                  )}
+                  {member.standingItemsChanged.ended.length > 0 && (
+                    <>
+                      {' '}
+                      Ended but still on this run:{' '}
+                      {member.standingItemsChanged.ended.map(proposalSentence).join(', ')} — remove it
+                      for this run if it should not be paid.
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void handleRefresh()}
+              disabled={refresh.isPending}
+              className="self-start"
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {refresh.isPending ? 'Refreshing…' : 'Refresh proposals'}
+            </Button>
+            {refresh.isError && (
+              <PayrollAlert>
+                Something went wrong refreshing proposals. Please try again.
+              </PayrollAlert>
+            )}
+          </div>
+        </StaleBanner>
+      )}
+
+      {report !== null && (
+        <div role="status" className="flex flex-col gap-2 rounded-md border p-3 text-sm">
+          {report.length === 0 ? (
+            <p>Nothing changed. Nothing was written.</p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {report.map((member) => {
+                const memberName =
+                  run.members.find((candidate) => candidate.employmentId === member.employmentId)
+                    ?.fullName ?? member.employmentId;
+                return (
+                  <li key={member.employmentId}>
+                    <span className="font-medium">{memberName}</span>
+                    {member.added.length > 0 && (
+                      <> — Added: {member.added.map(proposalSentence).join(', ')}.</>
+                    )}
+                    {member.updated.length > 0 && (
+                      <> Updated: {member.updated.map(proposalSentence).join(', ')}.</>
+                    )}
+                    {member.keptOverridden.length > 0 && (
+                      <> Left alone, changed for this run: {member.keptOverridden.length}.</>
+                    )}
+                    {member.keptRemoved.length > 0 && (
+                      <> Left alone, removed for this run: {member.keptRemoved.length}.</>
+                    )}
+                    {member.endedStillProposed.length > 0 && (
+                      <>
+                        {' '}
+                        Still on this run though ended:{' '}
+                        {member.endedStillProposed.map(proposalSentence).join(', ')}.
+                      </>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -231,7 +330,16 @@ function Member({
         />
       )}
 
-      <StandingPayItemProposals earnings={member.earnings} deductions={member.deductions} />
+      <StandingLines
+        employerId={employerId}
+        payrollRunId={payrollRunId}
+        employmentId={member.employmentId}
+        earnings={member.earnings}
+        deductions={member.deductions}
+        removedPayLines={member.removedPayLines}
+        runIsFinalized={runIsFinalized}
+        onChanged={onEarningsChanged}
+      />
 
       {/* Only BasicPay is prorated (issue #79's own Deep Instructions): a
           joiner's or leaver's standing items are proposed at their full
@@ -657,6 +765,8 @@ export function PayrollRun() {
             confirming={confirmingFinalize}
             setConfirming={setConfirmingFinalize}
           />
+
+          <StandingItemsChangedBanner run={run.data} payrollRunId={runId} />
 
           {run.data.members.length === 0 ? (
             <EmptyState>No one is proposed to be paid on this run.</EmptyState>

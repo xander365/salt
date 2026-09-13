@@ -102,7 +102,10 @@ export function FinalizedPayroll() {
           {/* Last, and closed: the everyday facts above read exactly as they
               did before issue #67, and the workings are there when asked
               for (§0.29). */}
-          <Workings finalizedPayrollId={finalizedPayrollId} />
+          <Workings
+            finalizedPayrollId={finalizedPayrollId}
+            payLineProvenance={finalizedPayroll.data.payLineProvenance}
+          />
         </>
       )}
     </main>

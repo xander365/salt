@@ -742,6 +742,81 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "standing_medical_aid_premium_is_zero",
             None,
         ),
+        PayrollAppError::OverrideReasonCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "override_reason_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::PayLineRemovalReasonCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "pay_line_removal_reason_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::StandingPayLineNotFound {
+            payroll_run_id,
+            employment_id,
+            standing_pay_item_id,
+        } => Classification::Mapped(
+            StatusCode::NOT_FOUND,
+            "standing_pay_line_not_found",
+            Some(json!({
+                "payrollRunId": payroll_run_id.to_string(),
+                "employmentId": employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        ),
+        PayrollAppError::StandingPayLineIsRemoved {
+            payroll_run_id,
+            employment_id,
+            standing_pay_item_id,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "standing_pay_line_is_removed",
+            Some(json!({
+                "payrollRunId": payroll_run_id.to_string(),
+                "employmentId": employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        ),
+        PayrollAppError::StandingPayLineAlreadyRemoved {
+            payroll_run_id,
+            employment_id,
+            standing_pay_item_id,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "standing_pay_line_already_removed",
+            Some(json!({
+                "payrollRunId": payroll_run_id.to_string(),
+                "employmentId": employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        ),
+        PayrollAppError::OverrideChangesPayLineKind {
+            payroll_run_id,
+            employment_id,
+            standing_pay_item_id,
+        } => Classification::Mapped(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "override_changes_pay_line_kind",
+            Some(json!({
+                "payrollRunId": payroll_run_id.to_string(),
+                "employmentId": employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        ),
+        PayrollAppError::StandingPayLineChangedWithoutOverride {
+            payroll_run_id,
+            employment_id,
+            standing_pay_item_id,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "standing_pay_line_changed_without_override",
+            Some(json!({
+                "payrollRunId": payroll_run_id.to_string(),
+                "employmentId": employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        ),
     }
 }
 
@@ -1380,6 +1455,26 @@ mod tests {
             PayrollAppError::RemovalReasonCannotBeEmpty,
             StatusCode::BAD_REQUEST,
             "removal_reason_cannot_be_empty",
+            None,
+        );
+    }
+
+    #[test]
+    fn override_reason_cannot_be_empty() {
+        check(
+            PayrollAppError::OverrideReasonCannotBeEmpty,
+            StatusCode::BAD_REQUEST,
+            "override_reason_cannot_be_empty",
+            None,
+        );
+    }
+
+    #[test]
+    fn pay_line_removal_reason_cannot_be_empty() {
+        check(
+            PayrollAppError::PayLineRemovalReasonCannotBeEmpty,
+            StatusCode::BAD_REQUEST,
+            "pay_line_removal_reason_cannot_be_empty",
             None,
         );
     }
@@ -2260,6 +2355,32 @@ mod tests {
         .await
         .unwrap();
 
+        // A real StandingPayItemId — like PayrollRunId and FinalizedPayrollId,
+        // minted only with a `pub(crate)` constructor, so the same "hold one
+        // for real" approach applies (see this test's own doc comment).
+        let (_, standing_employment_id) = payroll_app::create_employment(
+            &db,
+            &plain_employer_id,
+            payroll_app::EmploymentPerson::New("Standing Item Person".to_string()),
+            period().start(),
+            None,
+            "actor",
+        )
+        .await
+        .unwrap();
+        let standing_pay_item_id = payroll_app::create_standing_pay_item(
+            &db,
+            &standing_employment_id,
+            payroll_app::StandingPayItemInstruction::TaxableAllowance {
+                amount: Money::from_cents(20_000).unwrap(),
+                label: payroll::EarningLabel::new("standby").unwrap(),
+            },
+            period().start(),
+            "actor",
+        )
+        .await
+        .unwrap();
+
         let finalized_employer_id =
             payroll_app::create_employer(&db, "Employer 2", schedule(), "actor")
                 .await
@@ -2533,6 +2654,77 @@ mod tests {
             Some(json!({
                 "operatorId": operator_id.to_string(),
                 "employerId": employer_id.to_string(),
+            })),
+        );
+
+        check(
+            PayrollAppError::StandingPayLineNotFound {
+                payroll_run_id: unfinalized_run_id.clone(),
+                employment_id: standing_employment_id.clone(),
+                standing_pay_item_id: standing_pay_item_id.clone(),
+            },
+            StatusCode::NOT_FOUND,
+            "standing_pay_line_not_found",
+            Some(json!({
+                "payrollRunId": unfinalized_run_id.to_string(),
+                "employmentId": standing_employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        );
+        check(
+            PayrollAppError::StandingPayLineIsRemoved {
+                payroll_run_id: unfinalized_run_id.clone(),
+                employment_id: standing_employment_id.clone(),
+                standing_pay_item_id: standing_pay_item_id.clone(),
+            },
+            StatusCode::CONFLICT,
+            "standing_pay_line_is_removed",
+            Some(json!({
+                "payrollRunId": unfinalized_run_id.to_string(),
+                "employmentId": standing_employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        );
+        check(
+            PayrollAppError::StandingPayLineAlreadyRemoved {
+                payroll_run_id: unfinalized_run_id.clone(),
+                employment_id: standing_employment_id.clone(),
+                standing_pay_item_id: standing_pay_item_id.clone(),
+            },
+            StatusCode::CONFLICT,
+            "standing_pay_line_already_removed",
+            Some(json!({
+                "payrollRunId": unfinalized_run_id.to_string(),
+                "employmentId": standing_employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        );
+        check(
+            PayrollAppError::OverrideChangesPayLineKind {
+                payroll_run_id: unfinalized_run_id.clone(),
+                employment_id: standing_employment_id.clone(),
+                standing_pay_item_id: standing_pay_item_id.clone(),
+            },
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "override_changes_pay_line_kind",
+            Some(json!({
+                "payrollRunId": unfinalized_run_id.to_string(),
+                "employmentId": standing_employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
+            })),
+        );
+        check(
+            PayrollAppError::StandingPayLineChangedWithoutOverride {
+                payroll_run_id: unfinalized_run_id.clone(),
+                employment_id: standing_employment_id.clone(),
+                standing_pay_item_id: standing_pay_item_id.clone(),
+            },
+            StatusCode::CONFLICT,
+            "standing_pay_line_changed_without_override",
+            Some(json!({
+                "payrollRunId": unfinalized_run_id.to_string(),
+                "employmentId": standing_employment_id.to_string(),
+                "standingPayItemId": standing_pay_item_id.to_string(),
             })),
         );
     }

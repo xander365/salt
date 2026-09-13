@@ -40,10 +40,9 @@ import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
 import type {
   DeductionLineDto,
+  DeductionPayLineDto,
   EarningLineDto,
-  MedicalAidPremiumLineDto,
-  OvertimeLineDto,
-  TaxableAllowanceLineDto,
+  PayLineDto,
 } from '../../api/types';
 import { formatCents, parseCentsInput } from '../../money';
 import { useSetRunPayLines } from '../../payrollRuns/usePayrollRuns';
@@ -81,6 +80,12 @@ function earningsFailureMessage(caught: unknown): string {
 
     case 'voluntary_deduction_amount_is_zero':
       return 'A medical aid premium of zero is not a deduction. Enter an amount above zero, or remove the line.';
+
+    // Issue #80: this form only ever restates a standing line exactly as
+    // it was given, so reaching this means the run's standing lines moved
+    // in the time since this screen loaded them.
+    case 'standing_pay_line_changed_without_override':
+      return 'The standing lines on this run changed. Reload the page.';
 
     default:
       return 'Something went wrong. Please try again.';
@@ -149,6 +154,21 @@ interface MedicalAidPremiumDraft {
 
 const MAX_LABEL_LENGTH = 100;
 
+/** Strips a stored line back to the bare instruction the wire's write body
+ * accepts — the extra fields a `PayLineDto` carries (`source`,
+ * `standingPayItemId`, `overrideReason`, …) are Salt's own record, never
+ * something a write body restates as its own claim. */
+function toEarningLineDto(line: PayLineDto): EarningLineDto {
+  return line.kind === 'taxableAllowance'
+    ? { kind: 'taxableAllowance', amountCents: line.amountCents, label: line.label }
+    : { kind: 'overtime', hours: line.hours, multiplier: line.multiplier, label: line.label };
+}
+
+/** `toEarningLineDto`'s counterpart for deduction lines. */
+function toDeductionLineDto(line: DeductionPayLineDto): DeductionLineDto {
+  return { kind: 'medicalAidPremium', amountCents: line.amountCents };
+}
+
 export function EarningsForm({
   payrollRunId,
   employmentId,
@@ -158,23 +178,33 @@ export function EarningsForm({
 }: {
   payrollRunId: string;
   employmentId: string;
-  earnings: EarningLineDto[];
-  deductions: DeductionLineDto[];
+  earnings: PayLineDto[];
+  deductions: DeductionPayLineDto[];
   onChanged?: () => void;
 }) {
   const setEarnings = useSetRunPayLines(payrollRunId);
 
+  // Only a one-off or copied line is edited here (issue #80): a standing
+  // line is changed through "Change for this run" or "Remove for this run"
+  // on `StandingLines`, never by editing it in this list — the whole reason
+  // being that this form's own save must restate every active standing line
+  // exactly, and it can only do that by never having touched one.
+  const editableEarnings = earnings.filter((line) => line.source !== 'standing');
+  const editableDeductions = deductions.filter((line) => line.source !== 'standing');
+  const standingEarnings = earnings.filter((line) => line.source === 'standing');
+  const standingDeductions = deductions.filter((line) => line.source === 'standing');
+
   const [allowances, setAllowances] = useState(() =>
-    earnings
-      .filter((line): line is TaxableAllowanceLineDto => line.kind === 'taxableAllowance')
+    editableEarnings
+      .filter((line) => line.kind === 'taxableAllowance')
       .map((line) => ({
         amount: safeAmountText(line.amountCents),
         label: line.label ?? '',
       })),
   );
   const [overtimes, setOvertimes] = useState<OvertimeDraft[]>(() =>
-    earnings
-      .filter((line): line is OvertimeLineDto => line.kind === 'overtime')
+    editableEarnings
+      .filter((line) => line.kind === 'overtime')
       .map((line) => ({
         hours: line.hours,
         // An unrecognised multiplier from the wire is shown as itself rather
@@ -185,8 +215,8 @@ export function EarningsForm({
       })),
   );
   const [medicalAidPremiums, setMedicalAidPremiums] = useState<MedicalAidPremiumDraft[]>(() =>
-    deductions
-      .filter((line): line is MedicalAidPremiumLineDto => line.kind === 'medicalAidPremium')
+    editableDeductions
+      .filter((line) => line.kind === 'medicalAidPremium')
       .map((line) => ({ amount: safeAmountText(line.amountCents) })),
   );
   const [lineError, setLineError] = useState<LineError | null>(null);
@@ -383,18 +413,21 @@ export function EarningsForm({
 
     // The whole list, every time (issue #65's own first acceptance
     // criterion): `PUT` replaces what is stored, so a line an Operator
-    // removed is gone precisely because this body does not carry it.
+    // removed is gone precisely because this body does not carry it. Every
+    // active standing line is restated exactly, ahead of the edited lines
+    // (issue #80, decision 2) — this form never touches one, so the
+    // restatement is always byte-identical to what the server just gave it.
     const changed =
-      request.length !== earnings.length ||
-      request.some((line, index) => !sameLine(line, earnings[index])) ||
-      deductionsRequest.length !== deductions.length ||
-      deductionsRequest.some((line, index) => !sameDeductionLine(line, deductions[index]));
+      request.length !== editableEarnings.length ||
+      request.some((line, index) => !sameLine(line, editableEarnings[index])) ||
+      deductionsRequest.length !== editableDeductions.length ||
+      deductionsRequest.some((line, index) => !sameDeductionLine(line, editableDeductions[index]));
 
     try {
       await setEarnings.mutateAsync({
         employmentId,
-        earnings: request,
-        deductions: deductionsRequest,
+        earnings: [...standingEarnings.map(toEarningLineDto), ...request],
+        deductions: [...standingDeductions.map(toDeductionLineDto), ...deductionsRequest],
       });
       setSaved(true);
       if (changed) {

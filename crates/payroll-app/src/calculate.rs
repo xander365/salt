@@ -182,13 +182,18 @@ async fn clear_pay_line_figures_invalidation(
 /// run or pre-populated from a reversed Correction target, it is one of this
 /// member's current pay lines and calculates the same way (§4.5d, extended
 /// to voluntary deductions by issue #78).
+///
+/// Excludes every removed line (issue #80, §0): a line removed for this run
+/// only contributes nothing to calculation, which is also what finalization
+/// reads through this same function — a removed line never reaches
+/// `PayrollInput`.
 pub(crate) async fn run_pay_lines_by_member(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<HashMap<String, Vec<PayLineInstruction>>, PayrollAppError> {
     let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
         "SELECT employment_id, pay_line_json FROM payroll_run_pay_line
-         WHERE payroll_run_id = $1::uuid ORDER BY employment_id, line",
+         WHERE payroll_run_id = $1::uuid AND NOT removed ORDER BY employment_id, line",
     )
     .bind(payroll_run_id.as_str())
     .fetch_all(&mut **tx)

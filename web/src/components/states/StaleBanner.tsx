@@ -4,16 +4,17 @@
 // figures shown were last calculated. Never colour alone: an icon and a
 // sentence say what changed and what to do.
 
+import { type ReactNode } from 'react';
 import { Clock } from 'lucide-react';
 
-export function StaleBanner({ children }: { children: string }) {
+export function StaleBanner({ children }: { children: ReactNode }) {
   return (
-    <p
+    <div
       role="status"
-      className="flex items-center gap-2 rounded-md border border-muted-foreground/30 bg-muted px-3 py-2 text-sm text-muted-foreground"
+      className="flex items-start gap-2 rounded-md border border-muted-foreground/30 bg-muted px-3 py-2 text-sm text-muted-foreground"
     >
       <Clock className="size-4 shrink-0" aria-hidden="true" />
       {children}
-    </p>
+    </div>
   );
 }

@@ -11,11 +11,12 @@ use payroll::{
 use payroll_app::{
     EarningPrePopulation, EmploymentPerson, FinalizedPayrollId, PayLineInstruction,
     PayrollAppError, PayrollRunId, SNAPSHOT_SCHEMA_VERSION, SaltDatabase,
-    add_employment_to_correction_run, calculate_payroll_run, correct_compensation_terms,
-    create_correction_run, create_employer, create_employment, create_ordinary_payroll_run,
-    declare_prior_employment, declare_unsupported_deduction_status, finalize_payroll_run,
-    record_compensation_terms, remove_employment_from_run, reverse_finalized_payroll,
-    set_run_pay_lines,
+    StandingPayItemInstruction, add_employment_to_correction_run, calculate_payroll_run,
+    correct_compensation_terms, create_correction_run, create_employer, create_employment,
+    create_ordinary_payroll_run, create_standing_pay_item, declare_prior_employment,
+    declare_unsupported_deduction_status, finalize_payroll_run, override_standing_pay_line,
+    record_compensation_terms, remove_employment_from_run, remove_standing_pay_line,
+    reverse_finalized_payroll, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -1122,6 +1123,129 @@ async fn earnings_are_prepopulated_from_the_reversed_targets_frozen_snapshot(poo
     assert_eq!(sources(pool.clone()).await, ["one_off"]);
 }
 
+/// A Correction copies the frozen `PayrollInput`'s `earnings`/`deductions` —
+/// what was actually calculated, which already reflects an override and
+/// already omits a removed line (issue #80): the pre-population needs no
+/// code change of its own, because it reads exactly what
+/// `assemble_and_calculate` already read.
+#[sqlx::test]
+async fn a_correction_prepopulates_the_overridden_amount_and_not_the_removed_line(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(
+        &db,
+        &employer_id,
+        "person-1",
+        Money::from_cents(1500000).unwrap(),
+    )
+    .await;
+    let allowance_item = create_standing_pay_item(
+        &db,
+        &employment_id,
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: Money::from_cents(20_000).unwrap(),
+            label: payroll::EarningLabel::new("standby").unwrap(),
+        },
+        period().start(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    let premium_item = create_standing_pay_item(
+        &db,
+        &employment_id,
+        StandingPayItemInstruction::MedicalAidPremium(Money::from_cents(15_000).unwrap()),
+        period().start(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    let ordinary_run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    override_standing_pay_line(
+        &db,
+        &ordinary_run_id,
+        &employment_id,
+        allowance_item.as_str(),
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: Money::from_cents(35_000).unwrap(),
+            label: payroll::EarningLabel::new("standby").unwrap(),
+        },
+        "temporary raise",
+        "actor",
+    )
+    .await
+    .unwrap();
+    remove_standing_pay_line(
+        &db,
+        &ordinary_run_id,
+        &employment_id,
+        premium_item.as_str(),
+        "not paid this month",
+        "actor",
+    )
+    .await
+    .unwrap();
+    calculate_payroll_run(&db, &ordinary_run_id, "calculator")
+        .await
+        .unwrap();
+    let outcome = finalize_payroll_run(&db, &ordinary_run_id, "finalizer")
+        .await
+        .unwrap();
+    let target = outcome.finalized[0].1.clone();
+    reverse_finalized_payroll(&db, &target, "March pay was wrong", "actor")
+        .await
+        .unwrap();
+
+    let run_id = create_correction_run(
+        &db,
+        &employer_id,
+        period(),
+        date(2026, 6, 5),
+        "March pay was wrong",
+        "actor",
+    )
+    .await
+    .unwrap();
+    let pre_population =
+        add_employment_to_correction_run(&db, &run_id, &employment_id, Some(&target), "actor")
+            .await
+            .unwrap();
+    assert_eq!(
+        pre_population,
+        EarningPrePopulation::FromTarget { count: 1 }
+    );
+
+    let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
+        "SELECT pay_line_json, source FROM payroll_run_pay_line
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2 ORDER BY line",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // Only the overridden allowance, at its overridden amount — the removed
+    // premium was never part of what was calculated, so there is nothing
+    // for a Correction to copy for it.
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0],
+        (
+            serde_json::to_value(PayLineInstruction::Earning(
+                EarningInstruction::TaxableAllowance {
+                    amount: Money::from_cents(35_000).unwrap(),
+                    label: Some(payroll::EarningLabel::new("standby").unwrap()),
+                }
+            ))
+            .unwrap(),
+            "from_reversed_snapshot".to_string()
+        )
+    );
+}
+
 // ---- Deduction pre-population (issue #78, §4.5d, §6.3, §9.1) ----
 
 /// Carried over from #77: a Correction's pre-population copies deductions
@@ -1295,7 +1419,11 @@ async fn a_snapshot_from_before_deductions_existed_prepopulates_no_deductions(po
          SET snapshot_schema_version = $1, payroll_input_json = payroll_input_json - 'deductions'
          WHERE id = $2::uuid",
     )
-    .bind(SNAPSHOT_SCHEMA_VERSION - 1)
+    // A literal 3, not `SNAPSHOT_SCHEMA_VERSION - 1`: issue #80 bumped the
+    // current version to 5, but a pre-deductions snapshot must stay at a
+    // version strictly before `DEDUCTIONS_INTRODUCED_AT_SNAPSHOT_SCHEMA_VERSION`
+    // (4), which `SNAPSHOT_SCHEMA_VERSION - 1` no longer is.
+    .bind(3_i32)
     .bind(target.as_str())
     .execute(&pool)
     .await

@@ -578,6 +578,43 @@ async fn reading_a_finalized_payroll_returns_the_ten_figures_the_period_the_pay_
     assert!(!body["payslipTemplateVersion"].as_str().unwrap().is_empty());
 }
 
+/// Issue #80: every newly finalized payroll freezes its pay-line
+/// provenance — never `null` the way it is for a row finalized before this
+/// shipped.
+#[tokio::test]
+async fn reading_a_finalized_payroll_returns_its_frozen_pay_line_provenance() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let finalized_payroll_id = finalize_a_fully_declared_employment_with_earnings(
+        &employer_id,
+        &employment_id,
+        &cookie,
+        serde_json::json!([
+            { "kind": "taxableAllowance", "amountCents": 20_000, "label": "standby" }
+        ]),
+    )
+    .await;
+
+    let response = router()
+        .await
+        .oneshot(detail_request(&employer_id, &finalized_payroll_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+
+    let lines = body["payLineProvenance"]
+        .as_array()
+        .expect("issue #80 always freezes provenance for a newly finalized payroll");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["kind"], "taxableAllowance");
+    assert_eq!(lines[0]["amountCents"], 20_000);
+    assert_eq!(lines[0]["source"], "one_off");
+    assert!(lines[0].get("standingPayItemId").is_none());
+    assert!(lines[0].get("overrideReason").is_none());
+    assert!(lines[0].get("removedReason").is_none());
+}
+
 fn set_employer_particulars_request(
     employer_id: &str,
     cookie: &str,

@@ -10,9 +10,12 @@ import type {
   DeductionLineDto,
   EarningLineDto,
   FinalizePayrollRunResponse,
+  OverrideStandingPayLineRequest,
   PayrollRunDetailResponse,
   PayrollRunsResponse,
   RecordedResponse,
+  RefreshStandingProposalsResponse,
+  RemoveStandingPayLineRequest,
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 
@@ -168,5 +171,78 @@ export function useFinalizePayrollRun(payrollRunId: string) {
       queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) });
       queryClient.invalidateQueries({ queryKey: payrollRunsQueryKey(employerId) });
     },
+  });
+}
+
+/**
+ * `POST .../pay-lines/{s}/override` (issue #80): changes a proposed
+ * standing line for this run only, with a reason, leaving the
+ * `StandingPayItem` itself untouched. Invalidates the run detail on
+ * success, the same as `useSetRunPayLines` — a plain `GET` refetch is what
+ * carries the true, retired `calculationState` back.
+ */
+export function useOverrideStandingPayLine(payrollRunId: string) {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      employmentId,
+      standingPayItemId,
+      ...request
+    }: OverrideStandingPayLineRequest & { employmentId: string; standingPayItemId: string }) =>
+      apiFetch<RecordedResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/members/${encodeURIComponent(employmentId)}/pay-lines/${encodeURIComponent(standingPayItemId)}/override`,
+        { method: 'POST', body: JSON.stringify(request) },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) }),
+  });
+}
+
+/**
+ * `POST .../pay-lines/{s}/remove` (issue #80): removes a proposed standing
+ * line for this run only, with a reason. The line contributes nothing from
+ * this point on, but stays visible in `removedPayLines` with its reason.
+ */
+export function useRemoveStandingPayLine(payrollRunId: string) {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      employmentId,
+      standingPayItemId,
+      ...request
+    }: RemoveStandingPayLineRequest & { employmentId: string; standingPayItemId: string }) =>
+      apiFetch<RecordedResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/members/${encodeURIComponent(employmentId)}/pay-lines/${encodeURIComponent(standingPayItemId)}/remove`,
+        { method: 'POST', body: JSON.stringify(request) },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) }),
+  });
+}
+
+/**
+ * `POST .../refresh-proposals` (issue #80): the one explicit,
+ * operator-triggered act that catches a draft's proposals up with the
+ * standing records. Never automatic — no hook here calls this on its own,
+ * and the mutation exists only to be triggered by a click. Invalidates the
+ * run detail on success so the refreshed lines and the now-empty change
+ * signal both read back fresh.
+ */
+export function useRefreshStandingProposals(payrollRunId: string) {
+  const employerId = useEmployerId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<RefreshStandingProposalsResponse>(
+        `/api/employers/${encodeURIComponent(employerId)}/payroll-runs/${encodeURIComponent(payrollRunId)}/refresh-proposals`,
+        { method: 'POST' },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: payrollRunQueryKey(employerId, payrollRunId) }),
   });
 }

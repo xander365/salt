@@ -28,7 +28,9 @@ mod operator;
 mod payroll_run;
 mod person_particulars;
 mod prior_employment;
+mod provenance;
 mod reversal;
+mod run_override;
 mod sequencing;
 mod session;
 mod standing_pay_item;
@@ -84,7 +86,13 @@ pub use person_particulars::{
     set_person_particulars,
 };
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
+pub use provenance::FrozenPayLine;
 pub use reversal::reverse_finalized_payroll;
+pub use run_override::{
+    MemberProposalRefresh, StandingItemProposal, StandingItemsChangedSinceProposal,
+    StandingProposalRefresh, override_standing_pay_line, refresh_standing_proposals,
+    remove_standing_pay_line,
+};
 pub use session::{
     CreatedSession, SessionId, SessionSnapshot, create_session, create_session_for_active_operator,
     delete_session, load_session,

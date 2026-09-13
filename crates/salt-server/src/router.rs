@@ -122,6 +122,18 @@ fn production_routes() -> Router<AppState> {
             axum::routing::put(payroll_runs::set_run_pay_lines),
         )
         .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/override",
+            axum::routing::post(payroll_runs::override_standing_pay_line),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/remove",
+            axum::routing::post(payroll_runs::remove_standing_pay_line),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/refresh-proposals",
+            axum::routing::post(payroll_runs::refresh_standing_proposals),
+        )
+        .route(
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
             axum::routing::post(payroll_runs::calculate_payroll_run),
         )

@@ -14,7 +14,12 @@ use crate::finalize::FinalizedPayrollId;
 use crate::freeze::finalized_period_ends_in;
 use crate::ids::app_id;
 use crate::prior_employment::get_prior_employment_on;
-use crate::standing_pay_item::{StandingPayItemId, standing_pay_lines_in_force};
+use crate::run_override::{
+    StandingItemProposal, StandingItemsChangedSinceProposal, diff_standing_proposal,
+};
+use crate::standing_pay_item::{
+    StandingPayItemId, StandingPayItemInstruction, standing_pay_lines_in_force,
+};
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use chrono::NaiveDate;
 use payroll::{
@@ -44,7 +49,13 @@ pub enum CalculationState {
 
 /// Where a run pay line came from (issue #79 adds `Standing`, proposed from
 /// a `StandingPayItem` at run creation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` since issue #80, with `rename_all = "snake_case"`
+/// deliberately matching [`Self::as_column`]'s own three strings exactly —
+/// `crate::provenance`'s frozen snapshot reuses this type directly rather
+/// than inventing a parallel wire enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PayLineSource {
     OneOff,
     FromReversedSnapshot,
@@ -148,12 +159,36 @@ impl<'de> Deserialize<'de> for PayLineInstruction {
 /// `payroll_run_pay_line_standing_item_iff_standing_source` CHECK
 /// (migration 0038). `standing_effective_from` names when that standing
 /// item began and is likewise present exactly for a standing line.
+///
+/// Issue #80 adds three fields, all mirroring database CHECKs of their own
+/// (migration 0038): `override_reason` is `Some` only on a standing line;
+/// `removed_reason` is `Some` exactly when the line `is_removed()`; and
+/// `standing_instruction` — the item's own current instruction, read
+/// alongside the line rather than fetched a second time — is `Some` iff
+/// `source` is [`PayLineSource::Standing`]. `instruction` on a standing line
+/// may differ from `standing_instruction` on purpose: that is what an
+/// override *is*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPayLine {
     pub instruction: PayLineInstruction,
     pub source: PayLineSource,
     pub standing_pay_item_id: Option<StandingPayItemId>,
     pub standing_effective_from: Option<NaiveDate>,
+    pub override_reason: Option<String>,
+    pub removed_reason: Option<String>,
+    pub standing_instruction: Option<PayLineInstruction>,
+}
+
+impl RunPayLine {
+    /// Whether this line has been removed for this run only (§0, issue #80):
+    /// it contributes nothing to calculation, but stays visible with its
+    /// reason. Mirrors `removed_reason.is_some()` rather than a separate
+    /// `removed` flag of its own — the database's own
+    /// `payroll_run_pay_line_removed_reason_only_when_removed` CHECK is the
+    /// same biconditional.
+    pub fn is_removed(&self) -> bool {
+        self.removed_reason.is_some()
+    }
 }
 
 app_id! {
@@ -700,7 +735,13 @@ pub(crate) async fn lock_and_reopen_run(
 
 /// The lock-and-refuse half of [`lock_and_reopen_run`], for a caller that
 /// must decide whether it changes anything before it reopens the run.
-async fn lock_editable_run(
+///
+/// `pub(crate)` since issue #80: `run_override.rs`'s override, removal and
+/// refresh use cases each lock the run themselves rather than through
+/// [`lock_and_reopen_run`], because none of the three may reopen it before
+/// deciding whether anything actually changed (§D-6's own "writes nothing at
+/// all" rule).
+pub(crate) async fn lock_editable_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payroll_run_id: &PayrollRunId,
 ) -> Result<LockedRun, PayrollAppError> {
@@ -830,6 +871,224 @@ pub async fn remove_employment_from_run(
     Ok(())
 }
 
+/// Reads back `(payroll_run_id, employment_id)`'s current pay lines, in
+/// storage order — every field [`RunPayLine`] carries, including the two
+/// issue #80 adds beside `pay_line_json` itself (`override_reason`,
+/// `removed_reason`) and the standing item's own current instruction, joined
+/// in as `standing_instruction`.
+///
+/// `pub(crate)` and free-standing since issue #80: it used to live inlined
+/// inside [`set_run_pay_lines`] alone; override, remove and refresh
+/// (`run_override.rs`) all need this same read before they decide what to
+/// write.
+pub(crate) async fn read_member_pay_lines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+    employment_id: &EmploymentId,
+) -> Result<Vec<RunPayLine>, PayrollAppError> {
+    type Row = (
+        serde_json::Value,
+        String,
+        Option<String>,
+        Option<NaiveDate>,
+        Option<String>,
+        Option<String>,
+        Option<serde_json::Value>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT payroll_run_pay_line.pay_line_json, payroll_run_pay_line.source,
+                payroll_run_pay_line.standing_pay_item_id::text, standing_pay_item.effective_from,
+                payroll_run_pay_line.override_reason, payroll_run_pay_line.removed_reason,
+                standing_pay_item.pay_line_json AS standing_pay_line_json
+         FROM payroll_run_pay_line
+         LEFT JOIN standing_pay_item
+           ON standing_pay_item.id = payroll_run_pay_line.standing_pay_item_id
+         WHERE payroll_run_pay_line.payroll_run_id = $1::uuid
+           AND payroll_run_pay_line.employment_id = $2
+         ORDER BY line",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_all(&mut **tx)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                pay_line_json,
+                source,
+                standing_pay_item_id,
+                standing_effective_from,
+                override_reason,
+                removed_reason,
+                standing_pay_line_json,
+            )| RunPayLine {
+                instruction: serde_json::from_value(pay_line_json)
+                    .expect("payroll_run_pay_line.pay_line_json is always a PayLineInstruction"),
+                source: PayLineSource::from_column(&source),
+                standing_pay_item_id: standing_pay_item_id.map(StandingPayItemId::new),
+                standing_effective_from,
+                override_reason,
+                removed_reason,
+                standing_instruction: standing_pay_line_json.map(|value| {
+                    serde_json::from_value(value)
+                        .expect("standing_pay_item.pay_line_json is always a PayLineInstruction")
+                }),
+            },
+        )
+        .collect())
+}
+
+/// The one canonical order every stored member's pay lines are kept in
+/// (issue #80's decision 5): a stable sort by `(is deduction, is removed)` —
+/// earnings before deductions, and inside each, active lines keep their
+/// relative order with removed lines moved to the end. Every row written
+/// before issue #80 is already in this order, so no data migration is
+/// needed; this function is what keeps every future write in it too.
+pub(crate) fn canonical_order(mut lines: Vec<RunPayLine>) -> Vec<RunPayLine> {
+    lines.sort_by_key(|line| {
+        (
+            matches!(line.instruction, PayLineInstruction::Deduction(_)),
+            line.is_removed(),
+        )
+    });
+    lines
+}
+
+/// The one write path every pay-line change goes through — `set_run_pay_lines`,
+/// override, remove and refresh alike (issue #80's decision 4): each builds
+/// the member's complete new list and hands it here. Orders it canonically,
+/// compares with `stored` (itself already in canonical order — see
+/// [`canonical_order`]), and writes nothing at all when they are equal,
+/// returning `Ok(false)`. Otherwise it reopens the run, replaces every row,
+/// retires the member's `WorkingPayrollCalculation`, and returns `Ok(true)`.
+///
+/// The partial unique index `payroll_run_pay_line_one_line_per_standing_item`
+/// (migration 0038) is what refuses a duplicate standing line; this function
+/// adds no application-side check of its own for that.
+pub(crate) async fn write_member_pay_lines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+    employment_id: &EmploymentId,
+    stored: &[RunPayLine],
+    new: Vec<RunPayLine>,
+) -> Result<bool, PayrollAppError> {
+    let new = canonical_order(new);
+    if stored == new.as_slice() {
+        return Ok(false);
+    }
+
+    reopen_run(tx, payroll_run_id).await?;
+
+    // Replace, not merge: the whole point of §4.5d is that a write states the
+    // complete list, so a prior call's leftover lines must not survive
+    // alongside a shorter new one.
+    sqlx::query(
+        "DELETE FROM payroll_run_pay_line WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&mut **tx)
+    .await?;
+
+    for (index, pay_line) in new.iter().enumerate() {
+        let line =
+            i16::try_from(index).expect("a payroll run holds far fewer than i16::MAX pay lines");
+        let pay_line_json = serde_json::to_value(&pay_line.instruction)
+            .expect("PayLineInstruction always serializes");
+        sqlx::query(
+            "INSERT INTO payroll_run_pay_line
+                (payroll_run_id, employment_id, line, pay_line_json, source, standing_pay_item_id,
+                 override_reason, removed, removed_reason)
+             VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8, $9)",
+        )
+        .bind(payroll_run_id.as_str())
+        .bind(employment_id.as_str())
+        .bind(line)
+        .bind(pay_line_json)
+        .bind(pay_line.source.as_column())
+        .bind(pay_line.standing_pay_item_id.as_ref().map(|id| id.as_str()))
+        .bind(&pay_line.override_reason)
+        .bind(pay_line.is_removed())
+        .bind(&pay_line.removed_reason)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // The real defect issue #77 closed (§0's own words): a write that left
+    // the WorkingCalculation in place let the run detail's join show figures
+    // older than the inputs beside them. Unconditional, in the same
+    // transaction as the replace above, so no commit can ever leave a stale
+    // calculation beside a line that postdates it.
+    let retired_a_calculation = sqlx::query(
+        "DELETE FROM working_payroll_calculation
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .execute(&mut **tx)
+    .await?
+    .rows_affected()
+        > 0;
+
+    // Remembered so the run detail can say *why* the figures are absent
+    // after a reload. Only a write that actually retired figures raises it
+    // (or one that follows such a write before any Calculate): a member who
+    // was never calculated has no figures to call stale, and saying
+    // otherwise would be a false sentence on the worksheet.
+    sqlx::query(
+        "UPDATE payroll_run_employment
+         SET figures_invalidated_by_pay_line_write = figures_invalidated_by_pay_line_write OR $3
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .bind(retired_a_calculation)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(true)
+}
+
+/// Refuses unless `employment_id` is an *active* member of `payroll_run_id`
+/// — one that was never proposed, or one that was removed with a reason, is
+/// refused identically (§4.8). Earning and deduction lines are a fact about
+/// paying this Employment for this period, so a run that is not paying it
+/// has nowhere to put them.
+///
+/// Shared by [`set_run_pay_lines`] and every use case in `run_override.rs`
+/// (issue #80), rather than each repeating the query: the membership foreign
+/// key from migration 0017 already refuses an Employment that was never
+/// proposed, but it cannot see `removed_at`, so this check exists beside it.
+///
+/// No row lock is needed here. `remove_employment_from_run` takes the run's
+/// own `FOR UPDATE` before it removes anything, and every caller of this
+/// function holds that same lock (via [`lock_editable_run`]) before calling
+/// it, so a removal cannot commit between this read and the writes that
+/// follow.
+pub(crate) async fn verify_is_active_member(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payroll_run_id: &PayrollRunId,
+    employment_id: &EmploymentId,
+) -> Result<(), PayrollAppError> {
+    let is_active_member: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM payroll_run_employment
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2 AND removed_at IS NULL",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if is_active_member.is_none() {
+        return Err(PayrollAppError::EmploymentNotAnActiveRunMember {
+            payroll_run_id: payroll_run_id.clone(),
+            employment_id: employment_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// Replaces the classified pay lines held for `(payroll_run_id,
 /// employment_id)` with `earnings` followed by `deductions`, each in the
 /// order given (§4.5d, extended to voluntary deductions by issue #78). An
@@ -839,18 +1098,30 @@ pub async fn remove_employment_from_run(
 /// is no unasked question here to confirm-none the way `PriorEmployment` and
 /// `UnsupportedDeductionStatus` have one.
 ///
-/// An Employment that is not an *active* member of the run is refused too:
-/// one that was never proposed, and one that was removed with a reason.
+/// **Since issue #80, this call may no longer silently change a standing
+/// line.** Every active (not removed) standing line must be restated
+/// *exactly* — its current, possibly overridden, instruction — somewhere in
+/// `earnings`/`deductions`, or the whole write is refused with
+/// [`PayrollAppError::StandingPayLineChangedWithoutOverride`] before
+/// anything is written. Removed lines are never expected in the body at all
+/// and are kept exactly as they are — a caller cannot resend one as a new
+/// one-off line, because [`crate::PayrollRunDetail`] never hands one back in
+/// `earnings`/`deductions` to resend (§0's decision 3). Overriding or
+/// removing a standing line is `run_override.rs`'s own job now
+/// (`override_standing_pay_line`, `remove_standing_pay_line`); this call
+/// only ever refuses the attempt.
 ///
 /// **Provenance is recorded by Salt, never asserted by the caller.** The
 /// caller states only the instructions. A line that is exactly one this
 /// member's Correction pre-population copied from the reversed snapshot
 /// keeps `source = 'from_reversed_snapshot'` — so a resave of untouched
-/// lines cannot silently rewrite where they came from (§D-10) — and every
-/// other line is `one_off`: typed directly onto this run, never recurring.
-/// Matching is one-for-one, so a second copy of a copied line is one-off.
-/// Matching applies identically to deduction lines: a deduction pre-populated
-/// from a reversed snapshot that is still stated verbatim keeps its source.
+/// lines cannot silently rewrite where they came from (§D-10) — a line that
+/// exactly restates an active standing item's own instruction keeps its
+/// `source = 'standing'`, `standing_pay_item_id` and `override_reason`
+/// (issue #79, extended by #80) — and every other line is `one_off`: typed
+/// directly onto this run, never recurring. Matching is one-for-one, so a
+/// second copy of a copied line is one-off. Matching applies identically to
+/// deduction lines.
 ///
 /// **Closes the run detail's stale-figures defect (issue #77).** Writing,
 /// changing or clearing a member's lines deletes that member's
@@ -858,7 +1129,8 @@ pub async fn remove_employment_from_run(
 /// detail's join can never again show figures older than the inputs beside
 /// them — and puts the run back to `Draft`. A call that states exactly the
 /// lines already stored writes nothing at all, so it neither retires true
-/// figures nor reopens the run.
+/// figures nor reopens the run — a standing line changes only through
+/// override, remove or refresh, never by a resave alone surviving that.
 pub async fn set_run_pay_lines(
     db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
@@ -877,208 +1149,93 @@ pub async fn set_run_pay_lines(
 
     let mut tx = db.pool().begin().await?;
     lock_editable_run(&mut tx, payroll_run_id).await?;
-
-    // Earning and deduction lines are a fact about paying this Employment
-    // for this period, so a run that is not paying it has nowhere to put
-    // them. The membership foreign key from migration 0017 already refuses
-    // an Employment that was never proposed, but it cannot see
-    // `removed_at`: without this check, lines could be written against
-    // someone the Employer has deliberately, reasonedly taken out of the
-    // run, and they would sit there looking like pay that was intended.
-    //
-    // No row lock is needed here. `remove_employment_from_run` takes the
-    // run's own `FOR UPDATE` before it removes anything, and
-    // `lock_and_reopen_run` above holds that same lock, so a removal cannot
-    // commit between this read and the writes below.
-    let is_active_member: Option<bool> = sqlx::query_scalar(
-        "SELECT TRUE FROM payroll_run_employment
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2 AND removed_at IS NULL",
-    )
-    .bind(payroll_run_id.as_str())
-    .bind(employment_id.as_str())
-    .fetch_optional(&mut *tx)
-    .await?;
-    if is_active_member.is_none() {
-        return Err(PayrollAppError::EmploymentNotAnActiveRunMember {
-            payroll_run_id: payroll_run_id.clone(),
-            employment_id: employment_id.clone(),
-        });
-    }
+    verify_is_active_member(&mut tx, payroll_run_id, employment_id).await?;
 
     // Every instruction the caller states, earnings first then deductions —
-    // the one ordered list this function stores and diffs, whatever the two
-    // arrays it arrived as.
+    // the one ordered list this function matches against what is stored,
+    // whatever the two arrays it arrived as.
     let instructions: Vec<PayLineInstruction> = earnings
         .into_iter()
         .map(PayLineInstruction::Earning)
         .chain(deductions.into_iter().map(PayLineInstruction::Deduction))
         .collect();
 
-    // A copied line keeps its frozen-snapshot source, and a standing line
-    // keeps its StandingPayItem (issue #79), only while the exact
-    // instruction is still stated; an edited or new instruction is one-off.
-    let stored_rows: Vec<(serde_json::Value, String, Option<String>, Option<NaiveDate>)> =
-        sqlx::query_as(
-            "SELECT payroll_run_pay_line.pay_line_json, payroll_run_pay_line.source,
-                payroll_run_pay_line.standing_pay_item_id::text, standing_pay_item.effective_from
-         FROM payroll_run_pay_line
-         LEFT JOIN standing_pay_item
-           ON standing_pay_item.id = payroll_run_pay_line.standing_pay_item_id
-         WHERE payroll_run_pay_line.payroll_run_id = $1::uuid
-           AND payroll_run_pay_line.employment_id = $2
-         ORDER BY line",
-        )
-        .bind(payroll_run_id.as_str())
-        .bind(employment_id.as_str())
-        .fetch_all(&mut *tx)
-        .await?;
-    let stored: Vec<RunPayLine> = stored_rows
-        .into_iter()
-        .map(
-            |(pay_line_json, source, standing_pay_item_id, standing_effective_from)| RunPayLine {
-                instruction: serde_json::from_value(pay_line_json)
-                    .expect("payroll_run_pay_line.pay_line_json is always a PayLineInstruction"),
-                source: PayLineSource::from_column(&source),
-                standing_pay_item_id: standing_pay_item_id.map(StandingPayItemId::new),
-                standing_effective_from,
-            },
-        )
+    let stored = read_member_pay_lines(&mut tx, payroll_run_id, employment_id).await?;
+
+    // A copied line keeps its frozen-snapshot source, and an active standing
+    // line keeps its whole stored row — `override_reason` included — only
+    // while the exact instruction is still stated; an edited or new
+    // instruction that does not match any remaining candidate is one-off.
+    // Removed lines are never matched against the body at all: they are
+    // never in it, by construction (§0's decision 3).
+    let mut remaining_standing_lines: Vec<&RunPayLine> = stored
+        .iter()
+        .filter(|line| line.source == PayLineSource::Standing && !line.is_removed())
         .collect();
     let mut remaining_snapshot_lines: Vec<&PayLineInstruction> = stored
         .iter()
         .filter(|line| line.source == PayLineSource::FromReversedSnapshot)
         .map(|line| &line.instruction)
         .collect();
-    let mut remaining_standing_lines: Vec<(&PayLineInstruction, &StandingPayItemId, NaiveDate)> =
-        stored
+
+    let mut matched: Vec<RunPayLine> = Vec::with_capacity(instructions.len());
+    for instruction in instructions {
+        if let Some(index) = remaining_standing_lines
             .iter()
-            .filter(|line| line.source == PayLineSource::Standing)
-            .map(|line| {
-                (
-                    &line.instruction,
-                    line.standing_pay_item_id
-                        .as_ref()
-                        .expect("a Standing-sourced line always carries a StandingPayItemId"),
-                    line.standing_effective_from
-                        .expect("a Standing-sourced line always carries its effective-from date"),
-                )
-            })
-            .collect();
-    let pay_lines: Vec<RunPayLine> = instructions
-        .into_iter()
-        .map(|instruction| {
-            if let Some(index) = remaining_snapshot_lines
-                .iter()
-                .position(|copied| **copied == instruction)
-            {
-                remaining_snapshot_lines.remove(index);
-                return RunPayLine {
-                    instruction,
-                    source: PayLineSource::FromReversedSnapshot,
-                    standing_pay_item_id: None,
-                    standing_effective_from: None,
-                };
-            }
-            if let Some(index) = remaining_standing_lines
-                .iter()
-                .position(|(copied, _, _)| **copied == instruction)
-            {
-                let (_, standing_pay_item_id, standing_effective_from) =
-                    remaining_standing_lines.remove(index);
-                return RunPayLine {
-                    instruction,
-                    source: PayLineSource::Standing,
-                    standing_pay_item_id: Some(standing_pay_item_id.clone()),
-                    standing_effective_from: Some(standing_effective_from),
-                };
-            }
-            RunPayLine {
+            .position(|line| line.instruction == instruction)
+        {
+            matched.push(remaining_standing_lines.remove(index).clone());
+            continue;
+        }
+        if let Some(index) = remaining_snapshot_lines
+            .iter()
+            .position(|copied| **copied == instruction)
+        {
+            remaining_snapshot_lines.remove(index);
+            matched.push(RunPayLine {
                 instruction,
-                source: PayLineSource::OneOff,
+                source: PayLineSource::FromReversedSnapshot,
                 standing_pay_item_id: None,
                 standing_effective_from: None,
-            }
-        })
+                override_reason: None,
+                removed_reason: None,
+                standing_instruction: None,
+            });
+            continue;
+        }
+        matched.push(RunPayLine {
+            instruction,
+            source: PayLineSource::OneOff,
+            standing_pay_item_id: None,
+            standing_effective_from: None,
+            override_reason: None,
+            removed_reason: None,
+            standing_instruction: None,
+        });
+    }
+
+    // An active standing line left unmatched means the caller's body edited
+    // or dropped it without going through override or remove — exactly the
+    // "downgrades an edited standing line to one_off" bug issue #80 closes
+    // (a plain resave would otherwise make Refresh add the item again: a
+    // double payment).
+    if let Some(unmatched) = remaining_standing_lines.first() {
+        return Err(PayrollAppError::StandingPayLineChangedWithoutOverride {
+            payroll_run_id: payroll_run_id.clone(),
+            employment_id: employment_id.clone(),
+            standing_pay_item_id: unmatched
+                .standing_pay_item_id
+                .clone()
+                .expect("a Standing-sourced line always carries a StandingPayItemId"),
+        });
+    }
+
+    let new: Vec<RunPayLine> = matched
+        .into_iter()
+        .chain(stored.iter().filter(|line| line.is_removed()).cloned())
         .collect();
 
-    // A write stating exactly the lines already stored — same instructions,
-    // same order, same sources — changes no input, so it writes nothing:
-    // the figures beside those lines are exactly as current as they were,
-    // and retiring them would hide true numbers behind a false "changed"
-    // (issue #88's "saving the same lines again is not a change"). The same
-    // rule §D-6 gives a refresh that finds nothing changed.
-    if stored == pay_lines {
-        tx.commit().await?;
-        return Ok(());
-    }
-    reopen_run(&mut tx, payroll_run_id).await?;
-
-    // Replace, not merge: the whole point of §4.5d is that this call states
-    // the complete list, so a prior call's leftover lines must not survive
-    // alongside a shorter new list. Every source is cleared, not only
-    // 'one_off': this call states the complete truth about the member's
-    // lines from here on, so a line a Correction run pre-populated from a
-    // reversed snapshot is replaced exactly like one typed by hand once this
-    // is what the caller says the lines are.
-    sqlx::query(
-        "DELETE FROM payroll_run_pay_line WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(payroll_run_id.as_str())
-    .bind(employment_id.as_str())
-    .execute(&mut *tx)
-    .await?;
-
-    for (index, pay_line) in pay_lines.iter().enumerate() {
-        let line = i16::try_from(index)
-            .expect("a payroll run holds far fewer than i16::MAX earning lines");
-        let pay_line_json = serde_json::to_value(&pay_line.instruction)
-            .expect("PayLineInstruction always serializes");
-        sqlx::query(
-            "INSERT INTO payroll_run_pay_line
-                (payroll_run_id, employment_id, line, pay_line_json, source, standing_pay_item_id)
-             VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid)",
-        )
-        .bind(payroll_run_id.as_str())
-        .bind(employment_id.as_str())
-        .bind(line)
-        .bind(pay_line_json)
-        .bind(pay_line.source.as_column())
-        .bind(pay_line.standing_pay_item_id.as_ref().map(|id| id.as_str()))
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    // The real defect this ticket closes (§0's own words): today's write left
-    // the WorkingCalculation in place, so the run detail's join could show
-    // figures older than the inputs beside them. Unconditional, in the same
-    // transaction as the replace above, so no commit can ever leave a stale
-    // calculation beside a line that postdates it.
-    let retired_a_calculation = sqlx::query(
-        "DELETE FROM working_payroll_calculation
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(payroll_run_id.as_str())
-    .bind(employment_id.as_str())
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
-
-    // Remembered so the run detail can say *why* the figures are absent
-    // after a reload. Only a write that actually retired figures raises it
-    // (or one that follows such a write before any Calculate): a member who
-    // was never calculated has no figures to call stale, and saying
-    // otherwise would be a false sentence on the worksheet.
-    sqlx::query(
-        "UPDATE payroll_run_employment
-         SET figures_invalidated_by_pay_line_write = figures_invalidated_by_pay_line_write OR $3
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
-    )
-    .bind(payroll_run_id.as_str())
-    .bind(employment_id.as_str())
-    .bind(retired_a_calculation)
-    .execute(&mut *tx)
-    .await?;
+    write_member_pay_lines(&mut tx, payroll_run_id, employment_id, &stored, new).await?;
 
     tx.commit().await?;
     Ok(())
@@ -1360,6 +1517,13 @@ pub struct PayrollRunMember {
     /// a standing item on this member is proposed at its full amount
     /// (issue #79), and the worksheet says that beside them.
     pub basic_pay_prorated: bool,
+    /// How this member's standing items in force now differ from what is
+    /// proposed on this draft (issue #80, §0, §D-6). Always empty for a
+    /// Correction run and for any already-`Finalized` run — a correction
+    /// never proposes, and a finalized run's proposal is history, not a
+    /// live comparison — so `get_payroll_run_detail` computes it only for an
+    /// Ordinary run that is not yet `Finalized`.
+    pub standing_items_changed: StandingItemsChangedSinceProposal,
 }
 
 /// One PayrollRun in full, for `GET /api/employers/{e}/payroll-runs/{r}`
@@ -1395,22 +1559,36 @@ pub async fn get_payroll_run_detail(
 ) -> Result<PayrollRunDetail, PayrollAppError> {
     let payroll_run_id = parse_payroll_run_id(payroll_run_id)?;
 
-    type RunRow = (NaiveDate, NaiveDate, NaiveDate, String);
+    // One read transaction for the whole detail (issue #80): the change
+    // signal below reads each member's `StandingPayItem`s in force on the
+    // same connection the run and member rows came from, so a concurrent
+    // write cannot be read as having happened only to some of this response.
+    let mut tx = db.pool().begin().await?;
+
+    type RunRow = (NaiveDate, NaiveDate, NaiveDate, String, String);
 
     let run: Option<RunRow> = sqlx::query_as(
-        "SELECT period_start, period_end, pay_date, status
+        "SELECT period_start, period_end, pay_date, status, kind
          FROM payroll_run
          WHERE id = $1::uuid AND employer_id = $2",
     )
     .bind(payroll_run_id.as_str())
     .bind(employer_id.as_str())
-    .fetch_optional(db.pool())
+    .fetch_optional(&mut *tx)
     .await?;
 
-    let (period_start, period_end, pay_date, status) =
+    let (period_start, period_end, pay_date, status, kind) =
         run.ok_or_else(|| PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()))?;
     let period = PayPeriod::new(period_start, period_end)
         .expect("payroll_run CHECK: period_end is never before period_start");
+    let status = RunStatus::from_column(&status);
+    let kind = RunKind::from_column(&kind);
+
+    // A Correction run never proposes anything, and a Finalized run's
+    // proposal is history — telling either's operator to "add today's
+    // standing items to last March" would be nonsense (§0). Computed once,
+    // here, rather than per member.
+    let reports_standing_changes = kind == RunKind::Ordinary && status != RunStatus::Finalized;
 
     type MemberRow = (
         String,
@@ -1440,7 +1618,10 @@ pub async fn get_payroll_run_detail(
                      'pay_line_json', payroll_run_pay_line.pay_line_json,
                      'source', payroll_run_pay_line.source,
                      'standing_pay_item_id', payroll_run_pay_line.standing_pay_item_id,
-                     'standing_effective_from', standing_pay_item.effective_from
+                     'standing_effective_from', standing_pay_item.effective_from,
+                     'override_reason', payroll_run_pay_line.override_reason,
+                     'removed_reason', payroll_run_pay_line.removed_reason,
+                     'standing_pay_line_json', standing_pay_item.pay_line_json
                  )
                  ORDER BY payroll_run_pay_line.line
              ) AS pay_line_jsons
@@ -1461,7 +1642,7 @@ pub async fn get_payroll_run_detail(
          ORDER BY employment.id",
     )
     .bind(payroll_run_id.as_str())
-    .fetch_all(db.pool())
+    .fetch_all(&mut *tx)
     .await?;
 
     let mut members = Vec::with_capacity(member_rows.len());
@@ -1492,6 +1673,16 @@ pub async fn get_payroll_run_detail(
                         let standing_effective_from: Option<NaiveDate> =
                             serde_json::from_value(row["standing_effective_from"].clone())
                                 .expect("standing_pay_item.effective_from is a date or null");
+                        let override_reason = row["override_reason"].as_str().map(str::to_owned);
+                        let removed_reason = row["removed_reason"].as_str().map(str::to_owned);
+                        let standing_instruction =
+                            (!row["standing_pay_line_json"].is_null()).then(|| {
+                                serde_json::from_value(row["standing_pay_line_json"].clone())
+                                    .expect(
+                                        "standing_pay_item.pay_line_json is always a \
+                                         PayLineInstruction",
+                                    )
+                            });
                         RunPayLine {
                             instruction: serde_json::from_value(pay_line_json).expect(
                                 "payroll_run_pay_line.pay_line_json is always a PayLineInstruction",
@@ -1499,15 +1690,21 @@ pub async fn get_payroll_run_detail(
                             source: PayLineSource::from_column(source),
                             standing_pay_item_id,
                             standing_effective_from,
+                            override_reason,
+                            removed_reason,
+                            standing_instruction,
                         }
                     })
                     .collect()
             })
             .unwrap_or_default();
-        // Only earnings matter to `member_blockers`'s overtime check;
-        // deduction lines carry no bearing on `OrdinaryHours`.
+        // Only earnings matter to `member_blockers`'s overtime check, and
+        // only active ones: a removed line contributes nothing (issue #80),
+        // so it must not make an idle overtime line look like it still
+        // needs `OrdinaryHours`.
         let earnings: Vec<EarningInstruction> = pay_lines
             .iter()
+            .filter(|pay_line| !pay_line.is_removed())
             .filter_map(|pay_line| pay_line.instruction.as_earning().cloned())
             .collect();
         let figures = calculation_json.map(|value| {
@@ -1526,6 +1723,22 @@ pub async fn get_payroll_run_detail(
         };
         let employment_id = EmploymentId::new(employment_id);
         let blockers = member_blockers(db, &employment_id, period, &earnings).await?;
+        let standing_items_changed = if reports_standing_changes {
+            let in_force = standing_pay_lines_in_force(&mut tx, &employment_id, period.end())
+                .await?
+                .into_iter()
+                .map(
+                    |(standing_pay_item_id, pay_line_json, effective_from)| StandingItemProposal {
+                        standing_pay_item_id,
+                        instruction: StandingPayItemInstruction::from_pay_line_json(pay_line_json),
+                        effective_from,
+                    },
+                )
+                .collect::<Vec<_>>();
+            diff_standing_proposal(&pay_lines, &in_force)
+        } else {
+            StandingItemsChangedSinceProposal::default()
+        };
         members.push(PayrollRunMember {
             employment_id,
             finalized_payroll_id: finalized_payroll_id.map(FinalizedPayrollId::new),
@@ -1536,6 +1749,7 @@ pub async fn get_payroll_run_detail(
             calculation_state,
             basic_pay_prorated: start_date > period.start()
                 || end_date.is_some_and(|end_date| end_date < period.end()),
+            standing_items_changed,
         });
     }
 
@@ -1543,7 +1757,7 @@ pub async fn get_payroll_run_detail(
         id: payroll_run_id.clone(),
         period,
         pay_date,
-        status: RunStatus::from_column(&status),
+        status,
         members,
     })
 }

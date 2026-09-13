@@ -443,8 +443,38 @@ makes proposal and refresh idempotent.
 arrays, `earnings` and `deductions` (issue #78), and instructions only. A
 line — earning or deduction alike — is `from_reversed_snapshot` exactly
 while it is one of the lines a Correction's pre-population copied, matched
-one-for-one; every other line written through the route is `one_off`. A
-resave of untouched lines therefore cannot wipe where they came from.
+one-for-one; a line matching an active (not removed) standing item's own
+instruction keeps `source = standing`, its `standing_pay_item_id` and its
+`override_reason` (issue #80); every other line written through the route
+is `one_off`. A resave of untouched lines therefore cannot wipe where they
+came from.
+
+**Since issue #80, this route may no longer silently change a standing
+line.** Every active standing line must be restated *exactly* — its current,
+possibly overridden, instruction — somewhere in the body, or the whole write
+is refused with `standing_pay_line_changed_without_override` (409) before
+anything is written, naming the first line it could not match. Before this
+rule, an edited or dropped standing line silently downgraded to `one_off`,
+which then looked "not proposed" — so a later Refresh would add the item
+again and double the payment. Removed lines are never expected in the body
+at all: `GET`'s own `earnings`/`deductions` never hand one back to resend,
+so there is nothing for a caller to accidentally restate as new.
+
+**Canonical order.** Every member's pay lines are kept in one order: a
+stable sort by `(is deduction, is removed)` — earnings before deductions,
+and within each, active lines keep their relative order with removed lines
+moved to the end. `set_run_pay_lines`, `OverrideStandingPayLine`,
+`RemoveStandingPayLine` and `RefreshStandingProposals` (§4.5e) all build a
+member's complete new list and hand it to the one write path
+(`write_member_pay_lines`) that orders it this way, compares it with what is
+stored — itself already in this order — and writes nothing at all when they
+are equal.
+
+**A removed line contributes nothing to calculation.** `run_pay_lines_by_member`
+— read by both `CalculatePayrollRun` and `FinalizePayrollRun` — excludes every
+`removed` row, so a removed line never reaches `PayrollInput`. It still
+appears in the run detail, split into its own `removedPayLines` array (never
+`earnings`/`deductions`), with its own reason.
 
 **A figure is never older than the inputs beside it.** A write that changes a
 member's lines deletes that member's `WorkingPayrollCalculation` in the same
@@ -531,8 +561,61 @@ stated proposal, never a live view.
   `standing_pay_item_already_ended`; an item not on that Employment,
   `standing_pay_item_not_found`.
 
-Changing or removing a proposed line for one run only, and refreshing a draft
-when the standing records change, are issue #80.
+### RunOverride (issue #80)
+
+A run may change or remove a proposed `StandingPayItem` line for that run
+only, with a reason, leaving the standing record untouched — so a one-month
+medical aid reduction never rewrites a person's permanent record. Both key
+on `standing_pay_item_id`, never on a line number (which is rewritten on
+every write): the route shape is `.../pay-lines/{standingPayItemId}/override`
+and `.../remove`.
+
+- **Override** (`override_standing_pay_line`) restates the item's own kind
+  (allowance stays allowance, premium stays premium —
+  `override_changes_pay_line_kind` otherwise) with a new amount or label and
+  a non-blank reason. Overriding back to exactly the item's own instruction
+  clears the override (`override_reason` becomes `NULL`) — the only "undo
+  override" there is. A zero premium override answers
+  `standing_medical_aid_premium_is_zero`, the same as creating one; the UI
+  tells the operator to remove the line instead.
+- **Removal** (`remove_standing_pay_line`) sets `removed_reason` and leaves
+  `override_reason` exactly as it is — a line removed after being overridden
+  keeps both facts. There is no "undo removal"; the operator types a one-off
+  line instead if that turns out to be wanted after all.
+- Both refuse a blank reason, an unknown or already-removed line
+  (`standing_pay_line_not_found`, `standing_pay_line_is_removed`,
+  `standing_pay_line_already_removed`), and run under the run's existing
+  lock through the one write path §4.5d names.
+
+**The change signal.** `GetPayrollRunDetail` computes, for every member of
+an Ordinary run that is not yet `Finalized`, how the `StandingPayItem`s in
+force now differ from what is stored — `added` (an item in force with no
+line at all; a removed line still counts as "having a line"), `changed` (a
+plain, non-overridden, active line whose instruction no longer matches its
+item — unreachable today, since migration 0040 makes an item immutable
+except for ending it, but computed anyway), and `ended` (an active line
+whose item is no longer in force). Keyed only on `standing_pay_item_id`, pure,
+and computed fresh on every read — never persisted, never mutated by reading
+it. **A draft never refreshes silently**: this is a report, not a write; the
+operator decides. Always empty for a Correction run and for an
+already-`Finalized` run — neither has a live proposal to compare against.
+
+**RefreshStandingProposals** is the one explicit act that turns that report
+into a write: adds a line for every newly in-force item, restates a
+`changed` line, and leaves every overridden and every removed line exactly
+as it is — reported back per member as `added`, `updated`, `kept_overridden`,
+`kept_removed`, `ended_still_proposed`. Never automatic: `calculate_payroll_run`
+never calls it, and it never re-proposes anything of its own — it reads the
+stored lines and the `StandingPayItem`s in force, nothing else. Refuses a
+non-Ordinary run (`payroll_run_is_not_ordinary`) and a `Finalized` run. Runs
+under the run's own lock, then locks the governing Employer row `FOR SHARE`
+— the same
+run-then-employer order `FinalizePayrollRun` takes — so `EndStandingPayItem`'s
+`FOR UPDATE` on that row cannot interleave with a refresh; two concurrent
+refreshes of the same run add each newly in-force item exactly once, never
+twice. Writes one `ActionLog` entry, naming the whole report, only when at
+least one member's lines actually changed — refreshing twice with nothing
+changed writes nothing and leaves the run's `status` untouched.
 
 ### 4.6 PayrollRun
 
@@ -1194,6 +1277,7 @@ FinalizedPayroll
 - employer_particulars_json         JSONB, nullable (issue #73)
 - person_particulars_json           JSONB, nullable (issue #73)
 - payslip_template_version          text, nullable (issue #73)
+- pay_line_provenance_json          JSONB, nullable, never backfilled (issue #80)
 
 - finalized_at, finalized_by
 ```
@@ -1296,6 +1380,28 @@ application has no `UPDATE` grant on the table. A shape change means new rows
 carry the next schema version and readers preserve the old shape through a
 compatible decoder or an explicit version-specific arm.
 
+### 9.0b Issue #80: frozen pay-line provenance
+
+`pay_line_provenance_json` is a new sibling column (`SNAPSHOT_SCHEMA_VERSION`
+5, following #73's own precedent — a new column, never a changed shape of
+`payroll_input_json` or `payroll_calculation_json` themselves). It freezes
+each member's complete, canonically ordered `payroll_run_pay_line` rows at
+finalization: every line's own instruction, `source`, the standing item it
+names and that item's own current instruction (labelled `standing_pay_line`,
+distinct from any override), and any override or removal reason. Written in
+the finalization transaction, under the run lock already held, by reading
+the same `read_member_pay_lines` every write path already uses — never
+re-derived from today's standing records (ADR-0004): a `StandingPayItem`'s
+own instruction can outlive the run that named it, so freezing the item's
+instruction *as it was proposed* is the only way an old payroll's workings
+can still say "this was a one-month override, reason X" regardless of what
+the standing record says now.
+
+Nullable and **stays nullable forever**, the same promise the two
+particulars columns make: a row finalized before issue #80 never froze one,
+and there is nothing true to backfill it with. A reader keys presence, never
+`snapshot_schema_version` — the same rule §9.0's own particulars follow.
+
 ### 9.2 SaltVersion
 
 Semver plus git SHA, one string: `0.1.0+g1a2b3c4`, captured in `build.rs`.
@@ -1324,7 +1430,15 @@ target, if any), `PayrollFinalized`, `FinalizedPayrollReversed`,
 `OpeningBalanceCreated`, `OpeningBalanceChanged`,
 `PriorEmploymentDeclared`, `PriorEmploymentChanged`,
 `CompensationTermsCorrected`, `UnsupportedDeductionStatusCorrected`,
-`PayScheduleChanged`, `EmploymentVoided`.
+`PayScheduleChanged`, `EmploymentVoided`, `StandingPayItemCreated`,
+`StandingPayItemEnded`, `StandingPayLineOverridden` (context: the run,
+the `StandingPayItem`, the before/after instruction and the reason),
+`StandingPayLineRemoved` (context: the run, the item and the reason), and
+`StandingProposalsRefreshed` (target `payroll_run`; context: the whole
+report — every member's added, updated, kept-overridden, kept-removed and
+ended-still-proposed item ids) — the last three are issue #80. Written only
+when `write_member_pay_lines` actually wrote a row: an override, removal or
+refresh that changes nothing writes no log entry either.
 
 The two `*Corrected` entries are load-bearing rather than informational (§6.5).
 Each carries a mandatory reason, the before and after values, and **the list of
@@ -1607,6 +1721,34 @@ Transaction and integration tests:
     changes no finalized figure and no year-to-date total;
 39. a March correction sourced from split `CompensationTerms` leaves April and
     May's snapshots and live rows byte-identical.
+
+**RunOverride** (§4.5e's own subsection, issue #80):
+
+40. an override changes one run only and leaves the `StandingPayItem` itself
+    untouched — the next month still proposes the original amount;
+41. overriding back to exactly the standing amount clears the override;
+42. an override refuses a blank reason, a different kind, and a line that is
+    not found or already removed;
+43. a removed line contributes nothing to calculation and stays visible with
+    its reason; removing twice, or overriding a removed line, is refused;
+44. an override and a removal each retire the member's figures, reopen the
+    run, and survive a recalculation;
+45. `SetRunPayLines` refuses a body that edits or drops an active standing
+    line without going through an override or removal first;
+46. a resave that restates every active standing line exactly, and omits
+    every removed line, writes nothing — override reasons and removed lines
+    survive it byte-identical;
+47. the run detail reports items added and ended since the draft's own
+    proposal, and reports none of that for a Correction run;
+48. `RefreshStandingProposals` adds a newly in-force item, restates nothing
+    else, leaves every overridden and every removed line untouched, and
+    reports an ended item without deleting its line;
+49. refreshing twice with nothing changed writes nothing and logs nothing;
+    two concurrent refreshes of the same run add one newly in-force item
+    exactly once;
+50. finalization freezes each line's provenance — source, the standing
+    item's own instruction, and any override or removal reason — onto the
+    `FinalizedPayroll`, at `snapshot_schema_version` 5.
 
 ---
 

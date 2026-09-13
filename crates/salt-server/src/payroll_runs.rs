@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Json, Path, State};
+use axum::extract::{FromRequest, Json, Path, Request, State};
 use axum::http::StatusCode;
 use chrono::NaiveDate;
 use payroll::{
@@ -131,6 +131,12 @@ pub(crate) enum DeductionLineDto {
 /// only, and `payroll_app::set_run_pay_lines` decides each line's source
 /// itself, so no caller can claim a line came from a reversed snapshot, or
 /// silently wipe the fact that one did.
+///
+/// `overrideReason` and `standingPayLine` arrive with issue #80: the first is
+/// present exactly on a standing line an operator changed for this run only,
+/// and the second — the item's own current instruction — is present on every
+/// standing line, overridden or not, so the worksheet can always say "the
+/// standing amount is X" beside a line that may or may not still match it.
 #[derive(Serialize)]
 pub(crate) struct PayLineDto {
     #[serde(flatten)]
@@ -143,6 +149,10 @@ pub(crate) struct PayLineDto {
         skip_serializing_if = "Option::is_none"
     )]
     standing_effective_from: Option<NaiveDate>,
+    #[serde(rename = "overrideReason", skip_serializing_if = "Option::is_none")]
+    override_reason: Option<String>,
+    #[serde(rename = "standingPayLine", skip_serializing_if = "Option::is_none")]
+    standing_pay_line: Option<EarningLineDto>,
 }
 
 /// One stored deduction line on the way out, the same shape `PayLineDto`
@@ -159,6 +169,37 @@ pub(crate) struct DeductionPayLineDto {
         skip_serializing_if = "Option::is_none"
     )]
     standing_effective_from: Option<NaiveDate>,
+    #[serde(rename = "overrideReason", skip_serializing_if = "Option::is_none")]
+    override_reason: Option<String>,
+    #[serde(rename = "standingPayLine", skip_serializing_if = "Option::is_none")]
+    standing_pay_line: Option<DeductionLineDto>,
+}
+
+/// One removed standing line on the way out (issue #80, §0): it contributes
+/// nothing, but stays visible with its reason. Always standing-sourced (the
+/// database CHECKs admit no other kind of removal), so `standingPayItemId`
+/// and `standingEffectiveFrom` are never absent here the way they can be on
+/// [`PayLineDto`]/[`DeductionPayLineDto`].
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemovedPayLineDto {
+    #[serde(flatten)]
+    line: RemovedInstructionDto,
+    standing_pay_item_id: String,
+    standing_effective_from: NaiveDate,
+    removed_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    override_reason: Option<String>,
+}
+
+/// A removed line's own instruction, one of the two shapes a standing item
+/// can carry — never [`EarningLineDto::Overtime`], which no `StandingPayItem`
+/// can be (D14).
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum RemovedInstructionDto {
+    Earning(EarningLineDto),
+    Deduction(DeductionLineDto),
 }
 
 /// `standing` arrives with issue #79: a line proposed from a
@@ -172,7 +213,10 @@ pub(crate) enum PayLineSourceDto {
     Standing,
 }
 
-fn pay_line_source_to_dto(source: PayLineSource) -> PayLineSourceDto {
+/// `pub(crate)` since issue #80: `finalized_payroll.rs` reuses this to
+/// render a frozen `FrozenPayLine.source` in the same three spellings a
+/// working run's own pay lines already use.
+pub(crate) fn pay_line_source_to_dto(source: PayLineSource) -> PayLineSourceDto {
     match source {
         PayLineSource::OneOff => PayLineSourceDto::OneOff,
         PayLineSource::FromReversedSnapshot => PayLineSourceDto::FromReversedSnapshot,
@@ -281,7 +325,9 @@ fn parse_deduction(line: DeductionLineDto) -> Result<VoluntaryDeductionInstructi
     }
 }
 
-fn earning_line_to_dto(earning: EarningInstruction) -> EarningLineDto {
+/// `pub(crate)` since issue #80: `finalized_payroll.rs` reuses this to render
+/// a frozen pay line's own instruction in the workings.
+pub(crate) fn earning_line_to_dto(earning: EarningInstruction) -> EarningLineDto {
     match earning {
         EarningInstruction::TaxableAllowance { amount, label } => {
             EarningLineDto::TaxableAllowance {
@@ -301,7 +347,9 @@ fn earning_line_to_dto(earning: EarningInstruction) -> EarningLineDto {
     }
 }
 
-fn deduction_line_to_dto(deduction: VoluntaryDeductionInstruction) -> DeductionLineDto {
+/// `pub(crate)` since issue #80: `finalized_payroll.rs` reuses this for the
+/// same reason [`earning_line_to_dto`] is.
+pub(crate) fn deduction_line_to_dto(deduction: VoluntaryDeductionInstruction) -> DeductionLineDto {
     match deduction {
         VoluntaryDeductionInstruction::MedicalAidPremium(amount) => {
             DeductionLineDto::MedicalAidPremium {
@@ -311,37 +359,110 @@ fn deduction_line_to_dto(deduction: VoluntaryDeductionInstruction) -> DeductionL
     }
 }
 
-/// Splits one member's stored pay lines (earnings and deductions
-/// interleaved, in storage order) into the two arrays the wire carries —
-/// `PayLineDto`s and `DeductionPayLineDto`s, each keeping its own `source`.
+/// Splits one member's stored pay lines (earnings, deductions and removed
+/// lines interleaved, in storage order) into the three arrays the wire
+/// carries — active `PayLineDto`s, active `DeductionPayLineDto`s, and every
+/// removed line of either kind together (issue #80, §0's decision 3): the
+/// arrays a caller reads back are exactly the arrays it must send back to
+/// `PUT .../pay-lines`, so a removed line can never be resent as a new
+/// one-off line.
 fn pay_lines_to_dtos(
     pay_lines: Vec<payroll_app::RunPayLine>,
-) -> (Vec<PayLineDto>, Vec<DeductionPayLineDto>) {
+) -> (
+    Vec<PayLineDto>,
+    Vec<DeductionPayLineDto>,
+    Vec<RemovedPayLineDto>,
+) {
     let mut earnings = Vec::new();
     let mut deductions = Vec::new();
+    let mut removed = Vec::new();
     for pay_line in pay_lines {
+        if pay_line.is_removed() {
+            removed.push(removed_pay_line_to_dto(pay_line));
+            continue;
+        }
         let source = pay_line_source_to_dto(pay_line.source);
         let standing_pay_item_id = pay_line
             .standing_pay_item_id
             .as_ref()
             .map(ToString::to_string);
         let standing_effective_from = pay_line.standing_effective_from;
+        let override_reason = pay_line.override_reason.clone();
+        let standing_instruction = pay_line.standing_instruction.clone();
         match pay_line.instruction {
-            PayLineInstruction::Earning(earning) => earnings.push(PayLineDto {
-                line: earning_line_to_dto(earning),
-                source,
-                standing_pay_item_id,
-                standing_effective_from,
-            }),
-            PayLineInstruction::Deduction(deduction) => deductions.push(DeductionPayLineDto {
-                line: deduction_line_to_dto(deduction),
-                source,
-                standing_pay_item_id,
-                standing_effective_from,
-            }),
+            PayLineInstruction::Earning(earning) => {
+                let standing_pay_line = standing_instruction.map(|instruction| {
+                    earning_line_to_dto(
+                        instruction
+                            .as_earning()
+                            .cloned()
+                            .expect("a standing allowance's own instruction is always an Earning"),
+                    )
+                });
+                earnings.push(PayLineDto {
+                    line: earning_line_to_dto(earning),
+                    source,
+                    standing_pay_item_id,
+                    standing_effective_from,
+                    override_reason,
+                    standing_pay_line,
+                });
+            }
+            PayLineInstruction::Deduction(deduction) => {
+                let standing_pay_line = standing_instruction.map(|instruction| {
+                    deduction_line_to_dto(
+                        instruction
+                            .as_deduction()
+                            .copied()
+                            .expect("a standing premium's own instruction is always a Deduction"),
+                    )
+                });
+                deductions.push(DeductionPayLineDto {
+                    line: deduction_line_to_dto(deduction),
+                    source,
+                    standing_pay_item_id,
+                    standing_effective_from,
+                    override_reason,
+                    standing_pay_line,
+                });
+            }
         }
     }
-    (earnings, deductions)
+    (earnings, deductions, removed)
+}
+
+/// One removed line's full DTO — always standing-sourced, so every field the
+/// database CHECKs guarantee on a removed row is read with `.expect(..)`
+/// rather than degrading to `None`.
+fn removed_pay_line_to_dto(pay_line: payroll_app::RunPayLine) -> RemovedPayLineDto {
+    let standing_pay_item_id = pay_line
+        .standing_pay_item_id
+        .as_ref()
+        .expect("a removed line is always standing-sourced")
+        .to_string();
+    let standing_effective_from = pay_line
+        .standing_effective_from
+        .expect("a removed line is always standing-sourced");
+    let removed_reason = pay_line
+        .removed_reason
+        .clone()
+        .expect("removed_pay_line_to_dto is only called on a line whose is_removed() is true");
+    let override_reason = pay_line.override_reason.clone();
+    let line = match pay_line.instruction {
+        PayLineInstruction::Earning(earning) => {
+            RemovedInstructionDto::Earning(earning_line_to_dto(earning))
+        }
+        PayLineInstruction::Deduction(deduction) => {
+            RemovedInstructionDto::Deduction(deduction_line_to_dto(deduction))
+        }
+    };
+    RemovedPayLineDto {
+        line,
+        standing_pay_item_id,
+        standing_effective_from,
+        removed_reason,
+        override_reason,
+    }
 }
 
 /// `calculationState`'s wire spelling (§D-6): whether `figures` is current,
@@ -461,6 +582,11 @@ struct PayrollRunMemberDto {
     full_name: String,
     earnings: Vec<PayLineDto>,
     deductions: Vec<DeductionPayLineDto>,
+    /// Every removed standing line, earnings and deductions together (issue
+    /// #80, §0's decision 3): kept out of `earnings`/`deductions` so those
+    /// two arrays stay exactly what `PUT .../pay-lines` must be sent back,
+    /// and a removed line can never be resent as a new one-off line.
+    removed_pay_lines: Vec<RemovedPayLineDto>,
     blockers: Vec<BlockerDto>,
     figures: Option<FiguresDto>,
     calculation_state: &'static str,
@@ -468,6 +594,11 @@ struct PayrollRunMemberDto {
     /// A joiner or leaver in this period: `BasicPay` is prorated, and
     /// nothing else is — the worksheet says so beside any standing item.
     basic_pay_prorated: bool,
+    /// How this member's standing items in force now differ from what this
+    /// draft proposes (issue #80, §0, §D-6). Always present, arrays may be
+    /// empty; always empty for a Correction run or an already-`Finalized`
+    /// run (`payroll_app::get_payroll_run_detail`'s own rule).
+    standing_items_changed: StandingItemsChangedDto,
 }
 
 /// One entry of a member's `blockers` list, under the same stable `code`s
@@ -537,6 +668,62 @@ fn refusal_to_dto(refusal: &PayrollAppError) -> RefusalDto {
     RefusalDto { code, details }
 }
 
+/// One `StandingPayItem` named in the change signal or the refresh report
+/// (issue #80): its id, when it began, and its own current instruction —
+/// never an override — flattened in the same `{"kind": ...}` shape
+/// `standing-pay-items` already gives one.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StandingItemProposalDto {
+    standing_pay_item_id: String,
+    effective_from: NaiveDate,
+    #[serde(flatten)]
+    instruction: crate::standing_pay_items::StandingPayItemInstructionDto,
+}
+
+fn standing_item_proposal_to_dto(
+    item: payroll_app::StandingItemProposal,
+) -> StandingItemProposalDto {
+    StandingItemProposalDto {
+        standing_pay_item_id: item.standing_pay_item_id.to_string(),
+        effective_from: item.effective_from,
+        instruction: crate::standing_pay_items::instruction_to_dto(item.instruction),
+    }
+}
+
+/// A member's `standingItemsChanged` (issue #80): what is in force now that
+/// this draft's stored lines do not yet reflect. Always present; every
+/// array may be empty, which itself means "nothing changed".
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StandingItemsChangedDto {
+    added: Vec<StandingItemProposalDto>,
+    changed: Vec<StandingItemProposalDto>,
+    ended: Vec<StandingItemProposalDto>,
+}
+
+fn standing_items_changed_to_dto(
+    changed: payroll_app::StandingItemsChangedSinceProposal,
+) -> StandingItemsChangedDto {
+    StandingItemsChangedDto {
+        added: changed
+            .added
+            .into_iter()
+            .map(standing_item_proposal_to_dto)
+            .collect(),
+        changed: changed
+            .changed
+            .into_iter()
+            .map(standing_item_proposal_to_dto)
+            .collect(),
+        ended: changed
+            .ended
+            .into_iter()
+            .map(standing_item_proposal_to_dto)
+            .collect(),
+    }
+}
+
 /// Turns a [`PayrollRunDetail`] into the wire response both `GET
 /// .../payroll-runs/{r}` and `POST .../payroll-runs/{r}/calculate` answer
 /// with (issue #55's own Deep Instructions: one DTO, not two shapes for the
@@ -563,18 +750,22 @@ fn payroll_run_detail_to_response(
                 let refusal = refusals
                     .remove(&member.employment_id)
                     .map(|refusal| refusal_to_dto(&refusal));
-                let (earnings, deductions) = pay_lines_to_dtos(member.pay_lines);
+                let (earnings, deductions, removed_pay_lines) = pay_lines_to_dtos(member.pay_lines);
                 PayrollRunMemberDto {
                     employment_id: member.employment_id.to_string(),
                     finalized_payroll_id: member.finalized_payroll_id.map(|id| id.to_string()),
                     full_name: member.full_name,
                     earnings,
                     deductions,
+                    removed_pay_lines,
                     blockers: member.blockers.into_iter().map(blocker_to_dto).collect(),
                     figures: member.figures.map(figures_to_dto),
                     calculation_state: calculation_state_str(member.calculation_state),
                     refusal,
                     basic_pay_prorated: member.basic_pay_prorated,
+                    standing_items_changed: standing_items_changed_to_dto(
+                        member.standing_items_changed,
+                    ),
                 }
             })
             .collect(),
@@ -748,6 +939,13 @@ pub(crate) struct SetRunPayLinesRequest {
 /// provenance-carrying pay lines, not an earnings-only concept (issue #77).
 /// A line carries no `source` on the way in; one sent anyway is ignored,
 /// because provenance is Salt's record, not the caller's claim.
+///
+/// **Since issue #80, every active standing line must be restated exactly.**
+/// A body that edits or drops one without going through
+/// [`override_standing_pay_line`] or [`remove_standing_pay_line`] first is
+/// refused with 409 `standing_pay_line_changed_without_override` — never
+/// silently downgraded to a one-off line, which used to make a later
+/// Refresh add the item again and double the payment.
 pub(crate) async fn set_run_pay_lines(
     State(state): State<AppState>,
     context: AuthorizedEmployerContext,
@@ -785,6 +983,199 @@ pub(crate) async fn set_run_pay_lines(
     .await?;
 
     Ok(Json(RecordedResponse {}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OverrideStandingPayLineRequest {
+    line: crate::standing_pay_items::StandingPayItemInstructionDto,
+    #[serde(default)]
+    reason: String,
+}
+
+/// `POST /api/employers/{e}/payroll-runs/{r}/members/{em}/pay-lines/{s}/override`
+/// (issue #80): changes a proposed standing line for this run only, with a
+/// reason, leaving the `StandingPayItem` itself untouched. `line` is parsed
+/// with the same parser `standing-pay-items` creation uses, so an overtime
+/// `kind` — which has no standing spelling — is a 400 here exactly as it is
+/// there.
+///
+/// A run id belonging to another Employer is 404, checked here before
+/// `payroll_app::override_standing_pay_line` runs, since that use case takes
+/// no `EmployerId` of its own.
+pub(crate) async fn override_standing_pay_line(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id, employment_id, standing_pay_item_id)): Path<(
+        String,
+        String,
+        String,
+        String,
+    )>,
+    request: Request,
+) -> Result<Json<RecordedResponse>, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+    let payroll_run_id = payroll_app::verify_payroll_run_belongs_to_employer(
+        state.db(),
+        &employer_id,
+        &payroll_run_id,
+    )
+    .await?;
+    // Ownership is intentionally established before the request body is
+    // parsed. A caller who names another Employer's run must get the same
+    // 404 whether its body is valid or not (ADR-0017, issue #80 step 7).
+    let Json(request) = Json::<OverrideStandingPayLineRequest>::from_request(request, &state)
+        .await
+        .map_err(|_rejection| ApiError::malformed_request())?;
+    let employment_id = EmploymentId::new(employment_id);
+    let instruction = crate::standing_pay_items::parse_instruction(request.line)?;
+
+    payroll_app::override_standing_pay_line(
+        state.db(),
+        &payroll_run_id,
+        &employment_id,
+        &standing_pay_item_id,
+        instruction,
+        &request.reason,
+        &context.actor(),
+    )
+    .await?;
+
+    Ok(Json(RecordedResponse {}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoveStandingPayLineRequest {
+    #[serde(default)]
+    reason: String,
+}
+
+/// `POST /api/employers/{e}/payroll-runs/{r}/members/{em}/pay-lines/{s}/remove`
+/// (issue #80): removes a proposed standing line for this run only, with a
+/// reason. The line contributes nothing to calculation from this point on,
+/// but stays visible with its reason in `removedPayLines`.
+///
+/// A missing `reason` is read as empty so the refusal is the use case's own
+/// `pay_line_removal_reason_cannot_be_empty`, not a malformed request — the
+/// same convention `standing-pay-items`' own end route follows.
+pub(crate) async fn remove_standing_pay_line(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id, employment_id, standing_pay_item_id)): Path<(
+        String,
+        String,
+        String,
+        String,
+    )>,
+    request: Request,
+) -> Result<Json<RecordedResponse>, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+    let payroll_run_id = payroll_app::verify_payroll_run_belongs_to_employer(
+        state.db(),
+        &employer_id,
+        &payroll_run_id,
+    )
+    .await?;
+    // See `override_standing_pay_line`: do not let malformed input change
+    // the ownership result for a run outside this Employer.
+    let Json(request) = Json::<RemoveStandingPayLineRequest>::from_request(request, &state)
+        .await
+        .map_err(|_rejection| ApiError::malformed_request())?;
+    let employment_id = EmploymentId::new(employment_id);
+
+    payroll_app::remove_standing_pay_line(
+        state.db(),
+        &payroll_run_id,
+        &employment_id,
+        &standing_pay_item_id,
+        &request.reason,
+        &context.actor(),
+    )
+    .await?;
+
+    Ok(Json(RecordedResponse {}))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RefreshStandingProposalsResponse {
+    members: Vec<MemberProposalRefreshDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberProposalRefreshDto {
+    employment_id: String,
+    added: Vec<StandingItemProposalDto>,
+    updated: Vec<StandingItemProposalDto>,
+    kept_overridden: Vec<String>,
+    kept_removed: Vec<String>,
+    ended_still_proposed: Vec<StandingItemProposalDto>,
+}
+
+/// `POST /api/employers/{e}/payroll-runs/{r}/refresh-proposals` (issue #80):
+/// the one explicit, operator-triggered act that catches a draft's proposals
+/// up with the standing records — never automatic, and never run by
+/// Calculate or Finalize. Adds a line for a newly in-force item, and leaves
+/// every overridden and every removed line exactly as it is; the response
+/// names what was added, updated, and deliberately left alone, per member —
+/// only members with something to report are listed at all.
+///
+/// A run id belonging to another Employer is 404, checked here before
+/// `payroll_app::refresh_standing_proposals` runs, since that use case takes
+/// no `EmployerId` of its own. Refuses a Correction run and an
+/// already-`Finalized` run with their own stable codes from that same call.
+pub(crate) async fn refresh_standing_proposals(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id)): Path<(String, String)>,
+) -> Result<Json<RefreshStandingProposalsResponse>, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+    let run_id = payroll_app::verify_payroll_run_belongs_to_employer(
+        state.db(),
+        &employer_id,
+        &payroll_run_id,
+    )
+    .await?;
+
+    let outcome =
+        payroll_app::refresh_standing_proposals(state.db(), &run_id, &context.actor()).await?;
+
+    Ok(Json(RefreshStandingProposalsResponse {
+        members: outcome
+            .members
+            .into_iter()
+            .map(|member| MemberProposalRefreshDto {
+                employment_id: member.employment_id.to_string(),
+                added: member
+                    .added
+                    .into_iter()
+                    .map(standing_item_proposal_to_dto)
+                    .collect(),
+                updated: member
+                    .updated
+                    .into_iter()
+                    .map(standing_item_proposal_to_dto)
+                    .collect(),
+                kept_overridden: member
+                    .kept_overridden
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect(),
+                kept_removed: member
+                    .kept_removed
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect(),
+                ended_still_proposed: member
+                    .ended_still_proposed
+                    .into_iter()
+                    .map(standing_item_proposal_to_dto)
+                    .collect(),
+            })
+            .collect(),
+    }))
 }
 
 #[cfg(test)]

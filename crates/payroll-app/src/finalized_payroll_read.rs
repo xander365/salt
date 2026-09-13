@@ -28,6 +28,7 @@ use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::finalize::FinalizedPayrollId;
 use crate::payroll_run::PayrollFigures;
+use crate::provenance::FrozenPayLine;
 
 /// Wraps a caller-supplied id as a [`FinalizedPayrollId`], refusing a string
 /// that is not even a well-formed UUID as
@@ -169,6 +170,12 @@ pub struct FinalizedPayrollDetail {
     /// The frozen `PayslipTemplateVersion` (issue #73) — `None` under the
     /// same "nothing froze here" condition as the two particulars above.
     pub payslip_template_version: Option<String>,
+    /// The frozen pay-line provenance snapshot (issue #80) — `None` for a
+    /// row finalized before this shipped, which never froze one at all.
+    /// Never backfilled (ADR-0004): presence is read from the column
+    /// itself, never from `snapshot_schema_version`, the same rule every
+    /// other frozen-but-optional column here follows.
+    pub pay_line_provenance: Option<Vec<FrozenPayLine>>,
 }
 
 /// Reads one `FinalizedPayroll` back for display, scoped to `employer_id` in
@@ -206,6 +213,7 @@ pub async fn get_finalized_payroll_detail(
         Option<serde_json::Value>,
         Option<serde_json::Value>,
         Option<String>,
+        Option<serde_json::Value>,
     );
 
     let row: Option<Row> = sqlx::query_as(
@@ -215,7 +223,8 @@ pub async fn get_finalized_payroll_detail(
                 finalized_payroll.payroll_calculation_json, finalized_payroll.salt_version,
                 finalized_payroll.employer_particulars_json,
                 finalized_payroll.person_particulars_json,
-                finalized_payroll.payslip_template_version
+                finalized_payroll.payslip_template_version,
+                finalized_payroll.pay_line_provenance_json
          FROM finalized_payroll
          JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
          JOIN employment ON employment.id = finalized_payroll.employment_id
@@ -240,6 +249,7 @@ pub async fn get_finalized_payroll_detail(
         employer_particulars_json,
         person_particulars_json,
         payslip_template_version,
+        pay_line_provenance_json,
     ) =
         row.ok_or_else(|| PayrollAppError::FinalizedPayrollNotFound(finalized_payroll_id.clone()))?;
     let calculation =
@@ -260,6 +270,26 @@ pub async fn get_finalized_payroll_detail(
         .map(|particulars| particulars.full_name.clone())
         .unwrap_or(live_full_name);
 
+    // `None` for a row finalized before issue #80 (never backfilled), and
+    // for any other row whose column is simply empty — the same "presence,
+    // never the version number" rule the two particulars above follow. A
+    // present-but-undecodable blob is `FinalizedPayrollSnapshotUnreadable`,
+    // exactly like the two particulars.
+    let pay_line_provenance: Option<Vec<FrozenPayLine>> = pay_line_provenance_json
+        .map(|value| {
+            #[derive(serde::Deserialize)]
+            struct Snapshot {
+                lines: Vec<FrozenPayLine>,
+            }
+            serde_json::from_value::<Snapshot>(value)
+                .map(|snapshot| snapshot.lines)
+                .map_err(|_| PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+                    finalized_payroll_id: finalized_payroll_id.clone(),
+                    schema_version,
+                })
+        })
+        .transpose()?;
+
     Ok(FinalizedPayrollDetail {
         id: finalized_payroll_id,
         employment_id: EmploymentId::new(employment_id),
@@ -272,6 +302,7 @@ pub async fn get_finalized_payroll_detail(
         employer_particulars,
         person_particulars,
         payslip_template_version,
+        pay_line_provenance,
     })
 }
 

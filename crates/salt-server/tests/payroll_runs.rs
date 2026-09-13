@@ -1589,6 +1589,13 @@ async fn a_standing_pay_line_reads_back_with_its_effective_from_date() {
             "source": "standing",
             "standingPayItemId": item_id.to_string(),
             "standingEffectiveFrom": "2026-01-01",
+            // The item's own current instruction (issue #80) — identical to
+            // the line itself here, since nothing has overridden it yet.
+            "standingPayLine": {
+                "kind": "taxableAllowance",
+                "amountCents": 5_000,
+                "label": "standby",
+            },
         }])
     );
 }
@@ -2515,5 +2522,430 @@ async fn employer_paid_medical_aid_is_declarable_and_blocks_by_name_on_the_wire(
     assert_eq!(
         present["details"]["kinds"],
         serde_json::json!(["employer_paid_medical_aid"])
+    );
+}
+
+// ---- Override, remove and refresh (issue #80) ----
+
+fn override_request(
+    employer_id: &str,
+    run_id: &str,
+    employment_id: &str,
+    standing_pay_item_id: &str,
+    cookie: &str,
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/override"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-salt-request", "1")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn remove_request(
+    employer_id: &str,
+    run_id: &str,
+    employment_id: &str,
+    standing_pay_item_id: &str,
+    cookie: &str,
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/remove"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-salt-request", "1")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn refresh_request(employer_id: &str, run_id: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/refresh-proposals"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Creates a standing taxable allowance directly through `payroll_app`,
+/// effective from `january_period()`'s own start — the same shortcut
+/// `a_standing_pay_line_reads_back_with_its_effective_from_date` already
+/// takes, since no HTTP route under test here needs to be the one that
+/// created it.
+async fn a_standing_allowance(employment_id: &str, amount_cents: i64) -> String {
+    let db = test_db().await;
+    payroll_app::create_standing_pay_item(
+        &db,
+        &payroll::EmploymentId::new(employment_id.to_string()),
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: payroll::Money::from_cents(amount_cents).unwrap(),
+            label: payroll::EarningLabel::new("standby").unwrap(),
+        },
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        "test-setup",
+    )
+    .await
+    .unwrap()
+    .to_string()
+}
+
+#[tokio::test]
+async fn override_changes_the_line_for_this_run_only_and_reads_back_with_its_reason() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(override_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &cookie,
+            serde_json::json!({
+                "line": { "kind": "taxableAllowance", "amountCents": 60_000, "label": "standby" },
+                "reason": "temporary raise",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let line = &detail["members"][0]["earnings"][0];
+    assert_eq!(line["amountCents"], 60_000);
+    assert_eq!(line["overrideReason"], "temporary raise");
+    assert_eq!(
+        line["standingPayLine"],
+        serde_json::json!({ "kind": "taxableAllowance", "amountCents": 50_000, "label": "standby" })
+    );
+}
+
+#[tokio::test]
+async fn an_override_on_another_employers_run_is_not_found() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let employment_id = create_employment(&owning_employer, &owning_cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&owning_employer, &owning_cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(override_request(
+            &other_employer,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &other_cookie,
+            serde_json::json!({
+                "line": { "kind": "taxableAllowance", "amountCents": 60_000, "label": "standby" },
+                "reason": "temporary raise",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_not_found");
+}
+
+#[tokio::test]
+async fn an_override_with_an_overtime_line_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(override_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &cookie,
+            serde_json::json!({
+                "line": { "kind": "overtime", "hours": "5", "multiplier": "1.5" },
+                "reason": "temporary raise",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "malformed_request");
+}
+
+#[tokio::test]
+async fn an_override_refuses_a_blank_reason_with_its_own_code() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(override_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &cookie,
+            serde_json::json!({
+                "line": { "kind": "taxableAllowance", "amountCents": 60_000, "label": "standby" },
+                "reason": "   ",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "override_reason_cannot_be_empty");
+}
+
+#[tokio::test]
+async fn remove_removes_the_line_for_this_run_only_and_it_stays_visible_with_its_reason() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(remove_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &cookie,
+            serde_json::json!({ "reason": "not paid this month" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["members"][0]["earnings"], serde_json::json!([]));
+    let removed = &detail["members"][0]["removedPayLines"][0];
+    assert_eq!(removed["amountCents"], 50_000);
+    assert_eq!(removed["removedReason"], "not paid this month");
+    assert_eq!(removed["standingPayItemId"], item_id);
+}
+
+#[tokio::test]
+async fn a_remove_on_another_employers_run_is_not_found() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let employment_id = create_employment(&owning_employer, &owning_cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&owning_employer, &owning_cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(remove_request(
+            &other_employer,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &other_cookie,
+            serde_json::json!({ "reason": "not paid this month" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_not_found");
+}
+
+#[tokio::test]
+async fn override_and_remove_verify_ownership_before_parsing_the_body() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let employment_id = create_employment(&owning_employer, &owning_cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&owning_employer, &owning_cookie).await;
+
+    let override_response = router()
+        .await
+        .oneshot(override_request(
+            &other_employer,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &other_cookie,
+            serde_json::json!({ "line": { "kind": "overtime" }, "reason": 5 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(override_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_json(override_response).await["error"]["code"],
+        "payroll_run_not_found"
+    );
+
+    let remove_response = router()
+        .await
+        .oneshot(remove_request(
+            &other_employer,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &other_cookie,
+            serde_json::json!({ "reason": 5 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(remove_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_json(remove_response).await["error"]["code"],
+        "payroll_run_not_found"
+    );
+}
+
+#[tokio::test]
+async fn a_remove_with_a_malformed_body_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(remove_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &cookie,
+            serde_json::json!({ "reason": 5 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "malformed_request");
+}
+
+#[tokio::test]
+async fn a_remove_refuses_a_blank_reason_with_its_own_code() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(remove_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &item_id,
+            &cookie,
+            serde_json::json!({ "reason": "  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(
+        json["error"]["code"],
+        "pay_line_removal_reason_cannot_be_empty"
+    );
+}
+
+#[tokio::test]
+async fn refresh_reports_an_added_item_and_reads_back_in_the_report_shape() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let run_id = create_run(&employer_id, &cookie).await;
+    // Recorded only after the run's own proposal, so refresh has something
+    // to add.
+    let item_id = a_standing_allowance(&employment_id, 50_000).await;
+
+    let response = router()
+        .await
+        .oneshot(refresh_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report = body_json(response).await;
+    let member = &report["members"][0];
+    assert_eq!(member["employmentId"], employment_id);
+    assert_eq!(member["added"][0]["standingPayItemId"], item_id);
+    assert_eq!(member["added"][0]["amountCents"], 50_000);
+    assert_eq!(member["updated"], serde_json::json!([]));
+    assert_eq!(member["keptOverridden"], serde_json::json!([]));
+    assert_eq!(member["keptRemoved"], serde_json::json!([]));
+    assert_eq!(member["endedStillProposed"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_refresh_on_another_employers_run_is_not_found() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let run_id = create_run(&owning_employer, &owning_cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(refresh_request(&other_employer, &run_id, &other_cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "payroll_run_not_found");
+}
+
+#[tokio::test]
+async fn setting_pay_lines_without_restating_an_active_standing_line_is_refused() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let _item_id = a_standing_allowance(&employment_id, 50_000).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(set_earnings_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+            true,
+            serde_json::json!({ "earnings": [], "deductions": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(
+        json["error"]["code"],
+        "standing_pay_line_changed_without_override"
     );
 }

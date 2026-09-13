@@ -35,7 +35,12 @@ use crate::state::AppState;
 ///
 /// Overtime has no spelling here: it is hours for one period, never a
 /// standing fact.
-#[derive(Serialize)]
+///
+/// `Deserialize` since issue #80: `payroll_runs.rs`'s override handler reads
+/// the request body's `"line"` field straight into this same type, rather
+/// than a parallel request-only enum — one shape, read and written both
+/// ways.
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum StandingPayItemInstructionDto {
     #[serde(rename_all = "camelCase")]
@@ -47,7 +52,11 @@ pub(crate) enum StandingPayItemInstructionDto {
     MedicalAidPremium { amount_cents: i64 },
 }
 
-fn parse_instruction(
+/// `pub(crate)` since issue #80: `payroll_runs.rs`'s override handler parses
+/// the same `{"kind": ..., ...}` shape for the line it overrides a standing
+/// item to, and must refuse an overtime `kind` (D14 has no standing
+/// spelling for it) exactly as this route already does.
+pub(crate) fn parse_instruction(
     instruction: StandingPayItemInstructionDto,
 ) -> Result<StandingPayItemInstruction, ApiError> {
     match instruction {
@@ -66,7 +75,13 @@ fn parse_instruction(
     }
 }
 
-fn instruction_to_dto(instruction: StandingPayItemInstruction) -> StandingPayItemInstructionDto {
+/// `pub(crate)` since issue #80: `payroll_runs.rs` reuses this to render a
+/// `StandingItemProposal`'s own instruction — the change banner, the refresh
+/// report, and a standing pay line's `standingPayLine` all show the item's
+/// current instruction in exactly this shape.
+pub(crate) fn instruction_to_dto(
+    instruction: StandingPayItemInstruction,
+) -> StandingPayItemInstructionDto {
     match instruction {
         StandingPayItemInstruction::TaxableAllowance { amount, label } => {
             StandingPayItemInstructionDto::TaxableAllowance {

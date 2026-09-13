@@ -633,13 +633,17 @@ async fn set_run_pay_lines_preserves_an_untouched_standing_lines_provenance(pool
     assert_eq!(rows[1], ("one_off".to_string(), None, 5_000));
 }
 
+/// Since issue #80 (decision 2): a body that edits an active standing line
+/// without going through an override is refused, not silently downgraded to
+/// `one_off` — that downgrade used to make the item look "not proposed", so
+/// a later Refresh would add it again and double the payment.
 #[sqlx::test]
-async fn set_run_pay_lines_downgrades_an_edited_standing_line_to_one_off(pool: PgPool) {
+async fn set_run_pay_lines_refuses_to_edit_or_drop_a_standing_line(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
     let employment_id = an_employment(&db, &employer_id).await;
 
-    create_standing_pay_item(
+    let item_id = create_standing_pay_item(
         &db,
         &employment_id,
         standing_allowance(60_000),
@@ -655,15 +659,22 @@ async fn set_run_pay_lines_downgrades_an_edited_standing_line_to_one_off(pool: P
             .unwrap();
 
     // The amount no longer matches the standing item's own instruction.
-    set_run_pay_lines(
+    let result = set_run_pay_lines(
         &db,
         &run_id,
         &employment_id,
         vec![allowance(30_000)],
         Vec::new(),
     )
-    .await
-    .unwrap();
+    .await;
+    assert_eq!(
+        result,
+        Err(PayrollAppError::StandingPayLineChangedWithoutOverride {
+            payroll_run_id: run_id.clone(),
+            employment_id: employment_id.clone(),
+            standing_pay_item_id: item_id.clone(),
+        })
+    );
 
     let row: (String, Option<String>) = sqlx::query_as(
         "SELECT source, standing_pay_item_id::text FROM payroll_run_pay_line
@@ -674,7 +685,10 @@ async fn set_run_pay_lines_downgrades_an_edited_standing_line_to_one_off(pool: P
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(row, ("one_off".to_string(), None));
+    assert_eq!(
+        row,
+        ("standing".to_string(), Some(item_id.as_str().to_string()))
+    );
 }
 
 // ---- Hardening (issue #79) ----

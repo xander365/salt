@@ -46,7 +46,11 @@ impl StandingPayItemInstruction {
     /// Reads a stored `pay_line_json` back. Only this module writes that
     /// column, and only from this type, so any other shape is a broken
     /// invariant rather than a refusal.
-    fn from_pay_line_json(pay_line_json: serde_json::Value) -> Self {
+    ///
+    /// `pub(crate)` since issue #80: `run_override.rs`'s change signal reads
+    /// a `StandingPayItem`'s own `pay_line_json` too, to build the
+    /// `StandingItemProposal` a run's stored line is diffed against.
+    pub(crate) fn from_pay_line_json(pay_line_json: serde_json::Value) -> Self {
         let instruction: PayLineInstruction = serde_json::from_value(pay_line_json)
             .expect("standing_pay_item.pay_line_json is always a PayLineInstruction");
         match instruction {
@@ -61,7 +65,10 @@ impl StandingPayItemInstruction {
         }
     }
 
-    fn into_pay_line_instruction(self) -> PayLineInstruction {
+    /// `pub(crate)` since issue #80: `run_override.rs`'s override use case
+    /// turns an operator-stated instruction into the `PayLineInstruction` a
+    /// pay line stores.
+    pub(crate) fn into_pay_line_instruction(self) -> PayLineInstruction {
         match self {
             Self::TaxableAllowance { amount, label } => {
                 PayLineInstruction::Earning(EarningInstruction::TaxableAllowance {
@@ -362,8 +369,13 @@ pub async fn list_standing_pay_items(
 /// Ordered by `effective_from` then `created_at` then `id`, so a run's
 /// proposed lines land in creation order rather than the random order
 /// `id`'s own UUID would otherwise sort ties into.
+///
+/// Takes a concrete `&mut PgConnection` rather than a `Transaction`, since
+/// issue #80: `get_payroll_run_detail`'s change signal reads this on its own
+/// read transaction, not the write transaction run creation uses, and a
+/// caller passes `&mut **tx` either way.
 pub(crate) async fn standing_pay_lines_in_force(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     employment_id: &EmploymentId,
     as_of: NaiveDate,
 ) -> Result<Vec<(StandingPayItemId, serde_json::Value, NaiveDate)>, PayrollAppError> {
@@ -375,7 +387,7 @@ pub(crate) async fn standing_pay_lines_in_force(
     )
     .bind(employment_id.as_str())
     .bind(as_of)
-    .fetch_all(&mut **tx)
+    .fetch_all(conn)
     .await?;
 
     Ok(rows

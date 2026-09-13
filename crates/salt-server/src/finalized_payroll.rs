@@ -34,7 +34,7 @@ use serde::Serialize;
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::employment_facts::PayPeriodDto;
 use crate::error::ApiError;
-use crate::payroll_runs::{FiguresDto, figures_to_dto};
+use crate::payroll_runs::{DeductionLineDto, EarningLineDto, FiguresDto, figures_to_dto};
 use crate::state::AppState;
 
 /// The frozen `EmployerParticulars` on one `FinalizedPayroll` (issue #73):
@@ -96,6 +96,66 @@ impl From<payroll_app::FinalizedPersonParticulars> for FrozenPersonParticularsDt
     }
 }
 
+/// One frozen pay line's own instruction — the same shape a working run's
+/// `earnings`/`deductions` already give it, never re-derived (issue #80).
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum FrozenPayLineInstructionDto {
+    Earning(EarningLineDto),
+    Deduction(DeductionLineDto),
+}
+
+fn frozen_instruction_to_dto(
+    instruction: payroll_app::PayLineInstruction,
+) -> FrozenPayLineInstructionDto {
+    match instruction {
+        payroll_app::PayLineInstruction::Earning(earning) => {
+            FrozenPayLineInstructionDto::Earning(crate::payroll_runs::earning_line_to_dto(earning))
+        }
+        payroll_app::PayLineInstruction::Deduction(deduction) => {
+            FrozenPayLineInstructionDto::Deduction(crate::payroll_runs::deduction_line_to_dto(
+                deduction,
+            ))
+        }
+    }
+}
+
+/// One line's frozen provenance (issue #80): its own instruction, its
+/// source, and — when it was a standing line — the item it named, its own
+/// current instruction, and any override or removal reason recorded for
+/// this run. Frozen at finalization and never rebuilt from today's standing
+/// records (ADR-0004): an old payroll's workings can always say "this was a
+/// one-month override, reason X", however the standing record reads now.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FrozenPayLineDto {
+    #[serde(flatten)]
+    pay_line: FrozenPayLineInstructionDto,
+    source: crate::payroll_runs::PayLineSourceDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_pay_item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_effective_from: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_pay_line: Option<FrozenPayLineInstructionDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    override_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed_reason: Option<String>,
+}
+
+fn frozen_pay_line_to_dto(line: payroll_app::FrozenPayLine) -> FrozenPayLineDto {
+    FrozenPayLineDto {
+        pay_line: frozen_instruction_to_dto(line.pay_line),
+        source: crate::payroll_runs::pay_line_source_to_dto(line.source),
+        standing_pay_item_id: line.standing_pay_item_id,
+        standing_effective_from: line.standing_effective_from,
+        standing_pay_line: line.standing_pay_line.map(frozen_instruction_to_dto),
+        override_reason: line.override_reason,
+        removed_reason: line.removed_reason,
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FinalizedPayrollDetailResponse {
@@ -109,6 +169,9 @@ pub(crate) struct FinalizedPayrollDetailResponse {
     employer_particulars: Option<FrozenEmployerParticularsDto>,
     person_particulars: Option<FrozenPersonParticularsDto>,
     payslip_template_version: Option<String>,
+    /// The frozen pay-line workings (issue #80) — `null` for a payroll
+    /// finalized before this shipped, which never froze one at all.
+    pay_line_provenance: Option<Vec<FrozenPayLineDto>>,
 }
 
 /// `GET /api/employers/{e}/finalized-payroll/{f}`: the ten figures, the
@@ -139,6 +202,9 @@ pub(crate) async fn get_finalized_payroll(
         employer_particulars: detail.employer_particulars.map(Into::into),
         person_particulars: detail.person_particulars.map(Into::into),
         payslip_template_version: detail.payslip_template_version,
+        pay_line_provenance: detail
+            .pay_line_provenance
+            .map(|lines| lines.into_iter().map(frozen_pay_line_to_dto).collect()),
     }))
 }
 

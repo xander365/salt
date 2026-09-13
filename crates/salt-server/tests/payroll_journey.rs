@@ -666,6 +666,86 @@ fn finalized_traces_request(
         .unwrap()
 }
 
+/// `POST .../pay-lines/{standing_pay_item_id}/override` (issue #80).
+fn override_standing_pay_line_request(
+    employer_id: &str,
+    run_id: &str,
+    employment_id: &str,
+    standing_pay_item_id: &str,
+    cookie: &str,
+    salt_header: bool,
+    amount_cents: i64,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/override"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder
+        .body(Body::from(
+            json!({
+                "line": {
+                    "kind": "taxableAllowance",
+                    "amountCents": amount_cents,
+                    "label": "standby",
+                },
+                "reason": "temporary raise",
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// `POST .../pay-lines/{standing_pay_item_id}/remove` (issue #80).
+fn remove_standing_pay_line_request(
+    employer_id: &str,
+    run_id: &str,
+    employment_id: &str,
+    standing_pay_item_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/remove"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder
+        .body(Body::from(
+            json!({ "reason": "not needed this run" }).to_string(),
+        ))
+        .unwrap()
+}
+
+/// `POST .../refresh-proposals` (issue #80).
+fn refresh_proposals_request(
+    employer_id: &str,
+    run_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/refresh-proposals"
+        ))
+        .header(header::COOKIE, cookie);
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
 // ---------------------------------------------------------------------
 // The tracer bullet.
 // ---------------------------------------------------------------------
@@ -1177,6 +1257,58 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
 
     let run_id = create_run(&employer_id, &cookie).await;
 
+    // Changes the proposed line for this run only (issue #80), then catches
+    // the draft up with the standing records (a no-op report here, since
+    // nothing else changed), then removes the line for this run only — so
+    // the empty pay-lines write below still states a complete, correct list.
+    assert_eq!(
+        router()
+            .await
+            .oneshot(override_standing_pay_line_request(
+                &employer_id,
+                &run_id,
+                &employment_id,
+                &standing_pay_item_id,
+                &cookie,
+                true,
+                15_000,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        router()
+            .await
+            .oneshot(refresh_proposals_request(
+                &employer_id,
+                &run_id,
+                &cookie,
+                true
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        router()
+            .await
+            .oneshot(remove_standing_pay_line_request(
+                &employer_id,
+                &run_id,
+                &employment_id,
+                &standing_pay_item_id,
+                &cookie,
+                true,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
     // Ending the item now changes nothing about the run just proposed from
     // it: a draft holds a stated proposal (issue #79).
     assert_eq!(
@@ -1357,6 +1489,9 @@ async fn every_payroll_route_answers_401_without_a_session() {
             true,
             json!({ "earnings": [], "deductions": [] }),
         ),
+        override_standing_pay_line_request(e, r, em, "placeholder-item", no_cookie, true, 1),
+        remove_standing_pay_line_request(e, r, em, "placeholder-item", no_cookie, true),
+        refresh_proposals_request(e, r, no_cookie, true),
         calculate_request(e, r, no_cookie, true),
         finalize_request(e, r, no_cookie, true),
         finalized_detail_request(e, f, no_cookie),
@@ -1441,6 +1576,17 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
             false,
             json!({ "earnings": [], "deductions": [] }),
         ),
+        override_standing_pay_line_request(
+            &employer_id,
+            r,
+            em,
+            "placeholder-item",
+            &cookie,
+            false,
+            1,
+        ),
+        remove_standing_pay_line_request(&employer_id, r, em, "placeholder-item", &cookie, false),
+        refresh_proposals_request(&employer_id, r, &cookie, false),
         calculate_request(&employer_id, r, &cookie, false),
         finalize_request(&employer_id, r, &cookie, false),
     ] {
@@ -1606,6 +1752,9 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/calculate",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/finalize",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/override",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/remove",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/refresh-proposals",
             "/api/employers/{employer_id}/people/{person_id}/name",
             "/api/employers/{employer_id}/people/{person_id}/particulars",
             "/api/health",
@@ -1623,7 +1772,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 22, "{paths:?}");
+    assert_eq!(paths.len(), 25, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

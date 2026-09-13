@@ -292,11 +292,20 @@ export type PayLineSourceDto = 'one_off' | 'from_reversed_snapshot' | 'standing'
 
 /** The immutable identity and start date a standing proposed line names.
  * Both fields arrive exactly when `source` is `standing`, making that
- * provenance a truthful wire invariant rather than optional display data. */
-export interface StandingPayLineProvenanceDto {
+ * provenance a truthful wire invariant rather than optional display data.
+ *
+ * `overrideReason` (issue #80) is present only when this run's line has
+ * been changed from the item's own instruction; `standingPayLine` — the
+ * item's own current instruction, `Line` because it differs in shape
+ * between an earning and a deduction line — is present on every standing
+ * line, overridden or not, so the worksheet can always say "the standing
+ * amount is X" beside a line that may or may not still match it. */
+export interface StandingPayLineProvenanceDto<Line> {
   source: 'standing';
   standingPayItemId: string;
   standingEffectiveFrom: string;
+  overrideReason?: string;
+  standingPayLine: Line;
 }
 
 type NonStandingPayLineProvenanceDto = {
@@ -334,7 +343,7 @@ export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
 /** One stored line as the run detail returns it: its instruction and the
  * source the server recorded beside it. */
 export type PayLineDto = EarningLineDto &
-  (StandingPayLineProvenanceDto | NonStandingPayLineProvenanceDto);
+  (StandingPayLineProvenanceDto<EarningLineDto> | NonStandingPayLineProvenanceDto);
 
 /**
  * A medical aid premium withheld from the employee's own pay (issue #78) —
@@ -355,7 +364,52 @@ export type DeductionLineDto = MedicalAidPremiumLineDto;
 
 /** One stored deduction line as the run detail returns it. */
 export type DeductionPayLineDto = DeductionLineDto &
-  (StandingPayLineProvenanceDto | NonStandingPayLineProvenanceDto);
+  (StandingPayLineProvenanceDto<DeductionLineDto> | NonStandingPayLineProvenanceDto);
+
+/** One removed standing line (issue #80, §0): it contributes nothing to
+ * calculation, but stays visible with its reason. Always standing-sourced
+ * — the database admits no other kind of removal — so `standingPayItemId`
+ * and `standingEffectiveFrom` are never absent here, unlike on
+ * `PayLineDto`/`DeductionPayLineDto`. Kept out of `earnings`/`deductions`
+ * entirely: the two arrays a caller reads are exactly the arrays it must
+ * send back to `PUT .../pay-lines`, so a removed line can never be resent
+ * as a new one-off line. */
+export type RemovedPayLineDto = (EarningLineDto | DeductionLineDto) & {
+  standingPayItemId: string;
+  standingEffectiveFrom: string;
+  removedReason: string;
+  /** Present when this line was overridden before it was removed — both
+   * facts survive together. */
+  overrideReason?: string;
+};
+
+/** One `StandingPayItem` named in the change signal or the refresh report
+ * (issue #80): its id, when it began, and its own current instruction —
+ * never an override — flattened in the same shape `standing-pay-items`
+ * already gives one. */
+export type StandingItemProposalDto = StandingPayItemInstructionDto & {
+  standingPayItemId: string;
+  effectiveFrom: string;
+};
+
+/** How a member's standing items in force now differ from what this draft
+ * proposes (issue #80, §D-6). Always present; every array may be empty,
+ * which itself means "nothing changed". Always empty for a Correction run
+ * or an already-`Finalized` run. */
+export interface StandingItemsChangedDto {
+  /** In force now, no line at all yet — a removed line still counts as
+   * "having a line", so it is never reported as an addition. */
+  added: StandingItemProposalDto[];
+  /** A plain, active, non-overridden line whose own instruction no longer
+   * matches its item's — unreachable through any write this build makes
+   * today (a `StandingPayItem` is immutable except for ending it), but
+   * still computed and shown if it were ever true. */
+  changed: StandingItemProposalDto[];
+  /** An active (not removed) line whose item is no longer in force —
+   * ended, most likely. Reported, never silently dropped: the line stays
+   * exactly where it is until the operator removes it. */
+  ended: StandingItemProposalDto[];
+}
 
 /**
  * Whether a member's `figures` are current, and why not when absent (§D-6).
@@ -421,6 +475,9 @@ export interface PayrollRunMemberDto {
   fullName: string;
   earnings: PayLineDto[];
   deductions: DeductionPayLineDto[];
+  /** Every removed standing line, earnings and deductions together (issue
+   * #80, §0's decision 3). Never in `earnings`/`deductions`. */
+  removedPayLines: RemovedPayLineDto[];
   blockers: PayrollRunBlockerDto[];
   figures: FiguresDto | null;
   calculationState: CalculationStateDto;
@@ -428,6 +485,45 @@ export interface PayrollRunMemberDto {
   /** A joiner or leaver in this period: `BasicPay` is prorated by employed
    * days, and nothing else is (issue #79). */
   basicPayProrated: boolean;
+  /** How this member's standing items in force now differ from what this
+   * draft proposes (issue #80). */
+  standingItemsChanged: StandingItemsChangedDto;
+}
+
+/** `POST .../pay-lines/{s}/override` (issue #80): changes a proposed
+ * standing line for this run only, with a reason, leaving the
+ * `StandingPayItem` itself untouched. `line` is validated the same way a
+ * new standing item is — an `overtime` kind is a 400, since no
+ * `StandingPayItem` can ever be one. */
+export interface OverrideStandingPayLineRequest {
+  line: StandingPayItemInstructionDto;
+  reason: string;
+}
+
+/** `POST .../pay-lines/{s}/remove` (issue #80). The server refuses a blank
+ * reason. */
+export interface RemoveStandingPayLineRequest {
+  reason: string;
+}
+
+/** One member's own report from a refresh: what was added and updated, and
+ * what was deliberately left alone. */
+export interface MemberProposalRefreshDto {
+  employmentId: string;
+  added: StandingItemProposalDto[];
+  updated: StandingItemProposalDto[];
+  keptOverridden: string[];
+  keptRemoved: string[];
+  endedStillProposed: StandingItemProposalDto[];
+}
+
+/** `POST .../refresh-proposals` (issue #80): the one explicit,
+ * operator-triggered act that catches a draft's proposals up with the
+ * standing records — never automatic. Only members with something to
+ * report are listed at all, so an empty `members` array itself means
+ * "nothing changed; nothing was written". */
+export interface RefreshStandingProposalsResponse {
+  members: MemberProposalRefreshDto[];
 }
 
 export interface PayrollRunDetailResponse {
@@ -482,6 +578,22 @@ export interface FrozenPersonParticularsDto {
   postalCode: string | null;
 }
 
+/** One line's frozen provenance (issue #80): its own instruction, its
+ * source, and — when it was a standing line — the item it named, that
+ * item's own current instruction, and any override or removal reason
+ * recorded for this run. Frozen at finalization and never rebuilt from
+ * today's standing records (ADR-0004): an old payroll's workings can
+ * always say "this was a one-month override, reason X", however the
+ * standing record reads now. */
+export type FrozenPayLineDto = (EarningLineDto | DeductionLineDto) & {
+  source: PayLineSourceDto;
+  standingPayItemId?: string;
+  standingEffectiveFrom?: string;
+  standingPayLine?: EarningLineDto | DeductionLineDto;
+  overrideReason?: string;
+  removedReason?: string;
+};
+
 export interface FinalizedPayrollDetailResponse {
   finalizedPayrollId: string;
   employmentId: string;
@@ -493,6 +605,9 @@ export interface FinalizedPayrollDetailResponse {
   employerParticulars: FrozenEmployerParticularsDto | null;
   personParticulars: FrozenPersonParticularsDto | null;
   payslipTemplateVersion: string | null;
+  /** The frozen pay-line workings (issue #80) — `null` for a payroll
+   * finalized before this shipped. */
+  payLineProvenance: FrozenPayLineDto[] | null;
 }
 
 // `GET /api/employers/{e}/finalized-payroll/{f}/traces`

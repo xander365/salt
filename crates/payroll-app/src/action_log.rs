@@ -35,12 +35,15 @@ pub enum ActionType {
     PersonFullNameCorrected,
     StandingPayItemCreated,
     StandingPayItemEnded,
+    StandingPayLineOverridden,
+    StandingPayLineRemoved,
+    StandingProposalsRefreshed,
 }
 
 impl ActionType {
     /// Every variant, so a test can walk the whole enum and compare it with
     /// the database's own `action_type` CHECK.
-    pub const ALL: [ActionType; 18] = [
+    pub const ALL: [ActionType; 21] = [
         Self::PayrollRunCreated,
         Self::EmploymentRemovedFromRun,
         Self::EmploymentAddedToCorrectionRun,
@@ -59,6 +62,9 @@ impl ActionType {
         Self::PersonFullNameCorrected,
         Self::StandingPayItemCreated,
         Self::StandingPayItemEnded,
+        Self::StandingPayLineOverridden,
+        Self::StandingPayLineRemoved,
+        Self::StandingProposalsRefreshed,
     ];
 
     /// The exact string `action_log_entry.action_type`'s CHECK accepts.
@@ -82,6 +88,9 @@ impl ActionType {
             Self::PersonFullNameCorrected => "person_full_name_corrected",
             Self::StandingPayItemCreated => "standing_pay_item_created",
             Self::StandingPayItemEnded => "standing_pay_item_ended",
+            Self::StandingPayLineOverridden => "standing_pay_line_overridden",
+            Self::StandingPayLineRemoved => "standing_pay_line_removed",
+            Self::StandingProposalsRefreshed => "standing_proposals_refreshed",
         }
     }
 }
@@ -234,6 +243,18 @@ mod tests {
                 "standing_pay_item_created",
             ),
             (ActionType::StandingPayItemEnded, "standing_pay_item_ended"),
+            (
+                ActionType::StandingPayLineOverridden,
+                "standing_pay_line_overridden",
+            ),
+            (
+                ActionType::StandingPayLineRemoved,
+                "standing_pay_line_removed",
+            ),
+            (
+                ActionType::StandingProposalsRefreshed,
+                "standing_proposals_refreshed",
+            ),
         ];
 
         for (action_type, expected_str) in expected {
