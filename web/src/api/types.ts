@@ -237,11 +237,25 @@ export interface PayrollRunsResponse {
 export type EarningKind = 'taxableAllowance' | 'overtime';
 
 /**
- * Where a stored pay line came from (issue #77): typed directly on this run,
- * or copied from a reversed payroll's frozen snapshot. Recorded by the
- * server and returned, never sent — a write carries instructions only.
+ * Where a stored pay line came from (issue #77/#79): typed directly on this
+ * run, copied from a reversed payroll's frozen snapshot, or proposed from a
+ * StandingPayItem. Recorded by the server and returned, never sent — a write
+ * carries instructions only.
  */
-export type PayLineSourceDto = 'one_off' | 'from_reversed_snapshot';
+export type PayLineSourceDto = 'one_off' | 'from_reversed_snapshot' | 'standing';
+
+/** The immutable identity and start date a standing proposed line names.
+ * Both fields arrive exactly when `source` is `standing`, making that
+ * provenance a truthful wire invariant rather than optional display data. */
+export interface StandingPayLineProvenanceDto {
+  source: 'standing';
+  standingPayItemId: string;
+  standingEffectiveFrom: string;
+}
+
+type NonStandingPayLineProvenanceDto = {
+  source: Exclude<PayLineSourceDto, 'standing'>;
+};
 
 /** A taxable allowance: money an Operator decided. */
 export interface TaxableAllowanceLineDto {
@@ -273,7 +287,8 @@ export type EarningLineDto = TaxableAllowanceLineDto | OvertimeLineDto;
 
 /** One stored line as the run detail returns it: its instruction and the
  * source the server recorded beside it. */
-export type PayLineDto = EarningLineDto & { source: PayLineSourceDto };
+export type PayLineDto = EarningLineDto &
+  (StandingPayLineProvenanceDto | NonStandingPayLineProvenanceDto);
 
 /**
  * A medical aid premium withheld from the employee's own pay (issue #78) —
@@ -293,7 +308,8 @@ export interface MedicalAidPremiumLineDto {
 export type DeductionLineDto = MedicalAidPremiumLineDto;
 
 /** One stored deduction line as the run detail returns it. */
-export type DeductionPayLineDto = DeductionLineDto & { source: PayLineSourceDto };
+export type DeductionPayLineDto = DeductionLineDto &
+  (StandingPayLineProvenanceDto | NonStandingPayLineProvenanceDto);
 
 /**
  * Whether a member's `figures` are current, and why not when absent (§D-6).

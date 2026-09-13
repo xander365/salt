@@ -4,13 +4,15 @@
 //! pay line (`docs/domain/payroll-run-persistence.md` §0's own words for
 //! `StandingPayItem`).
 
+use std::time::Duration;
+
 use chrono::NaiveDate;
 use payroll::{DayOfMonth, EarningInstruction, Money, PayPeriod, PayrollError, PeriodEndDay};
 use payroll_app::{
     EmploymentPerson, PayrollAppError, SaltDatabase, StandingPayItemInstruction,
     add_employment_to_correction_run, create_correction_run, create_employer, create_employment,
     create_ordinary_payroll_run, create_standing_pay_item, end_standing_pay_item,
-    set_run_pay_lines,
+    get_payroll_run_detail, set_run_pay_lines,
 };
 use sqlx::{PgPool, Row};
 
@@ -195,6 +197,14 @@ async fn an_ordinary_run_proposes_every_standing_item_in_force(pool: PgPool) {
             Some(allowance_id.as_str().to_string()),
             Some(medical_aid_id.as_str().to_string())
         ]
+    );
+
+    let detail = get_payroll_run_detail(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.members[0].pay_lines[0].standing_effective_from,
+        Some(march_period().start())
     );
 }
 
@@ -467,6 +477,50 @@ async fn ending_an_already_ended_standing_item_is_refused(pool: PgPool) {
             item_id.clone()
         ))
     );
+}
+
+#[sqlx::test]
+async fn ending_a_standing_item_waits_for_the_ordinary_runs_employer_lock(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = an_employment(&db, &employer_id).await;
+    let item_id = create_standing_pay_item(
+        &db,
+        &employment_id,
+        standing_allowance(60_000),
+        march_period().start(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    // `create_ordinary_payroll_run` holds this exact row `FOR UPDATE` while
+    // it reads active standing items. An end must wait on it, otherwise it
+    // could commit between the read and the run's own commit.
+    let mut ordinary_run_tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM employer WHERE id = $1 FOR UPDATE")
+        .bind(employer_id.as_str())
+        .execute(&mut *ordinary_run_tx)
+        .await
+        .unwrap();
+
+    let ending_pool = pool.clone();
+    let ending_item_id = item_id.clone();
+    let mut ending = tokio::spawn(async move {
+        let ending_db = SaltDatabase::from_pool(ending_pool);
+        end_standing_pay_item(&ending_db, &ending_item_id, "no longer applies", "actor").await
+    });
+
+    tokio::task::yield_now().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut ending)
+            .await
+            .is_err(),
+        "ending must wait for the Employer lock that guards an Ordinary-run proposal"
+    );
+
+    ordinary_run_tx.commit().await.unwrap();
+    ending.await.unwrap().unwrap();
 }
 
 // ---- set_run_pay_lines interaction ----

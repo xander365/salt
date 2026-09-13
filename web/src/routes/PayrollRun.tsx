@@ -17,10 +17,13 @@ import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import type {
   DeductionLineDto,
+  DeductionPayLineDto,
   EarningLineDto,
   PayrollRunBlockerDto,
   PayrollRunDetailResponse,
   PayrollRunMemberDto,
+  PayLineDto,
+  StandingPayLineProvenanceDto,
 } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDate, humanDateRange } from '../format';
@@ -152,6 +155,50 @@ function FinalizedEarnings({
   );
 }
 
+/** The source recorded beside a proposed line is operational information:
+ * an Operator needs to know both that it will recur and the date from which
+ * it has done so before deciding whether this run needs an override. */
+function StandingPayItemProposals({
+  earnings,
+  deductions,
+}: {
+  earnings: PayLineDto[];
+  deductions: DeductionPayLineDto[];
+}) {
+  const standingEarnings = earnings.filter(
+    (line): line is PayLineDto & StandingPayLineProvenanceDto & { kind: 'taxableAllowance' } =>
+      line.source === 'standing' && line.kind === 'taxableAllowance',
+  );
+  const standingDeductions = deductions.filter(
+    (line): line is DeductionPayLineDto & StandingPayLineProvenanceDto =>
+      line.source === 'standing',
+  );
+  if (standingEarnings.length === 0 && standingDeductions.length === 0) {
+    return null;
+  }
+
+  return (
+    <section aria-label="Standing pay items" className="flex flex-col gap-2 text-sm">
+      <h4 className="font-medium">Standing pay items</h4>
+      <ul className="flex flex-col gap-1 text-muted-foreground">
+        {standingEarnings.map((line) => (
+          <li key={line.standingPayItemId}>
+            Taxable allowance — {line.label ?? 'unlabelled'} <Money cents={line.amountCents} />
+            {' · '}Standing since{' '}
+            <span className="text-foreground">{humanDate(line.standingEffectiveFrom)}</span>
+          </li>
+        ))}
+        {standingDeductions.map((line) => (
+          <li key={line.standingPayItemId}>
+            Medical aid premium <Money cents={line.amountCents} />{' · '}Standing since{' '}
+            <span className="text-foreground">{humanDate(line.standingEffectiveFrom)}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function Member({
   member,
   employerId,
@@ -182,6 +229,8 @@ function Member({
           onChanged={onEarningsChanged}
         />
       )}
+
+      <StandingPayItemProposals earnings={member.earnings} deductions={member.deductions} />
 
       {/* The hours column slot (issue #88's own Deep Instructions): hourly
           pay is out of this milestone, but the worksheet already reserves

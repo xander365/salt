@@ -136,8 +136,13 @@ pub(crate) struct PayLineDto {
     #[serde(flatten)]
     line: EarningLineDto,
     source: PayLineSourceDto,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "standingPayItemId", skip_serializing_if = "Option::is_none")]
     standing_pay_item_id: Option<String>,
+    #[serde(
+        rename = "standingEffectiveFrom",
+        skip_serializing_if = "Option::is_none"
+    )]
+    standing_effective_from: Option<NaiveDate>,
 }
 
 /// One stored deduction line on the way out, the same shape `PayLineDto`
@@ -147,8 +152,13 @@ pub(crate) struct DeductionPayLineDto {
     #[serde(flatten)]
     line: DeductionLineDto,
     source: PayLineSourceDto,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "standingPayItemId", skip_serializing_if = "Option::is_none")]
     standing_pay_item_id: Option<String>,
+    #[serde(
+        rename = "standingEffectiveFrom",
+        skip_serializing_if = "Option::is_none"
+    )]
+    standing_effective_from: Option<NaiveDate>,
 }
 
 /// `standing` arrives with issue #79: a line proposed from a
@@ -315,16 +325,19 @@ fn pay_lines_to_dtos(
             .standing_pay_item_id
             .as_ref()
             .map(ToString::to_string);
+        let standing_effective_from = pay_line.standing_effective_from;
         match pay_line.instruction {
             PayLineInstruction::Earning(earning) => earnings.push(PayLineDto {
                 line: earning_line_to_dto(earning),
                 source,
                 standing_pay_item_id,
+                standing_effective_from,
             }),
             PayLineInstruction::Deduction(deduction) => deductions.push(DeductionPayLineDto {
                 line: deduction_line_to_dto(deduction),
                 source,
                 standing_pay_item_id,
+                standing_effective_from,
             }),
         }
     }

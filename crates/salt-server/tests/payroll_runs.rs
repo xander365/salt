@@ -13,7 +13,9 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use payroll_app::{DatabaseConfig, MembershipRole, OperatorId, SaltDatabase};
+use payroll_app::{
+    DatabaseConfig, MembershipRole, OperatorId, SaltDatabase, StandingPayItemInstruction,
+};
 use salt_server::{AppState, build_router};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -1546,6 +1548,49 @@ async fn a_written_line_reads_back_one_off_whatever_source_the_body_claims() {
     assert_eq!(member["earnings"][1]["source"], "one_off");
     assert!(member["figures"].is_null());
     assert_eq!(member["calculationState"], "not_calculated");
+}
+
+/// Issue #79's proposal is readable as both a standing line and the date it
+/// began; an id alone would leave the worksheet unable to say "since when".
+#[tokio::test]
+async fn a_standing_pay_line_reads_back_with_its_effective_from_date() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    let db = test_db().await;
+    let item_id = payroll_app::create_standing_pay_item(
+        &db,
+        &payroll::EmploymentId::new(employment_id.clone()),
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: payroll::Money::from_cents(5_000).unwrap(),
+            label: Some(payroll::EarningLabel::new("standby").unwrap()),
+        },
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        "test-setup",
+    )
+    .await
+    .unwrap();
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let detail = body_json(
+        router()
+            .await
+            .oneshot(detail_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(
+        detail["members"][0]["earnings"],
+        serde_json::json!([{
+            "kind": "taxableAllowance",
+            "amountCents": 5_000,
+            "label": "standby",
+            "source": "standing",
+            "standingPayItemId": item_id.to_string(),
+            "standingEffectiveFrom": "2026-01-01",
+        }])
+    );
 }
 
 /// A member missing its `CompensationTerms` cannot calculate — but the

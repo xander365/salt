@@ -157,13 +157,19 @@ pub async fn end_standing_pay_item(
 
     let mut tx = db.pool().begin().await?;
 
+    // Lock the same Employer row an Ordinary run holds `FOR UPDATE` while it
+    // snapshots membership and StandingPayItems. Without this lock, an end
+    // could commit between that snapshot and the run's commit, leaving a
+    // newly-created run proposing an item already ended by the time it is
+    // visible. The common lock makes either order a complete stated fact.
     type ItemRow = (String, String, Option<chrono::DateTime<chrono::Utc>>);
     let row: Option<ItemRow> = sqlx::query_as(
         "SELECT standing_pay_item.employment_id, employment.employer_id, standing_pay_item.ended_at
          FROM standing_pay_item
          JOIN employment ON employment.id = standing_pay_item.employment_id
+         JOIN employer ON employer.id = employment.employer_id
          WHERE standing_pay_item.id = $1::uuid
-         FOR UPDATE OF standing_pay_item",
+         FOR UPDATE OF standing_pay_item, employer",
     )
     .bind(standing_pay_item_id.as_str())
     .fetch_optional(&mut *tx)

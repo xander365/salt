@@ -146,12 +146,14 @@ impl<'de> Deserialize<'de> for PayLineInstruction {
 /// `standing_pay_item_id` is `Some` exactly when `source` is
 /// [`PayLineSource::Standing`], mirroring the database's own
 /// `payroll_run_pay_line_standing_item_iff_standing_source` CHECK
-/// (migration 0038).
+/// (migration 0038). `standing_effective_from` names when that standing
+/// item began and is likewise present exactly for a standing line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPayLine {
     pub instruction: PayLineInstruction,
     pub source: PayLineSource,
     pub standing_pay_item_id: Option<StandingPayItemId>,
+    pub standing_effective_from: Option<NaiveDate>,
 }
 
 app_id! {
@@ -904,42 +906,53 @@ pub async fn set_run_pay_lines(
     // A copied line keeps its frozen-snapshot source, and a standing line
     // keeps its StandingPayItem (issue #79), only while the exact
     // instruction is still stated; an edited or new instruction is one-off.
-    let stored_rows: Vec<(serde_json::Value, String, Option<String>)> = sqlx::query_as(
-        "SELECT pay_line_json, source, standing_pay_item_id::text
+    let stored_rows: Vec<(serde_json::Value, String, Option<String>, Option<NaiveDate>)> =
+        sqlx::query_as(
+            "SELECT payroll_run_pay_line.pay_line_json, payroll_run_pay_line.source,
+                payroll_run_pay_line.standing_pay_item_id::text, standing_pay_item.effective_from
          FROM payroll_run_pay_line
-         WHERE payroll_run_id = $1::uuid AND employment_id = $2
+         LEFT JOIN standing_pay_item
+           ON standing_pay_item.id = payroll_run_pay_line.standing_pay_item_id
+         WHERE payroll_run_pay_line.payroll_run_id = $1::uuid
+           AND payroll_run_pay_line.employment_id = $2
          ORDER BY line",
-    )
-    .bind(payroll_run_id.as_str())
-    .bind(employment_id.as_str())
-    .fetch_all(&mut *tx)
-    .await?;
+        )
+        .bind(payroll_run_id.as_str())
+        .bind(employment_id.as_str())
+        .fetch_all(&mut *tx)
+        .await?;
     let stored: Vec<RunPayLine> = stored_rows
         .into_iter()
-        .map(|(pay_line_json, source, standing_pay_item_id)| RunPayLine {
-            instruction: serde_json::from_value(pay_line_json)
-                .expect("payroll_run_pay_line.pay_line_json is always a PayLineInstruction"),
-            source: PayLineSource::from_column(&source),
-            standing_pay_item_id: standing_pay_item_id.map(StandingPayItemId::new),
-        })
+        .map(
+            |(pay_line_json, source, standing_pay_item_id, standing_effective_from)| RunPayLine {
+                instruction: serde_json::from_value(pay_line_json)
+                    .expect("payroll_run_pay_line.pay_line_json is always a PayLineInstruction"),
+                source: PayLineSource::from_column(&source),
+                standing_pay_item_id: standing_pay_item_id.map(StandingPayItemId::new),
+                standing_effective_from,
+            },
+        )
         .collect();
     let mut remaining_snapshot_lines: Vec<&PayLineInstruction> = stored
         .iter()
         .filter(|line| line.source == PayLineSource::FromReversedSnapshot)
         .map(|line| &line.instruction)
         .collect();
-    let mut remaining_standing_lines: Vec<(&PayLineInstruction, &StandingPayItemId)> = stored
-        .iter()
-        .filter(|line| line.source == PayLineSource::Standing)
-        .map(|line| {
-            (
-                &line.instruction,
-                line.standing_pay_item_id
-                    .as_ref()
-                    .expect("a Standing-sourced line always carries a StandingPayItemId"),
-            )
-        })
-        .collect();
+    let mut remaining_standing_lines: Vec<(&PayLineInstruction, &StandingPayItemId, NaiveDate)> =
+        stored
+            .iter()
+            .filter(|line| line.source == PayLineSource::Standing)
+            .map(|line| {
+                (
+                    &line.instruction,
+                    line.standing_pay_item_id
+                        .as_ref()
+                        .expect("a Standing-sourced line always carries a StandingPayItemId"),
+                    line.standing_effective_from
+                        .expect("a Standing-sourced line always carries its effective-from date"),
+                )
+            })
+            .collect();
     let pay_lines: Vec<RunPayLine> = instructions
         .into_iter()
         .map(|instruction| {
@@ -952,23 +965,27 @@ pub async fn set_run_pay_lines(
                     instruction,
                     source: PayLineSource::FromReversedSnapshot,
                     standing_pay_item_id: None,
+                    standing_effective_from: None,
                 };
             }
             if let Some(index) = remaining_standing_lines
                 .iter()
-                .position(|(copied, _)| **copied == instruction)
+                .position(|(copied, _, _)| **copied == instruction)
             {
-                let (_, standing_pay_item_id) = remaining_standing_lines.remove(index);
+                let (_, standing_pay_item_id, standing_effective_from) =
+                    remaining_standing_lines.remove(index);
                 return RunPayLine {
                     instruction,
                     source: PayLineSource::Standing,
                     standing_pay_item_id: Some(standing_pay_item_id.clone()),
+                    standing_effective_from: Some(standing_effective_from),
                 };
             }
             RunPayLine {
                 instruction,
                 source: PayLineSource::OneOff,
                 standing_pay_item_id: None,
+                standing_effective_from: None,
             }
         })
         .collect();
@@ -1398,12 +1415,16 @@ pub async fn get_payroll_run_detail(
          LEFT JOIN LATERAL (
              SELECT jsonb_agg(
                  jsonb_build_object(
-                     'pay_line_json', pay_line_json, 'source', source,
-                     'standing_pay_item_id', standing_pay_item_id
+                     'pay_line_json', payroll_run_pay_line.pay_line_json,
+                     'source', payroll_run_pay_line.source,
+                     'standing_pay_item_id', payroll_run_pay_line.standing_pay_item_id,
+                     'standing_effective_from', standing_pay_item.effective_from
                  )
-                 ORDER BY line
+                 ORDER BY payroll_run_pay_line.line
              ) AS pay_line_jsons
              FROM payroll_run_pay_line
+             LEFT JOIN standing_pay_item
+               ON standing_pay_item.id = payroll_run_pay_line.standing_pay_item_id
              WHERE payroll_run_pay_line.payroll_run_id = payroll_run_employment.payroll_run_id
                AND payroll_run_pay_line.employment_id = payroll_run_employment.employment_id
          ) AS pay_lines ON TRUE
@@ -1444,12 +1465,16 @@ pub async fn get_payroll_run_detail(
                         let standing_pay_item_id = row["standing_pay_item_id"]
                             .as_str()
                             .map(StandingPayItemId::new);
+                        let standing_effective_from: Option<NaiveDate> =
+                            serde_json::from_value(row["standing_effective_from"].clone())
+                                .expect("standing_pay_item.effective_from is a date or null");
                         RunPayLine {
                             instruction: serde_json::from_value(pay_line_json).expect(
                                 "payroll_run_pay_line.pay_line_json is always a PayLineInstruction",
                             ),
                             source: PayLineSource::from_column(source),
                             standing_pay_item_id,
+                            standing_effective_from,
                         }
                     })
                     .collect()
