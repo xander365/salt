@@ -3,16 +3,19 @@
 //! write is refused outright rather than acknowledged-and-proceeded with
 //! when it would invalidate paid history.
 
+use std::time::Duration;
+
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment, TaxYear,
-    UnsupportedDeductionStatus,
+    EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay,
+    PriorEmployment, TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    EmploymentPerson, PayrollAppError, PayrollRunId, SaltDatabase, calculate_payroll_run,
-    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
+    EmploymentPerson, PayLineInstruction, PayrollAppError, PayrollRunId, SaltDatabase,
+    StandingPayItemInstruction, calculate_payroll_run, create_employer, create_employment,
+    create_ordinary_payroll_run, create_standing_pay_item, declare_prior_employment,
     declare_unsupported_deduction_status, finalize_payroll_run, get_employment_detail,
-    record_compensation_terms, record_employment_end_date, void_employment,
+    get_payroll_run_detail, record_compensation_terms, record_employment_end_date, void_employment,
 };
 use sqlx::{PgPool, Row};
 
@@ -134,7 +137,7 @@ async fn recording_an_end_date_with_a_reason_writes_it_and_an_action_log_entry(p
         &employer_id,
         &employment_id,
         date(2026, 6, 15),
-        "resigned",
+        "  resigned  ",
         "operator:alice",
     )
     .await
@@ -158,6 +161,40 @@ async fn recording_an_end_date_with_a_reason_writes_it_and_an_action_log_entry(p
     assert_eq!(context["reason"], "resigned");
     assert_eq!(context["before"]["end_date"], serde_json::Value::Null);
     assert_eq!(context["after"]["end_date"], "2026-06-15");
+}
+
+#[sqlx::test]
+async fn the_largest_supported_date_is_recorded_without_panicking(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let (_, employment_id) = create_employment(
+        &db,
+        &employer_id,
+        EmploymentPerson::New("Ada Lovelace".to_string()),
+        date(2026, 1, 1),
+        None,
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    record_employment_end_date(
+        &db,
+        &employer_id,
+        &employment_id,
+        NaiveDate::MAX,
+        "contract ended",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let stored: NaiveDate = sqlx::query_scalar("SELECT end_date FROM employment WHERE id = $1")
+        .bind(employment_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, NaiveDate::MAX);
 }
 
 #[sqlx::test]
@@ -310,6 +347,19 @@ async fn a_leaver_is_paid_the_period_their_end_date_falls_in_and_never_proposed_
     .await
     .unwrap();
 
+    create_standing_pay_item(
+        &db,
+        &employment_id,
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: Money::from_cents(60_000).unwrap(),
+            label: EarningLabel::new("standby allowance").unwrap(),
+        },
+        april().start(),
+        "actor",
+    )
+    .await
+    .unwrap();
+
     let april_run_id =
         create_ordinary_payroll_run(&db, &employer_id, april(), date(2026, 5, 5), "actor")
             .await
@@ -331,6 +381,46 @@ async fn a_leaver_is_paid_the_period_their_end_date_falls_in_and_never_proposed_
         .await
         .unwrap();
     assert_eq!(april_refusals, Vec::new());
+    let april_detail = get_payroll_run_detail(&db, &employer_id, april_run_id.as_str())
+        .await
+        .unwrap();
+    let april_member = april_detail
+        .members
+        .iter()
+        .find(|member| member.employment_id == employment_id)
+        .expect("the leaver remains a member of their final eligible period");
+    assert!(
+        april_member.basic_pay_prorated,
+        "the worksheet must explain that this member's BasicPay is prorated"
+    );
+    assert_eq!(
+        april_member
+            .pay_lines
+            .iter()
+            .map(|line| line.instruction.clone())
+            .collect::<Vec<_>>(),
+        [PayLineInstruction::Earning(
+            EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(60_000).unwrap(),
+                label: Some(EarningLabel::new("standby allowance").unwrap()),
+            },
+        )],
+        "the leaver's standing item is proposed at its full amount"
+    );
+    let figures = april_member
+        .figures
+        .as_ref()
+        .expect("the leaver calculated");
+    assert_eq!(
+        figures.basic_pay,
+        Money::from_cents(155_000).unwrap(),
+        "15 of April's 30 employed calendar days prorates BasicPay exactly"
+    );
+    assert_eq!(
+        figures.taxable_allowances,
+        Money::from_cents(60_000).unwrap(),
+        "the standing allowance is not prorated with BasicPay"
+    );
     finalize_payroll_run(&db, &april_run_id, "finalizer")
         .await
         .unwrap();
@@ -364,6 +454,47 @@ async fn a_leaver_is_paid_the_period_their_end_date_falls_in_and_never_proposed_
     finalize_payroll_run(&db, &may_run_id, "finalizer")
         .await
         .unwrap();
+}
+
+#[sqlx::test]
+async fn recording_an_end_date_waits_for_the_ordinary_runs_membership_lock(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = a_fully_declared_employment(&db, &employer_id).await;
+
+    let mut run_transaction = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM employer WHERE id = $1 FOR UPDATE")
+        .bind(employer_id.as_str())
+        .execute(&mut *run_transaction)
+        .await
+        .unwrap();
+
+    let ending_pool = pool.clone();
+    let ending_employer_id = employer_id.clone();
+    let ending_employment_id = employment_id.clone();
+    let mut ending = tokio::spawn(async move {
+        let ending_db = SaltDatabase::from_pool(ending_pool);
+        record_employment_end_date(
+            &ending_db,
+            &ending_employer_id,
+            &ending_employment_id,
+            date(2026, 4, 15),
+            "resigned",
+            "operator:alice",
+        )
+        .await
+    });
+
+    tokio::task::yield_now().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut ending)
+            .await
+            .is_err(),
+        "recording a leaver must wait for the lock guarding an Ordinary-run membership snapshot"
+    );
+
+    run_transaction.commit().await.unwrap();
+    ending.await.unwrap().unwrap();
 }
 
 #[sqlx::test]

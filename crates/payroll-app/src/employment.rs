@@ -373,26 +373,41 @@ pub async fn record_employment_end_date(
     reason: &str,
     actor: &str,
 ) -> Result<(), PayrollAppError> {
-    if reason.trim().is_empty() {
+    let reason = reason.trim();
+    if reason.is_empty() {
         return Err(PayrollAppError::EmploymentEndDateReasonCannotBeEmpty);
     }
 
     let mut tx = db.pool().begin().await?;
 
-    type Row = (String, NaiveDate, Option<NaiveDate>, bool);
+    // Run creation holds this Employer row FOR UPDATE while it snapshots
+    // Employment membership. Take the conflicting lock before the
+    // Employment lock, in the repository-wide Employer-then-Employment
+    // order, so recording a leaver and creating an Ordinary run cannot both
+    // commit from different versions of the Employment span.
+    let found_employer_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM employer
+         WHERE id = (SELECT employer_id FROM employment WHERE id = $1)
+         FOR SHARE",
+    )
+    .bind(employment_id.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if found_employer_id.as_deref() != Some(employer_id.as_str()) {
+        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
+    }
+
+    type Row = (NaiveDate, Option<NaiveDate>, bool);
     let row: Option<Row> = sqlx::query_as(
-        "SELECT employer_id, start_date, end_date, is_void FROM employment
+        "SELECT start_date, end_date, is_void FROM employment
          WHERE id = $1 FOR UPDATE",
     )
     .bind(employment_id.as_str())
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((found_employer_id, start_date, before, is_void)) = row else {
+    let Some((start_date, before, is_void)) = row else {
         return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
     };
-    if found_employer_id != employer_id.as_str() {
-        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
-    }
     if is_void {
         return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
     }
@@ -406,13 +421,16 @@ pub async fn record_employment_end_date(
     // Every Live finalized PayPeriod ending after `end_date` is what this
     // write would silently misstate: it was paid as though the Employment
     // ran through (at least) its own end, and `end_date` now says it did
-    // not. A period ending on or before `end_date` is unaffected, so the
-    // span starts the day after it.
-    let from = end_date
-        .succ_opt()
-        .expect("a PayPeriod end stored in this database is never the last representable date");
+    // not. A period ending on or before `end_date` is unaffected. Start the
+    // query at `end_date` itself and discard equality afterwards instead of
+    // incrementing an operator-supplied date: `NaiveDate::MAX` is a valid
+    // database date and must be handled as data, never as a panic.
     let already_paid: Vec<PayPeriod> =
-        live_finalized_periods_in_span(&mut tx, employment_id, from, None).await?;
+        live_finalized_periods_in_span(&mut tx, employment_id, end_date, None)
+            .await?
+            .into_iter()
+            .filter(|period| period.end() > end_date)
+            .collect();
     if !already_paid.is_empty() {
         return Err(PayrollAppError::EmploymentEndDatePrecedesPaidPeriods {
             employment_id: employment_id.clone(),

@@ -615,7 +615,7 @@ async fn set_run_pay_lines_refuses_notice_pay_and_severance_regardless_of_case(p
     let db = SaltDatabase::from_pool(pool.clone());
     let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
 
-    for label in ["  NOTICE PAY  ", "severance"] {
+    for label in ["  NOTICE   PAY  ", "severance"] {
         let err = set_run_pay_lines(
             &db,
             &run_id,

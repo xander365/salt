@@ -126,7 +126,12 @@ export function Employment() {
             <PriorEmploymentForm employmentId={employmentId} />
             <UnsupportedDeductionStatusForm employmentId={employmentId} />
             <OpeningBalanceForm employmentId={employmentId} />
-            <LeaverForm employmentId={employmentId} />
+            <LeaverForm
+              key={employmentId}
+              employmentId={employmentId}
+              startDate={employment.data.startDate}
+              recordedEndDate={employment.data.endDate}
+            />
           </div>
         </>
       )}

@@ -1152,7 +1152,12 @@ pub(crate) fn refuse_out_of_scope_earning_label(
     let Some(label) = label else {
         return Ok(());
     };
-    let normalized = label.as_str().trim().to_lowercase();
+    let normalized = label
+        .as_str()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     if OUT_OF_SCOPE_EARNING_LABELS.contains(&normalized.as_str()) {
         return Err(PayrollAppError::EarningLabelIsOutOfScope {
             label: label.as_str().to_string(),

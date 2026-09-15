@@ -12,7 +12,7 @@
 import { type SubmitEvent, useId, useState } from 'react';
 import { ApiError } from '../../api/client';
 import { sharedFactRefusalMessage } from '../../api/refusal';
-import { humanDate } from '../../format';
+import { humanDate, humanDateRange } from '../../format';
 import { useRecordEmploymentEndDate } from '../../employments/useEmploymentFacts';
 import { type FieldError, fieldErrorProps } from './fieldError';
 import { Button } from '../../components/ui/button';
@@ -34,7 +34,7 @@ function messageForRefusal(caught: unknown): string {
     case 'employment_ends_before_it_starts': {
       const startDate = (error.details as { startDate?: unknown } | null)?.startDate;
       return typeof startDate === 'string'
-        ? `This employment started ${startDate}. Choose an end date on or after it.`
+        ? `This Employment started ${humanDate(startDate)}. Choose an end date on or after it.`
         : 'The end date must be on or after this employment’s start date.';
     }
 
@@ -50,12 +50,12 @@ function messageForRefusal(caught: unknown): string {
               (period): period is { start: string; end: string } =>
                 typeof period.start === 'string' && typeof period.end === 'string',
             )
-            .map((period) => `${period.start} to ${period.end}`)
+            .map((period) => humanDateRange(period.start, period.end))
             .join(', ')
         : null;
       return named !== null && named.length > 0
         ? `This date falls before pay already finalized for ${named}. Choose a later date, or contact support if that pay was wrong.`
-        : 'This date falls before pay already finalized for this employee. Choose a later date.';
+        : 'This date falls before pay already finalized for this Employment. Choose a later date.';
     }
 
     default:
@@ -65,9 +65,17 @@ function messageForRefusal(caught: unknown): string {
 
 type Field = 'endDate' | 'reason';
 
-export function LeaverForm({ employmentId }: { employmentId: string }) {
+export function LeaverForm({
+  employmentId,
+  startDate,
+  recordedEndDate,
+}: {
+  employmentId: string;
+  startDate: string;
+  recordedEndDate: string | null;
+}) {
   const recordEndDate = useRecordEmploymentEndDate(employmentId);
-  const [endDate, setEndDate] = useState('');
+  const [endDate, setEndDate] = useState(recordedEndDate ?? '');
   const [reason, setReason] = useState('');
   const [fieldError, setFieldError] = useState<FieldError<Field> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -103,8 +111,14 @@ export function LeaverForm({ employmentId }: { employmentId: string }) {
     setFieldError(null);
 
     try {
-      await recordEndDate.mutateAsync({ endDate, reason: reason.trim() });
-      setSaved(`Recorded: employment ends ${humanDate(endDate)}.`);
+      const submittedEndDate = endDate;
+      const detail = await recordEndDate.mutateAsync({
+        endDate: submittedEndDate,
+        reason: reason.trim(),
+      });
+      setEndDate(detail.endDate ?? submittedEndDate);
+      setReason('');
+      setSaved(`Recorded: employment ends ${submittedEndDate}.`);
     } catch (caught) {
       setError(messageForRefusal(caught));
     }
@@ -120,9 +134,9 @@ export function LeaverForm({ employmentId }: { employmentId: string }) {
         Leaver
       </h3>
       <p className="mb-4 text-sm text-muted-foreground">
-        Their last eligible pay period is paid as an ordinary month, prorated by employed calendar
+        Their last eligible pay period is paid as an ordinary run, prorated by employed calendar
         days if it is a part month. Standing pay items are proposed at their full amount, not
-        prorated. Once recorded, this employee is never proposed on a later payroll run.
+        prorated. Once recorded, this Employment is never proposed on a later PayrollRun.
       </p>
       <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:max-w-sm">
         <div className="flex flex-col gap-1.5">
@@ -131,6 +145,8 @@ export function LeaverForm({ employmentId }: { employmentId: string }) {
             id={endDateId}
             type="date"
             required
+            min={startDate}
+            disabled={recordEndDate.isPending}
             {...fieldErrorProps(fieldError, 'endDate', errorId)}
             value={endDate}
             onChange={(event) => {
@@ -146,6 +162,7 @@ export function LeaverForm({ employmentId }: { employmentId: string }) {
             type="text"
             required
             placeholder="e.g. resigned, dismissed, contract ended"
+            disabled={recordEndDate.isPending}
             {...fieldErrorProps(fieldError, 'reason', errorId)}
             value={reason}
             onChange={(event) => {
@@ -159,7 +176,11 @@ export function LeaverForm({ employmentId }: { employmentId: string }) {
           <ValidationError id={errorId}>{fieldError?.message ?? error}</ValidationError>
         )}
         <Button type="submit" disabled={recordEndDate.isPending} className="self-start">
-          {recordEndDate.isPending ? 'Saving…' : 'Record end date'}
+          {recordEndDate.isPending
+            ? 'Saving…'
+            : recordedEndDate === null
+              ? 'Record end date'
+              : 'Update end date'}
         </Button>
       </form>
 
