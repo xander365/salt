@@ -62,6 +62,14 @@ function standingLineFailureMessage(caught: unknown): string {
       return 'This line is no longer part of this run. Reload the page.';
     case 'override_changes_pay_line_kind':
       return 'This change must stay the same kind of line. Reload the page and try again.';
+    // Issue #81, D23: leave payout, notice pay and severance are out of
+    // scope this milestone, refused by name even as a one-run override.
+    case 'earning_label_is_out_of_scope': {
+      const label = (error.details as { label?: unknown } | null)?.label;
+      return typeof label === 'string'
+        ? `“${label}” is not calculated by Salt this milestone. Leave payout, notice pay and severance must be paid outside Salt.`
+        : 'That pay type is not calculated by Salt this milestone. Leave payout, notice pay and severance must be paid outside Salt.';
+    }
     default:
       return 'Something went wrong. Please try again.';
   }

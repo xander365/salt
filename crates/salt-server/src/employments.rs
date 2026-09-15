@@ -118,6 +118,22 @@ pub(crate) struct EmploymentDetailResponse {
     current_ordinary_hours: Option<String>,
 }
 
+impl From<payroll_app::EmploymentDetail> for EmploymentDetailResponse {
+    fn from(detail: payroll_app::EmploymentDetail) -> Self {
+        Self {
+            employment_id: detail.id.to_string(),
+            person_id: detail.person_id.to_string(),
+            full_name: detail.full_name,
+            start_date: detail.start_date,
+            end_date: detail.end_date,
+            current_basic_pay_cents: detail.current_basic_pay.map(|money| money.cents()),
+            current_ordinary_hours: detail
+                .current_ordinary_hours
+                .map(|hours| hours.as_decimal().to_string()),
+        }
+    }
+}
+
 /// `GET /api/employers/{e}/employments/{em}`: the Employment's dates, its
 /// Person's `fullName` and its current pay — the `CompensationTerms` row in
 /// force today, if any. An Employment id belonging to another Employer is
@@ -138,15 +154,50 @@ pub(crate) async fn get_employment(
     )
     .await?;
 
-    Ok(Json(EmploymentDetailResponse {
-        employment_id: detail.id.to_string(),
-        person_id: detail.person_id.to_string(),
-        full_name: detail.full_name,
-        start_date: detail.start_date,
-        end_date: detail.end_date,
-        current_basic_pay_cents: detail.current_basic_pay.map(|money| money.cents()),
-        current_ordinary_hours: detail
-            .current_ordinary_hours
-            .map(|hours| hours.as_decimal().to_string()),
-    }))
+    Ok(Json(detail.into()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecordEmploymentEndDateRequest {
+    end_date: NaiveDate,
+    #[serde(default)]
+    reason: String,
+}
+
+/// `PUT /api/employers/{e}/employments/{em}/end-date` (issue #81): an
+/// operator records that this Employment has a leaver's end date. Refused
+/// when the date precedes the Employment's own start, when `reason` is
+/// blank, or when it falls before a `PayPeriod` already paid for this
+/// Employment — [`payroll_app::record_employment_end_date`]'s own three
+/// refusals, mapped once in `payroll_error.rs`.
+pub(crate) async fn record_employment_end_date(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, employment_id)): Path<(String, String)>,
+    body: Result<Json<RecordEmploymentEndDateRequest>, JsonRejection>,
+) -> Result<Json<EmploymentDetailResponse>, ApiError> {
+    let Json(request) = body.map_err(|_rejection| ApiError::malformed_request())?;
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+    let employment_id = EmploymentId::new(employment_id);
+
+    payroll_app::record_employment_end_date(
+        state.db(),
+        &employer_id,
+        &employment_id,
+        request.end_date,
+        &request.reason,
+        &context.actor(),
+    )
+    .await?;
+
+    let detail = payroll_app::get_employment_detail(
+        state.db(),
+        &employer_id,
+        &employment_id,
+        Utc::now().date_naive(),
+    )
+    .await?;
+
+    Ok(Json(detail.into()))
 }

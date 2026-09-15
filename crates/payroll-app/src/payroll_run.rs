@@ -23,10 +23,10 @@ use crate::standing_pay_item::{
 use crate::unsupported_deduction_status::get_unsupported_deduction_status_on;
 use chrono::NaiveDate;
 use payroll::{
-    Deduction, Earning, EarningInstruction, EmployerId, EmploymentId, Money, PayPeriod,
-    PaySchedule, PayrollCalculation, PayrollError, PriorEmployment, PriorEmploymentFigures,
-    TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus, VoluntaryDeduction,
-    VoluntaryDeductionInstruction,
+    Deduction, Earning, EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money,
+    PayPeriod, PaySchedule, PayrollCalculation, PayrollError, PriorEmployment,
+    PriorEmploymentFigures, TaxYear, UnsupportedDeductionKinds, UnsupportedDeductionStatus,
+    VoluntaryDeduction, VoluntaryDeductionInstruction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1131,6 +1131,36 @@ pub(crate) async fn verify_is_active_member(
 /// lines already stored writes nothing at all, so it neither retires true
 /// figures nor reopens the run — a standing line changes only through
 /// override, remove or refresh, never by a resave alone surviving that.
+/// The exact label text (case- and whitespace-insensitively) this milestone
+/// refuses to calculate as an ordinary earning — leave payout, notice pay
+/// and severance are out of scope entirely (issue #81, D23), never an
+/// allowance an operator can type past the refusal.
+const OUT_OF_SCOPE_EARNING_LABELS: [&str; 3] = ["leave payout", "notice pay", "severance"];
+
+/// Refuses `label` when it names a pay type
+/// [`OUT_OF_SCOPE_EARNING_LABELS`] excludes from this milestone. Shared by
+/// every place an operator states a fresh Earning label: a one-off pay line
+/// ([`set_run_pay_lines`]), a `StandingPayItem`
+/// ([`crate::standing_pay_item::create_standing_pay_item`]) and a run-only
+/// override ([`crate::run_override::override_standing_pay_line`]) — so the
+/// refusal reaches an operator wherever one of these three names might be
+/// typed, on screen, with a reason, rather than silently becoming a paid
+/// allowance.
+pub(crate) fn refuse_out_of_scope_earning_label(
+    label: Option<&EarningLabel>,
+) -> Result<(), PayrollAppError> {
+    let Some(label) = label else {
+        return Ok(());
+    };
+    let normalized = label.as_str().trim().to_lowercase();
+    if OUT_OF_SCOPE_EARNING_LABELS.contains(&normalized.as_str()) {
+        return Err(PayrollAppError::EarningLabelIsOutOfScope {
+            label: label.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub async fn set_run_pay_lines(
     db: &SaltDatabase,
     payroll_run_id: &PayrollRunId,
@@ -1145,6 +1175,13 @@ pub async fn set_run_pay_lines(
         *amount == Money::ZERO
     }) {
         return Err(PayrollAppError::VoluntaryDeductionAmountIsZero { index });
+    }
+
+    // Leave payout, notice pay and severance are refused by name (issue
+    // #81, D23), before anything is read, the same as the zero-deduction
+    // check above.
+    for earning in &earnings {
+        refuse_out_of_scope_earning_label(earning.label())?;
     }
 
     let mut tx = db.pool().begin().await?;

@@ -5,7 +5,7 @@
 use chrono::NaiveDate;
 use payroll::{
     CompensationTerms, EmployerId, EmploymentId, EmploymentSnapshot, Money, OrdinaryHours,
-    PersonId, PersonReference,
+    PayPeriod, PersonId, PersonReference,
 };
 use rust_decimal::Decimal;
 use sqlx::{Acquire, PgConnection, Postgres};
@@ -13,6 +13,7 @@ use sqlx::{Acquire, PgConnection, Postgres};
 use crate::action_log::{ActionLogEntry, ActionType, write_action_log_entry};
 use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
+use crate::freeze::live_finalized_periods_in_span;
 use crate::ids::new_id;
 
 /// Names the Person a new Employment belongs to (issue #51, ADR-0020).
@@ -333,6 +334,112 @@ pub async fn void_employment(
             target_type: "employment",
             target_id: employment_id.as_str(),
             context: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Records `employment_id`'s end date, with a stated reason — the master-
+/// data act issue #81 gives an operator for a Leaver, following the same
+/// pattern [`crate::set_person_particulars`] and
+/// [`crate::correct_person_full_name`] already do: a fact that overwrites
+/// whatever this Employment currently has, refused when the change would
+/// invalidate paid history.
+///
+/// Unlike those two, an already-diverging fact is never *acknowledged and
+/// proceeded with*: a `PayPeriod` this Employment has a Live
+/// `FinalizedPayroll` for, ending after `end_date`, is refused outright,
+/// naming every such period (§"Deep Instructions" — "must never invalidate
+/// paid history"). A period ending on or before `end_date` is untouched by
+/// this write: the leaver's own last paid month, when `end_date` is that
+/// period's own last day, is a no-op for proration and stays exactly as
+/// paid.
+///
+/// Refused, in order, when: `employment_id` does not belong to
+/// `employer_id` or is void; `end_date` falls before the Employment's own
+/// `start_date`; `reason` is empty; or `end_date` precedes a period already
+/// paid. Nothing about run membership or proration is touched here — both
+/// already key off `employment.end_date` (§8.2, `sequencing.rs`'s own
+/// resolved-period rule), so writing this column is the whole of the
+/// leaver's effect on any of that.
+pub async fn record_employment_end_date(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    employment_id: &EmploymentId,
+    end_date: NaiveDate,
+    reason: &str,
+    actor: &str,
+) -> Result<(), PayrollAppError> {
+    if reason.trim().is_empty() {
+        return Err(PayrollAppError::EmploymentEndDateReasonCannotBeEmpty);
+    }
+
+    let mut tx = db.pool().begin().await?;
+
+    type Row = (String, NaiveDate, Option<NaiveDate>, bool);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT employer_id, start_date, end_date, is_void FROM employment
+         WHERE id = $1 FOR UPDATE",
+    )
+    .bind(employment_id.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((found_employer_id, start_date, before, is_void)) = row else {
+        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
+    };
+    if found_employer_id != employer_id.as_str() {
+        return Err(PayrollAppError::EmploymentNotFound(employment_id.clone()));
+    }
+    if is_void {
+        return Err(PayrollAppError::EmploymentIsVoid(employment_id.clone()));
+    }
+    if end_date < start_date {
+        return Err(PayrollAppError::EmploymentEndsBeforeItStarts {
+            start_date,
+            end_date,
+        });
+    }
+
+    // Every Live finalized PayPeriod ending after `end_date` is what this
+    // write would silently misstate: it was paid as though the Employment
+    // ran through (at least) its own end, and `end_date` now says it did
+    // not. A period ending on or before `end_date` is unaffected, so the
+    // span starts the day after it.
+    let from = end_date
+        .succ_opt()
+        .expect("a PayPeriod end stored in this database is never the last representable date");
+    let already_paid: Vec<PayPeriod> =
+        live_finalized_periods_in_span(&mut tx, employment_id, from, None).await?;
+    if !already_paid.is_empty() {
+        return Err(PayrollAppError::EmploymentEndDatePrecedesPaidPeriods {
+            employment_id: employment_id.clone(),
+            end_date,
+            periods: already_paid,
+        });
+    }
+
+    sqlx::query("UPDATE employment SET end_date = $2 WHERE id = $1")
+        .bind(employment_id.as_str())
+        .bind(end_date)
+        .execute(&mut *tx)
+        .await?;
+
+    write_action_log_entry(
+        &mut tx,
+        ActionLogEntry {
+            employer_id,
+            actor,
+            action_type: ActionType::EmploymentEndDateRecorded,
+            target_type: "employment",
+            target_id: employment_id.as_str(),
+            context: Some(serde_json::json!({
+                "reason": reason,
+                "before": { "end_date": before },
+                "after": { "end_date": end_date },
+            })),
         },
     )
     .await?;

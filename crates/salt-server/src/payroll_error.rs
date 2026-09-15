@@ -817,6 +817,35 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
                 "standingPayItemId": standing_pay_item_id.to_string(),
             })),
         ),
+        PayrollAppError::EmploymentEndDateReasonCannotBeEmpty => Classification::Mapped(
+            StatusCode::BAD_REQUEST,
+            "employment_end_date_reason_cannot_be_empty",
+            None,
+        ),
+        PayrollAppError::EmploymentEndDatePrecedesPaidPeriods {
+            employment_id,
+            end_date,
+            periods,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "employment_end_date_precedes_paid_periods",
+            Some(json!({
+                "employmentId": employment_id.to_string(),
+                "endDate": end_date.to_string(),
+                "periods": periods
+                    .iter()
+                    .map(|period| json!({
+                        "start": period.start().to_string(),
+                        "end": period.end().to_string(),
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+        ),
+        PayrollAppError::EarningLabelIsOutOfScope { label } => Classification::Mapped(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "earning_label_is_out_of_scope",
+            Some(json!({ "label": label })),
+        ),
     }
 }
 
@@ -2726,6 +2755,49 @@ mod tests {
                 "employmentId": standing_employment_id.to_string(),
                 "standingPayItemId": standing_pay_item_id.to_string(),
             })),
+        );
+    }
+
+    #[test]
+    fn employment_end_date_reason_cannot_be_empty() {
+        check(
+            PayrollAppError::EmploymentEndDateReasonCannotBeEmpty,
+            StatusCode::BAD_REQUEST,
+            "employment_end_date_reason_cannot_be_empty",
+            None,
+        );
+    }
+
+    #[test]
+    fn employment_end_date_precedes_paid_periods_names_every_period() {
+        let employment_id = EmploymentId::new("employment-1");
+        check(
+            PayrollAppError::EmploymentEndDatePrecedesPaidPeriods {
+                employment_id: employment_id.clone(),
+                end_date: date(2026, 3, 15),
+                periods: vec![period()],
+            },
+            StatusCode::CONFLICT,
+            "employment_end_date_precedes_paid_periods",
+            Some(json!({
+                "employmentId": employment_id.to_string(),
+                "endDate": "2026-03-15",
+                "periods": [
+                    { "start": "2026-03-01", "end": "2026-03-31" },
+                ],
+            })),
+        );
+    }
+
+    #[test]
+    fn earning_label_is_out_of_scope() {
+        check(
+            PayrollAppError::EarningLabelIsOutOfScope {
+                label: "Severance".to_string(),
+            },
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "earning_label_is_out_of_scope",
+            Some(json!({ "label": "Severance" })),
         );
     }
 }

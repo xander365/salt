@@ -676,6 +676,31 @@ pub enum PayrollAppError {
         employment_id: EmploymentId,
         standing_pay_item_id: StandingPayItemId,
     },
+    /// `RecordEmploymentEndDate` was given a reason that is empty or only
+    /// whitespace (issue #81). Recording a Leaver's end date is a
+    /// deliberate, attributed act, the same demand every other mandatory
+    /// reason in this crate makes of its own text.
+    EmploymentEndDateReasonCannotBeEmpty,
+    /// `RecordEmploymentEndDate` was given an `end_date` that falls before
+    /// one or more Live `FinalizedPayroll` periods this Employment already
+    /// has (issue #81) — a period ending after the proposed `end_date` was
+    /// already paid in full or on its own proration, and moving the end
+    /// date earlier would silently change what that period should have
+    /// paid. Refused outright, naming every such period, rather than the
+    /// acknowledge-and-proceed pattern master-data corrections use
+    /// elsewhere: recording a Leaver must never invalidate paid history.
+    EmploymentEndDatePrecedesPaidPeriods {
+        employment_id: EmploymentId,
+        end_date: NaiveDate,
+        periods: Vec<PayPeriod>,
+    },
+    /// An Earning line — a one-off pay line, a `StandingPayItem`, or a
+    /// standing-line override — was given a label naming a pay type this
+    /// milestone does not calculate: leave payout, notice pay or severance
+    /// (issue #81, D23). These are refused by name rather than accepted as
+    /// an ordinary allowance, so an operator is never nudged into disguising
+    /// one as one.
+    EarningLabelIsOutOfScope { label: String },
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -1265,6 +1290,33 @@ impl std::fmt::Display for PayrollAppError {
                  drop the active standing line for StandingPayItem {standing_pay_item_id} without \
                  going through an override or removal"
             ),
+            Self::EmploymentEndDateReasonCannotBeEmpty => {
+                write!(f, "an Employment end date reason must not be empty")
+            }
+            Self::EmploymentEndDatePrecedesPaidPeriods {
+                employment_id,
+                end_date,
+                periods,
+            } => {
+                write!(
+                    f,
+                    "Employment {employment_id}'s end date {end_date} falls before Live \
+                     finalized PayPeriods already paid for it: "
+                )?;
+                for (index, period) in periods.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} to {}", period.start(), period.end())?;
+                }
+                Ok(())
+            }
+            Self::EarningLabelIsOutOfScope { label } => write!(
+                f,
+                "the earning label \"{label}\" names a pay type this milestone does not \
+                 calculate (leave payout, notice pay and severance are out of scope); record \
+                 and pay it outside Salt"
+            ),
         }
     }
 }
@@ -1376,7 +1428,10 @@ impl std::error::Error for PayrollAppError {
             | Self::StandingPayLineIsRemoved { .. }
             | Self::StandingPayLineAlreadyRemoved { .. }
             | Self::OverrideChangesPayLineKind { .. }
-            | Self::StandingPayLineChangedWithoutOverride { .. } => None,
+            | Self::StandingPayLineChangedWithoutOverride { .. }
+            | Self::EmploymentEndDateReasonCannotBeEmpty
+            | Self::EmploymentEndDatePrecedesPaidPeriods { .. }
+            | Self::EarningLabelIsOutOfScope { .. } => None,
         }
     }
 }

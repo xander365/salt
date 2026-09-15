@@ -76,6 +76,10 @@ fn production_routes() -> Router<AppState> {
             get(employments::get_employment),
         )
         .route(
+            "/api/employers/{employer_id}/employments/{employment_id}/end-date",
+            axum::routing::put(employments::record_employment_end_date),
+        )
+        .route(
             "/api/employers/{employer_id}/employments/{employment_id}/compensation-terms",
             axum::routing::post(employment_facts::record_compensation_terms),
         )

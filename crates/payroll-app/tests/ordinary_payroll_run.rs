@@ -568,6 +568,74 @@ async fn removing_a_member_writes_an_employment_removed_from_run_entry_carrying_
 
 // ---- SetRunPayLines (§4.5d, issue #77) ----
 
+/// Leave payout, notice pay and severance are refused by name (issue #81,
+/// D23): an operator cannot pay one by mistyping it into an ordinary
+/// allowance line.
+#[sqlx::test]
+async fn set_run_pay_lines_refuses_an_earning_labelled_leave_payout(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
+
+    let err = set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(50_000).unwrap(),
+            label: Some(payroll::EarningLabel::new("Leave Payout").unwrap()),
+        }],
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        PayrollAppError::EarningLabelIsOutOfScope {
+            label: "Leave Payout".to_string(),
+        }
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payroll_run_pay_line
+         WHERE payroll_run_id = $1::uuid AND employment_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(employment_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "the refused write must leave nothing stored");
+}
+
+/// The match is case- and whitespace-insensitive, and covers all three named
+/// pay types (issue #81, D23).
+#[sqlx::test]
+async fn set_run_pay_lines_refuses_notice_pay_and_severance_regardless_of_case(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let (_, run_id, employment_id) = a_run_with_one_member(&db).await;
+
+    for label in ["  NOTICE PAY  ", "severance"] {
+        let err = set_run_pay_lines(
+            &db,
+            &run_id,
+            &employment_id,
+            vec![EarningInstruction::TaxableAllowance {
+                amount: Money::from_cents(50_000).unwrap(),
+                label: Some(payroll::EarningLabel::new(label).unwrap()),
+            }],
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            PayrollAppError::EarningLabelIsOutOfScope { .. }
+        ));
+    }
+}
+
 #[sqlx::test]
 async fn earning_lines_are_stored_in_the_order_given(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());

@@ -64,6 +64,15 @@ function createRefusalMessage(caught: unknown): string {
     case 'standing_medical_aid_premium_is_zero':
       return 'A medical aid premium of zero is not a deduction. Enter an amount above zero.';
 
+    // Issue #81, D23: leave payout, notice pay and severance are out of
+    // scope this milestone, refused by name even as a recurring item.
+    case 'earning_label_is_out_of_scope': {
+      const label = (error.details as { label?: unknown } | null)?.label;
+      return typeof label === 'string'
+        ? `“${label}” is not calculated by Salt this milestone. Leave payout, notice pay and severance must be paid outside Salt.`
+        : 'That pay type is not calculated by Salt this milestone. Leave payout, notice pay and severance must be paid outside Salt.';
+    }
+
     default:
       return 'Something went wrong. Please try again.';
   }

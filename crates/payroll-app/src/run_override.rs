@@ -22,7 +22,8 @@ use crate::database::SaltDatabase;
 use crate::error::PayrollAppError;
 use crate::payroll_run::{
     PayLineInstruction, PayLineSource, PayrollRunId, RunKind, RunPayLine, active_member_ids,
-    lock_editable_run, read_member_pay_lines, verify_is_active_member, write_member_pay_lines,
+    lock_editable_run, read_member_pay_lines, refuse_out_of_scope_earning_label,
+    verify_is_active_member, write_member_pay_lines,
 };
 use crate::standing_pay_item::{StandingPayItemId, StandingPayItemInstruction};
 
@@ -192,6 +193,9 @@ pub async fn override_standing_pay_line(
     }
     if instruction == StandingPayItemInstruction::MedicalAidPremium(Money::ZERO) {
         return Err(PayrollAppError::StandingMedicalAidPremiumIsZero);
+    }
+    if let StandingPayItemInstruction::TaxableAllowance { label, .. } = &instruction {
+        refuse_out_of_scope_earning_label(Some(label))?;
     }
     if uuid::Uuid::parse_str(standing_pay_item_id).is_err() {
         return Err(PayrollAppError::StandingPayLineNotFound {

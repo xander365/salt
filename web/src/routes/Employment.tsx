@@ -19,6 +19,7 @@ import { useEmployment } from '../employments/useEmployments';
 import { humanDate } from '../format';
 import { Money } from '../components/Money';
 import { CompensationTermsForm } from './employment/CompensationTermsForm';
+import { LeaverForm } from './employment/LeaverForm';
 import { OpeningBalanceForm } from './employment/OpeningBalanceForm';
 import { PersonParticularsSection } from './employment/PersonParticularsForm';
 import { PriorEmploymentForm } from './employment/PriorEmploymentForm';
@@ -125,6 +126,7 @@ export function Employment() {
             <PriorEmploymentForm employmentId={employmentId} />
             <UnsupportedDeductionStatusForm employmentId={employmentId} />
             <OpeningBalanceForm employmentId={employmentId} />
+            <LeaverForm employmentId={employmentId} />
           </div>
         </>
       )}

@@ -81,6 +81,15 @@ function earningsFailureMessage(caught: unknown): string {
     case 'voluntary_deduction_amount_is_zero':
       return 'A medical aid premium of zero is not a deduction. Enter an amount above zero, or remove the line.';
 
+    // Issue #81, D23: leave payout, notice pay and severance are out of
+    // scope this milestone and refused by name, never paid as an allowance.
+    case 'earning_label_is_out_of_scope': {
+      const label = (error.details as { label?: unknown } | null)?.label;
+      return typeof label === 'string'
+        ? `“${label}” is not calculated by Salt this milestone. Leave payout, notice pay and severance must be paid outside Salt.`
+        : 'That pay type is not calculated by Salt this milestone. Leave payout, notice pay and severance must be paid outside Salt.';
+    }
+
     // Issue #80: this form only ever restates a standing line exactly as
     // it was given, so reaching this means the run's standing lines moved
     // in the time since this screen loaded them.

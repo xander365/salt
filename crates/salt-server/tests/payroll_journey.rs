@@ -324,6 +324,29 @@ fn record_compensation_terms_request(
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
+fn record_employment_end_date_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    salt_header: bool,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/end-date"
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json");
+    if salt_header {
+        builder = builder.header("x-salt-request", "1");
+    }
+    builder
+        .body(Body::from(
+            json!({ "endDate": "2026-06-25", "reason": "resigned" }).to_string(),
+        ))
+        .unwrap()
+}
+
 fn declare_prior_employment_request(
     employer_id: &str,
     employment_id: &str,
@@ -1209,6 +1232,21 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
         StatusCode::OK
     );
 
+    assert_eq!(
+        router()
+            .await
+            .oneshot(record_employment_end_date_request(
+                &employer_id,
+                &employment_id,
+                &cookie,
+                true
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
     fully_declare_employment(&employer_id, &employment_id, &cookie).await;
 
     assert_eq!(
@@ -1456,6 +1494,7 @@ async fn every_payroll_route_answers_401_without_a_session() {
         create_employment_request(e, no_cookie, true, "Nobody", "2026-01-01"),
         list_employments_request(e, no_cookie),
         employment_detail_request(e, em, no_cookie),
+        record_employment_end_date_request(e, em, no_cookie, true),
         record_compensation_terms_request(
             e,
             em,
@@ -1546,6 +1585,7 @@ async fn every_mutating_payroll_route_requires_the_salt_request_header() {
             json!({ "fullName": "Ada Lovelace", "reason": "test" }),
         ),
         create_employment_request(&employer_id, &cookie, false, "Nobody", "2026-01-01"),
+        record_employment_end_date_request(&employer_id, em, &cookie, false),
         record_compensation_terms_request(
             &employer_id,
             em,
@@ -1739,6 +1779,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/employments",
             "/api/employers/{employer_id}/employments/{employment_id}",
             "/api/employers/{employer_id}/employments/{employment_id}/compensation-terms",
+            "/api/employers/{employer_id}/employments/{employment_id}/end-date",
             "/api/employers/{employer_id}/employments/{employment_id}/opening-balance",
             "/api/employers/{employer_id}/employments/{employment_id}/prior-employment",
             "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items",
@@ -1772,7 +1813,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 25, "{paths:?}");
+    assert_eq!(paths.len(), 26, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

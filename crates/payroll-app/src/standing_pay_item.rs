@@ -17,7 +17,7 @@ use crate::database::SaltDatabase;
 use crate::employer::lock_the_pay_schedule_governing;
 use crate::error::PayrollAppError;
 use crate::ids::app_id;
-use crate::payroll_run::PayLineInstruction;
+use crate::payroll_run::{PayLineInstruction, refuse_out_of_scope_earning_label};
 
 app_id! {
     /// `payroll-app`'s own id (§4.1): a native UUID, minted only by
@@ -108,6 +108,9 @@ pub async fn create_standing_pay_item(
 ) -> Result<StandingPayItemId, PayrollAppError> {
     if instruction == StandingPayItemInstruction::MedicalAidPremium(Money::ZERO) {
         return Err(PayrollAppError::StandingMedicalAidPremiumIsZero);
+    }
+    if let StandingPayItemInstruction::TaxableAllowance { label, .. } = &instruction {
+        refuse_out_of_scope_earning_label(Some(label))?;
     }
 
     let mut tx = db.pool().begin().await?;

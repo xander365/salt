@@ -38,12 +38,13 @@ pub enum ActionType {
     StandingPayLineOverridden,
     StandingPayLineRemoved,
     StandingProposalsRefreshed,
+    EmploymentEndDateRecorded,
 }
 
 impl ActionType {
     /// Every variant, so a test can walk the whole enum and compare it with
     /// the database's own `action_type` CHECK.
-    pub const ALL: [ActionType; 21] = [
+    pub const ALL: [ActionType; 22] = [
         Self::PayrollRunCreated,
         Self::EmploymentRemovedFromRun,
         Self::EmploymentAddedToCorrectionRun,
@@ -65,6 +66,7 @@ impl ActionType {
         Self::StandingPayLineOverridden,
         Self::StandingPayLineRemoved,
         Self::StandingProposalsRefreshed,
+        Self::EmploymentEndDateRecorded,
     ];
 
     /// The exact string `action_log_entry.action_type`'s CHECK accepts.
@@ -91,6 +93,7 @@ impl ActionType {
             Self::StandingPayLineOverridden => "standing_pay_line_overridden",
             Self::StandingPayLineRemoved => "standing_pay_line_removed",
             Self::StandingProposalsRefreshed => "standing_proposals_refreshed",
+            Self::EmploymentEndDateRecorded => "employment_end_date_recorded",
         }
     }
 }
@@ -254,6 +257,10 @@ mod tests {
             (
                 ActionType::StandingProposalsRefreshed,
                 "standing_proposals_refreshed",
+            ),
+            (
+                ActionType::EmploymentEndDateRecorded,
+                "employment_end_date_recorded",
             ),
         ];
 

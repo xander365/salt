@@ -150,6 +150,24 @@ fn detail_request(employer_id: &str, employment_id: &str, cookie: &str) -> Reque
         .unwrap()
 }
 
+fn end_date_request(
+    employer_id: &str,
+    employment_id: &str,
+    cookie: &str,
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/employers/{employer_id}/employments/{employment_id}/end-date"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 #[tokio::test]
 async fn posting_without_the_salt_request_header_is_refused() {
     let (cookie, employer_id) = an_authorized_operator().await;
@@ -498,4 +516,220 @@ async fn every_route_answers_401_without_a_session() {
             "{method} {uri} must refuse an unauthenticated caller"
         );
     }
+}
+
+// ---- RecordEmploymentEndDate (issue #81) ----
+
+#[tokio::test]
+async fn recording_an_end_date_with_a_reason_is_reflected_on_the_detail_route() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let created = router()
+        .await
+        .oneshot(create_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({ "fullName": "Ada Lovelace", "startDate": "2026-01-26" }),
+        ))
+        .await
+        .unwrap();
+    let employment_id = body_json(created).await["employmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router()
+        .await
+        .oneshot(end_date_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({ "endDate": "2026-06-25", "reason": "resigned" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["endDate"], "2026-06-25");
+
+    let detail_response = router()
+        .await
+        .oneshot(detail_request(&employer_id, &employment_id, &cookie))
+        .await
+        .unwrap();
+    let detail = body_json(detail_response).await;
+    assert_eq!(detail["endDate"], "2026-06-25");
+}
+
+#[tokio::test]
+async fn a_blank_reason_is_a_bad_request() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let created = router()
+        .await
+        .oneshot(create_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({ "fullName": "Ada Lovelace", "startDate": "2026-01-26" }),
+        ))
+        .await
+        .unwrap();
+    let employment_id = body_json(created).await["employmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router()
+        .await
+        .oneshot(end_date_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({ "endDate": "2026-06-25", "reason": "   " }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(
+        json["error"]["code"],
+        "employment_end_date_reason_cannot_be_empty"
+    );
+}
+
+/// The headline refusal (issue #81's own acceptance criterion), reachable
+/// end to end: an end date preceding a period already paid is refused,
+/// naming that period, and never silently accepted.
+#[tokio::test]
+async fn an_end_date_before_an_already_live_period_is_a_conflict() {
+    let (cookie, employer_id) = an_authorized_operator().await;
+    let created = router()
+        .await
+        .oneshot(create_request(
+            &employer_id,
+            &cookie,
+            true,
+            serde_json::json!({ "fullName": "Ada Lovelace", "startDate": "2026-01-01" }),
+        ))
+        .await
+        .unwrap();
+    let employment_id = body_json(created).await["employmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // `an_authorized_operator` creates its Employer on a calendar-month
+    // schedule (`PeriodEndDay::LastDayOfMonth`), so January 2026 is its own
+    // period start.
+    let db = test_db().await;
+    let period = payroll::PayPeriod::new(
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap(),
+    )
+    .unwrap();
+    payroll_app::record_compensation_terms(
+        &db,
+        &payroll::EmploymentId::new(employment_id.clone()),
+        period.start(),
+        payroll::Money::from_cents(310_000).unwrap(),
+        payroll::OrdinaryHours::new(rust_decimal::Decimal::new(4_000, 2)).unwrap(),
+        &[],
+        "",
+        "actor",
+    )
+    .await
+    .unwrap();
+    payroll_app::declare_prior_employment(
+        &db,
+        &payroll::EmploymentId::new(employment_id.clone()),
+        payroll::TaxYear::for_period_end(period.end()),
+        payroll::PriorEmployment::None,
+        "actor",
+    )
+    .await
+    .unwrap();
+    payroll_app::declare_unsupported_deduction_status(
+        &db,
+        &payroll::EmploymentId::new(employment_id.clone()),
+        period.start(),
+        payroll::UnsupportedDeductionStatus::ConfirmedNone,
+        &[],
+        "a reason",
+        "actor",
+    )
+    .await
+    .unwrap();
+    let run_id = payroll_app::create_ordinary_payroll_run(
+        &db,
+        &payroll::EmployerId::new(employer_id.clone()),
+        period,
+        chrono::NaiveDate::from_ymd_opt(2026, 2, 5).unwrap(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    payroll_app::calculate_payroll_run(&db, &run_id, "calculator")
+        .await
+        .unwrap();
+    payroll_app::finalize_payroll_run(&db, &run_id, "finalizer")
+        .await
+        .unwrap();
+
+    let response = router()
+        .await
+        .oneshot(end_date_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+            serde_json::json!({ "endDate": "2026-01-10", "reason": "resigned" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(
+        json["error"]["code"],
+        "employment_end_date_precedes_paid_periods"
+    );
+    assert_eq!(
+        json["error"]["details"]["periods"][0]["start"],
+        "2026-01-01"
+    );
+    assert_eq!(json["error"]["details"]["periods"][0]["end"], "2026-01-31");
+}
+
+#[tokio::test]
+async fn an_employment_id_belonging_to_another_employer_is_not_found_on_the_end_date_route() {
+    let (owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (other_cookie, other_employer) = an_authorized_operator().await;
+    let created = router()
+        .await
+        .oneshot(create_request(
+            &owning_employer,
+            &owning_cookie,
+            true,
+            serde_json::json!({ "fullName": "Ada Lovelace", "startDate": "2026-01-26" }),
+        ))
+        .await
+        .unwrap();
+    let employment_id = body_json(created).await["employmentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router()
+        .await
+        .oneshot(end_date_request(
+            &other_employer,
+            &employment_id,
+            &other_cookie,
+            serde_json::json!({ "endDate": "2026-06-25", "reason": "resigned" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

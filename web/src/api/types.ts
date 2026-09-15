@@ -140,6 +140,13 @@ export interface EmploymentDetailResponse {
   currentOrdinaryHours: string | null;
 }
 
+/** `PUT .../end-date` (issue #81): an operator records a Leaver's end date
+ * with a stated reason. Returns the Employment's own detail, refreshed. */
+export interface RecordEmploymentEndDateRequest {
+  endDate: string;
+  reason: string;
+}
+
 export interface PayPeriodDto {
   start: string;
   end: string;

@@ -239,6 +239,49 @@ async fn an_override_refuses_a_blank_reason(pool: PgPool) {
     assert_eq!(result, Err(PayrollAppError::OverrideReasonCannotBeEmpty));
 }
 
+/// Leave payout, notice pay and severance are refused by name (issue #81,
+/// D23), even as a one-run override — the operator cannot pay one under
+/// cover of overriding an unrelated standing allowance's label.
+#[sqlx::test]
+async fn an_override_refuses_a_label_naming_an_out_of_scope_pay_type(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = an_employment(&db, &employer_id).await;
+    let item_id = create_standing_pay_item(
+        &db,
+        &employment_id,
+        standing_allowance(60_000),
+        march_period().start(),
+        "actor",
+    )
+    .await
+    .unwrap();
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, march_period(), date(2026, 3, 1), "actor")
+            .await
+            .unwrap();
+
+    let result = override_standing_pay_line(
+        &db,
+        &run_id,
+        &employment_id,
+        item_id.as_str(),
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: Money::from_cents(90_000).unwrap(),
+            label: EarningLabel::new("notice pay").unwrap(),
+        },
+        "a reason",
+        "actor",
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EarningLabelIsOutOfScope {
+            label: "notice pay".to_string(),
+        })
+    );
+}
+
 #[sqlx::test]
 async fn an_override_refuses_a_different_kind(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());

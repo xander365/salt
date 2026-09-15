@@ -156,6 +156,41 @@ async fn create_standing_pay_item_refuses_an_effective_from_that_is_not_a_period
     assert_eq!(count, 0, "a refused create writes nothing");
 }
 
+/// Leave payout, notice pay and severance are refused by name (issue #81,
+/// D23), even as a recurring standing item — the worse loophole a one-off
+/// refusal alone would leave open.
+#[sqlx::test]
+async fn create_standing_pay_item_refuses_an_allowance_labelled_severance(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    let employment_id = an_employment(&db, &employer_id).await;
+
+    let result = create_standing_pay_item(
+        &db,
+        &employment_id,
+        StandingPayItemInstruction::TaxableAllowance {
+            amount: Money::from_cents(50_000).unwrap(),
+            label: EarningLabel::new("Severance").unwrap(),
+        },
+        march_period().start(),
+        "actor",
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(PayrollAppError::EarningLabelIsOutOfScope {
+            label: "Severance".to_string(),
+        })
+    );
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM standing_pay_item")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "a refused create writes nothing");
+}
+
 // ---- Proposal at Ordinary run creation ----
 
 #[sqlx::test]

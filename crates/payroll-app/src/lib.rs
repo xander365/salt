@@ -54,7 +54,7 @@ pub use employer_particulars::{
 pub use employment::{
     EmploymentDetail, EmploymentListing, EmploymentPerson, create_employment,
     get_employment_detail, get_employment_snapshot, list_employments_for_employer,
-    verify_employment_belongs_to_employer, void_employment,
+    record_employment_end_date, verify_employment_belongs_to_employer, void_employment,
 };
 pub use error::{PayrollAppError, ScheduleBoundedFact};
 pub use finalize::{

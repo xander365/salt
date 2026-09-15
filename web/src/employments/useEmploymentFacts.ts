@@ -10,7 +10,9 @@ import type {
   DeclarePriorEmploymentRequest,
   DeclareUnsupportedDeductionStatusRequest,
   DivergingPeriodsResponse,
+  EmploymentDetailResponse,
   RecordCompensationTermsRequest,
+  RecordEmploymentEndDateRequest,
   RecordOpeningBalanceRequest,
   RecordedResponse,
 } from '../api/types';
@@ -87,6 +89,24 @@ export function useDeclareUnsupportedDeductionStatus(employmentId: string) {
         employmentFactsUrl(employerId, employmentId, 'unsupported-deductions'),
         { method: 'POST', body: JSON.stringify(request) },
       ),
+    onSuccess: () => factRecorded(employmentId),
+  });
+}
+
+/** `PUT .../end-date` (issue #81): records that this Employment has a
+ * Leaver's end date. This changes which future runs propose the Employment
+ * at all, not merely a blocker on this one, so it invalidates the same two
+ * queries every other stated fact here does. */
+export function useRecordEmploymentEndDate(employmentId: string) {
+  const employerId = useEmployerId();
+  const factRecorded = useFactRecorded();
+
+  return useMutation({
+    mutationFn: (request: RecordEmploymentEndDateRequest) =>
+      apiFetch<EmploymentDetailResponse>(employmentFactsUrl(employerId, employmentId, 'end-date'), {
+        method: 'PUT',
+        body: JSON.stringify(request),
+      }),
     onSuccess: () => factRecorded(employmentId),
   });
 }
