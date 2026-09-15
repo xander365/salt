@@ -48,6 +48,6 @@ The Labour General Regulations (regulation 3, Annexure 1) require more than gros
 ## Consequences
 
 - `payroll_app::get_payslip_data` (issue #82) is a new, stricter sibling of `get_finalized_payroll_detail`: where the detail view treats absent frozen particulars as an ordinary "nothing to show" case, the Payslip read model refuses outright, naming which of `EmployerParticulars`, `PersonParticulars` or `PayslipTemplateVersion` is missing — the refusal keys on absence, never on `snapshot_schema_version` (the same rule issue #73 already established for the detail view).
-- `GET /api/employers/{e}/finalized-payroll/{f}/payslip` answers `Cache-Control: no-store` — the transport-level restatement of "never stored": nothing downstream of `salt-server` may cache a copy either.
+- `GET /api/employers/{e}/finalized-payroll/{f}/payslip.pdf` answers `Cache-Control: no-store` — the transport-level restatement of "never stored": nothing downstream of `salt-server` may cache a copy either.
 - A reversed `FinalizedPayroll`'s Payslip still renders — it is marked reversed and, once a Correction exists, names its replacement — never refused outright; a Reversal is a fact about the record, not a reason to hide it (CONTEXT.md's own `Reversal` entry).
 - `crates/salt-server/assets/fonts/LICENSE.txt` documents the embedded font's own license (Bitstream Vera, public-domain DejaVu changes) — a permanent obligation, like the font file itself.

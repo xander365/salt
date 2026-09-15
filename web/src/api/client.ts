@@ -71,9 +71,47 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return (await response.json()) as T;
 }
 
+/**
+ * As [`apiFetch`], for an endpoint that answers a file rather than JSON —
+ * today, only the Payslip PDF. Same auth semantics (same-origin credentials,
+ * the same-envelope error on a non-2xx response, the same session-expired
+ * event on a 401) — the one difference is the body, read as a `Blob` and
+ * paired with the filename the server itself chose.
+ */
+export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(path, { credentials: 'same-origin' });
+
+  if (response.status === 401) {
+    unauthorized.dispatchEvent(new Event('unauthorized'));
+  }
+
+  if (!response.ok) {
+    throw await readApiError(response);
+  }
+
+  const blob = await response.blob();
+  const filename = filenameFromContentDisposition(response.headers.get('Content-Disposition'));
+  return { blob, filename: filename ?? 'download' };
+}
+
+/** `attachment; filename="payslip-<uuid>.pdf"` — the one shape
+ * `salt-server`'s own `pdf_response` ever sends (built from a UUID it
+ * parsed out of the database itself), so a strict quoted-filename match is
+ * enough; `null` only for a response this client never actually sent (a
+ * test double, say), never for a real Payslip download. */
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (header === null) {
+    return null;
+  }
+  const match = /filename="([^"]*)"/.exec(header);
+  return match !== null && match[1] !== '' ? match[1] : null;
+}
+
 async function readApiError(response: Response): Promise<ApiError> {
   const body: unknown = await response.json().catch(() => null);
-  const envelope = body as { error?: { code?: string; message?: string; details?: unknown } } | null;
+  const envelope = body as {
+    error?: { code?: string; message?: string; details?: unknown };
+  } | null;
   const error = envelope?.error;
 
   return new ApiError(

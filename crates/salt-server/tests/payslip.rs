@@ -1,4 +1,4 @@
-//! Proves `GET /api/employers/{e}/finalized-payroll/{f}/payslip` (issue
+//! Proves `GET /api/employers/{e}/finalized-payroll/{f}/payslip.pdf` (issue
 //! #82, parent #70). Driven with `tower::ServiceExt::oneshot` against the
 //! real router, the same discipline `tests/finalized_payroll.rs` already
 //! follows — most of the fixtures below are copied from that file rather
@@ -16,8 +16,7 @@ use payroll_app::{
     DatabaseConfig, EmployerParticularsFields, EmploymentPerson, MembershipRole, OperatorId,
     SaltDatabase,
 };
-use printpdf::{Op, PdfDocument, PdfParseOptions, PdfWarnMsg, TextItem};
-use salt_server::{AppState, build_router};
+use salt_server::{AppState, build_router, rendered_text};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -359,43 +358,11 @@ fn payslip_request(employer_id: &str, finalized_payroll_id: &str, cookie: &str) 
     Request::builder()
         .method("GET")
         .uri(format!(
-            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip"
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip.pdf"
         ))
         .header(header::COOKIE, cookie)
         .body(Body::empty())
         .unwrap()
-}
-
-/// Extracts every printed text run from a rendered payslip, the same
-/// mechanism `payslip_render`'s own unit tests use — Deep Instructions'
-/// "verify by extracting the rendered values, never by hashing bytes",
-/// applied here to the actual bytes an HTTP client would receive.
-fn rendered_text(bytes: &[u8]) -> String {
-    let mut warnings: Vec<PdfWarnMsg> = Vec::new();
-    let doc = PdfDocument::parse(bytes, &PdfParseOptions::default(), &mut warnings)
-        .expect("the payslip route must always answer a parseable PDF");
-    let mut text = String::new();
-    for page in &doc.pages {
-        for op in &page.ops {
-            if let Op::ShowText { items } = op {
-                for item in items {
-                    match item {
-                        TextItem::Text(s) => text.push_str(s),
-                        TextItem::GlyphIds(codepoints) => {
-                            for codepoint in codepoints {
-                                if let Some(cid) = &codepoint.cid {
-                                    text.push_str(cid);
-                                }
-                            }
-                        }
-                        TextItem::Offset(_) => {}
-                    }
-                }
-                text.push(' ');
-            }
-        }
-    }
-    text
 }
 
 /// The everyday case: every frozen particular is on record, so the payslip
@@ -456,6 +423,132 @@ async fn an_operator_downloads_a_payslip_as_an_uncacheable_pdf() {
     assert!(text.contains("Ada Lovelace"), "{text}");
     assert!(text.contains("N$ 15,000.00"), "{text}");
     assert!(text.contains("standard-v1"), "{text}");
+}
+
+fn set_pay_lines_request(
+    employer_id: &str,
+    run_id: &str,
+    employment_id: &str,
+    cookie: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/members/{employment_id}/pay-lines"
+        ))
+        .header(header::COOKIE, cookie)
+        .header("x-salt-request", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "earnings": [
+                    {
+                        "kind": "taxableAllowance",
+                        "amountCents": 50_000,
+                        "label": "Standby allowance",
+                    }
+                ],
+                "deductions": [],
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// The frozen pay-line provenance (issue #80, issue #82 review): a one-off
+/// allowance typed onto this run prints its own frozen source on the
+/// payslip, read from `pay_line_provenance_json` and never rebuilt from a
+/// current `StandingPayItem` — there is none here to rebuild it from.
+#[tokio::test]
+async fn a_one_off_allowance_prints_its_frozen_provenance_on_the_payslip() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(&employer_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+
+    let response = router()
+        .await
+        .oneshot(record_compensation_terms_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router()
+        .await
+        .oneshot(declare_prior_employment_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router()
+        .await
+        .oneshot(declare_unsupported_deductions_request(
+            &employer_id,
+            &employment_id,
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let run_id = create_run(&employer_id, &cookie).await;
+    let response = router()
+        .await
+        .oneshot(set_pay_lines_request(
+            &employer_id,
+            &run_id,
+            &employment_id,
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let finalized = body_json(response).await;
+    let finalized_payroll_id = finalized["finalized"][0]["finalizedPayrollId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router()
+        .await
+        .oneshot(payslip_request(
+            &employer_id,
+            &finalized_payroll_id,
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = rendered_text(&bytes);
+
+    assert!(text.contains("Standby allowance"), "{text}");
+    assert!(text.contains("Typed on this run"), "{text}");
 }
 
 /// The refusal Deep Instructions demand: an Employer that never recorded
@@ -560,7 +653,7 @@ async fn downloading_a_payslip_requires_a_session() {
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip"
+                    "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip.pdf"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -782,6 +875,10 @@ async fn a_reversed_and_replaced_payroll_names_both_directions_on_its_payslip() 
     payroll_app::reverse_finalized_payroll(&db, &original_id, "March salary was wrong", "actor")
         .await
         .unwrap();
+    // `reversal.reversed_at` defaults to `now()` (migration 0011) — printed
+    // as a plain date, the same `%d %b %Y` convention every other date on
+    // the payslip already uses.
+    let expected_reversed_on = chrono::Utc::now().format("%d %b %Y").to_string();
 
     let run_id = payroll_app::create_correction_run(
         &db,
@@ -832,6 +929,10 @@ async fn a_reversed_and_replaced_payroll_names_both_directions_on_its_payslip() 
     assert!(original_text.contains("REVERSED"), "{original_text}");
     assert!(
         original_text.contains("March salary was wrong"),
+        "{original_text}"
+    );
+    assert!(
+        original_text.contains(&expected_reversed_on),
         "{original_text}"
     );
     assert!(original_text.contains(&replacement_id), "{original_text}");

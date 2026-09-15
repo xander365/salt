@@ -691,7 +691,7 @@ fn finalized_traces_request(
         .unwrap()
 }
 
-/// `GET .../payslip` (issue #82).
+/// `GET .../payslip.pdf` (issue #82).
 fn finalized_payslip_request(
     employer_id: &str,
     finalized_payroll_id: &str,
@@ -700,7 +700,7 @@ fn finalized_payslip_request(
     Request::builder()
         .method("GET")
         .uri(format!(
-            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip"
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip.pdf"
         ))
         .header(header::COOKIE, cookie)
         .body(Body::empty())
@@ -1841,7 +1841,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items/{standing_pay_item_id}/end",
             "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",
-            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip",
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip.pdf",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
             "/api/employers/{employer_id}/particulars",
             "/api/employers/{employer_id}/payroll-runs",

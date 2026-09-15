@@ -1,4 +1,4 @@
-//! `GET /api/employers/{e}/finalized-payroll/{f}/payslip` (issue #82,
+//! `GET /api/employers/{e}/finalized-payroll/{f}/payslip.pdf` (issue #82,
 //! parent #70): an Operator downloads one employee's Payslip as a real PDF
 //! from the finalized run screen. Rendered on demand, in Rust, and never
 //! stored — the response carries no cache header that would let anything
@@ -20,15 +20,22 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, header};
 use axum::response::Response;
-use payroll::{Deduction, Earning, EmployerId, StatutoryDeduction, VoluntaryDeduction};
-use payroll_app::{FinalizedEmployerParticulars, FinalizedPersonParticulars, PayslipData};
+use payroll::{
+    Deduction, Earning, EarningInstruction, EmployerId, StatutoryDeduction, VoluntaryDeduction,
+};
+use payroll_app::{
+    FinalizedEmployerParticulars, FinalizedPersonParticulars, FrozenPayLine, PayLineInstruction,
+    PayLineSource, PayslipData,
+};
 
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::error::ApiError;
-use crate::payslip_render::{PayslipInput, PayslipLine, PayslipReversedNotice, render_payslip};
+use crate::payslip_render::{
+    PayslipInput, PayslipLine, PayslipReversedNotice, format_date, render_payslip,
+};
 use crate::state::AppState;
 
-/// `GET /api/employers/{e}/finalized-payroll/{f}/payslip`. Refused exactly
+/// `GET /api/employers/{e}/finalized-payroll/{f}/payslip.pdf`. Refused exactly
 /// as [`crate::finalized_payroll::get_finalized_payroll`] is when the id is
 /// unknown or belongs to another Employer, and additionally refused (409,
 /// `payslip_particulars_not_frozen`) when this row predates issue #73 and
@@ -78,6 +85,44 @@ fn pdf_response(bytes: Vec<u8>, filename: &str) -> Response {
 
 fn to_render_input(data: PayslipData) -> PayslipInput {
     let figures = data.figures;
+
+    // Every included line still with a frozen source to claim, removed
+    // lines excluded up front: a removed line contributes nothing to
+    // `data.earning_lines`/`data.deductions` either, so it can never match
+    // one of them and would otherwise sit here unused. Consumed by
+    // `take_matching_provenance` below as each printed line claims its own
+    // entry, so two identically labelled lines each get their own frozen
+    // source rather than both quietly matching the first.
+    let mut provenance: Vec<FrozenPayLine> = data
+        .pay_line_provenance
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|line| line.removed_reason.is_none())
+        .collect();
+
+    let earnings = data
+        .earning_lines
+        .iter()
+        .map(|earning| {
+            let note = take_matching_provenance(&mut provenance, |instruction| {
+                earning_matches_instruction(earning, instruction)
+            })
+            .map(|line| provenance_note(&line));
+            earning_line(earning, note)
+        })
+        .collect();
+    let deductions = data
+        .deductions
+        .iter()
+        .map(|deduction| {
+            let note = take_matching_provenance(&mut provenance, |instruction| {
+                deduction_matches_instruction(deduction, instruction)
+            })
+            .map(|line| provenance_note(&line));
+            deduction_line(deduction, note)
+        })
+        .collect();
+
     PayslipInput {
         finalized_payroll_id: data.id.to_string(),
         employer_registered_name: data.employer_particulars.registered_name.clone(),
@@ -92,17 +137,94 @@ fn to_render_input(data: PayslipData) -> PayslipInput {
         pay_date: data.pay_date,
         salt_version: data.salt_version,
         payslip_template_version: data.payslip_template_version,
-        earnings: data.earning_lines.iter().map(earning_line).collect(),
-        deductions: data.deductions.iter().map(deduction_line).collect(),
+        earnings,
+        deductions,
         gross_pay_cents: figures.gross.cents(),
         total_deductions_cents: figures.total_deductions.cents(),
         net_pay_cents: figures.net_pay.cents(),
         replaces: data.replaces.map(|id| id.to_string()),
         reversed: data.reversal.map(|reversal| PayslipReversedNotice {
             reason: reversal.reason,
+            reversed_at: reversal.reversed_at.date_naive(),
             replacement_id: reversal.replacement_id.map(|id| id.to_string()),
         }),
     }
+}
+
+/// Finds the first still-unclaimed frozen provenance entry `matches`
+/// accepts, and removes and returns it — "removes" so the same frozen line
+/// can never be claimed twice by two printed lines that both happen to
+/// match it (two allowances sharing a label, say).
+fn take_matching_provenance(
+    lines: &mut Vec<FrozenPayLine>,
+    matches: impl Fn(&PayLineInstruction) -> bool,
+) -> Option<FrozenPayLine> {
+    let index = lines.iter().position(|line| matches(&line.pay_line))?;
+    Some(lines.remove(index))
+}
+
+/// Whether `instruction` is the frozen pay-line instruction that produced
+/// `earning`. `BasicPay` never matches anything: it is derived from the
+/// Employment's `CompensationTerms`, never itself a `payroll_run_pay_line`
+/// row, so it carries no provenance of its own to find.
+fn earning_matches_instruction(earning: &Earning, instruction: &PayLineInstruction) -> bool {
+    let PayLineInstruction::Earning(instruction) = instruction else {
+        return false;
+    };
+    match (earning, instruction) {
+        (
+            Earning::TaxableAllowance { label, .. },
+            EarningInstruction::TaxableAllowance {
+                label: instruction_label,
+                ..
+            },
+        ) => label == instruction_label,
+        (
+            Earning::Overtime { label, .. },
+            EarningInstruction::Overtime {
+                label: instruction_label,
+                ..
+            },
+        ) => label == instruction_label,
+        _ => false,
+    }
+}
+
+/// As [`earning_matches_instruction`], for a `Deduction`. Statutory
+/// deductions (PAYE, social security) are computed, never typed, so neither
+/// carries a frozen pay-line entry either — only a voluntary deduction can
+/// match. `MedicalAidPremium` is the one voluntary kind that exists today
+/// (`VoluntaryDeductionInstruction`'s own exhaustive comment) and carries no
+/// label to disambiguate by, so any one voluntary-deduction pay line matches
+/// any one `MedicalAidPremium` line — exactly as precise as the frozen data
+/// itself is.
+fn deduction_matches_instruction(deduction: &Deduction, instruction: &PayLineInstruction) -> bool {
+    matches!(instruction, PayLineInstruction::Deduction(_))
+        && matches!(
+            deduction,
+            Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium { .. })
+        )
+}
+
+/// One frozen pay line's provenance as a printed sentence — the same
+/// wording `web/src/finalizedPayroll/Workings.tsx`'s `sourceText` already
+/// uses for the same three `PayLineSource` values (issue #80's own "code is
+/// the contract, the words are ours" rule, restated here for the printed
+/// document). Read entirely from the frozen [`FrozenPayLine`] handed in —
+/// never from a current `StandingPayItem` (issue #82 review).
+fn provenance_note(line: &FrozenPayLine) -> String {
+    let mut note = match line.source {
+        PayLineSource::Standing => match line.standing_effective_from {
+            Some(effective_from) => format!("Standing since {}", format_date(effective_from)),
+            None => "Standing".to_string(),
+        },
+        PayLineSource::OneOff => "Typed on this run".to_string(),
+        PayLineSource::FromReversedSnapshot => "Copied from reversed payroll".to_string(),
+    };
+    if let Some(reason) = &line.override_reason {
+        note.push_str(&format!(" — changed for this run: {reason}"));
+    }
+    note
 }
 
 /// `EmployerParticulars`' own required `address_line1`/`city` plus its
@@ -158,11 +280,12 @@ fn format_multiplier(multiplier: rust_decimal::Decimal) -> String {
 /// `Q-OPEN-7`): `BasicPay` is the wage-basis line, an allowance prints its
 /// own label, and overtime prints **both** its multiplier (the
 /// classification) and its free-text label — never only one.
-fn earning_line(earning: &Earning) -> PayslipLine {
+fn earning_line(earning: &Earning, provenance: Option<String>) -> PayslipLine {
     match earning {
         Earning::BasicPay(amount) => PayslipLine {
             label: "Basic Pay".to_string(),
             detail: None,
+            provenance,
             amount_cents: amount.cents(),
         },
         Earning::TaxableAllowance { amount, label } => PayslipLine {
@@ -171,6 +294,7 @@ fn earning_line(earning: &Earning) -> PayslipLine {
                 .map(|label| label.as_str().to_string())
                 .unwrap_or_else(|| "Allowance".to_string()),
             detail: None,
+            provenance,
             amount_cents: amount.cents(),
         },
         Earning::Overtime {
@@ -187,12 +311,13 @@ fn earning_line(earning: &Earning) -> PayslipLine {
                 format_hours(trace.hours.as_decimal()),
                 format_multiplier(trace.multiplier.as_decimal())
             )),
+            provenance,
             amount_cents: amount.cents(),
         },
     }
 }
 
-fn deduction_line(deduction: &Deduction) -> PayslipLine {
+fn deduction_line(deduction: &Deduction, provenance: Option<String>) -> PayslipLine {
     let (label, amount) = match deduction {
         Deduction::Statutory(StatutoryDeduction::PAYE(amount)) => ("PAYE", *amount),
         Deduction::Statutory(StatutoryDeduction::SocialSecurity(amount)) => {
@@ -205,6 +330,7 @@ fn deduction_line(deduction: &Deduction) -> PayslipLine {
     PayslipLine {
         label: label.to_string(),
         detail: None,
+        provenance,
         amount_cents: amount.cents(),
     }
 }
@@ -307,7 +433,7 @@ mod tests {
             label: Some(EarningLabel::new("Sunday overtime").unwrap()),
         };
 
-        let line = earning_line(&overtime);
+        let line = earning_line(&overtime, None);
 
         assert_eq!(line.label, "Sunday overtime");
         assert_eq!(line.detail.as_deref(), Some("12.00 hrs @ 1.5x"));
@@ -334,7 +460,7 @@ mod tests {
             label: None,
         };
 
-        let line = earning_line(&overtime);
+        let line = earning_line(&overtime, None);
 
         assert_eq!(line.label, "Overtime");
         assert_eq!(line.detail.as_deref(), Some("12.00 hrs @ 2x"));

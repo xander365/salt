@@ -14,6 +14,7 @@ import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
 import { useFinalizedPayroll } from '../finalizedPayroll/useFinalizedPayroll';
 import { FrozenParticulars } from '../finalizedPayroll/FrozenParticulars';
+import { PayslipDownload } from '../finalizedPayroll/PayslipDownload';
 import { Workings } from '../finalizedPayroll/Workings';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDate, humanDateRange } from '../format';
@@ -89,6 +90,7 @@ export function FinalizedPayroll() {
             </p>
           </div>
           <FinalizedBanner>This payroll is finalized and cannot be changed.</FinalizedBanner>
+          <PayslipDownload finalizedPayrollId={finalizedPayrollId} />
           <Figures figures={finalizedPayroll.data.figures} />
           {/* Issue #73: the Employer and Person particulars frozen at
               finalize time, never a later correction of either (D22). */}

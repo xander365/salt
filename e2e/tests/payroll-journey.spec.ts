@@ -144,6 +144,16 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // One membership: land in the single Employer, never a switcher screen.
   await expect(page.getByRole('heading', { level: 1, name: operator.employerName })).toBeVisible();
 
+  // Record EmployerParticulars (issue #71): the registered name and address
+  // a Payslip must freeze and print (issue #82). Without this, the Payslip
+  // downloaded below would be refused, naming exactly this as missing.
+  const employerParticularsRegion = page.getByRole('region', { name: 'Employer particulars' });
+  await employerParticularsRegion.getByLabel('Registered name').fill('Acme Corp (Pty) Ltd');
+  await employerParticularsRegion.getByLabel('Address line 1').fill('1 Independence Ave');
+  await employerParticularsRegion.getByLabel('City').fill('Windhoek');
+  await employerParticularsRegion.getByRole('button', { name: 'Save particulars' }).click();
+  await expect(employerParticularsRegion.getByText('Particulars saved.')).toBeVisible();
+
   // Add a person by full name.
   await page.getByRole('link', { name: 'People' }).click();
   await page.getByLabel('Full name').fill('Ada Lovelace');
@@ -151,6 +161,18 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await expect(page.getByRole('status')).toHaveText('Added Ada Lovelace.');
   await page.getByRole('link', { name: 'Ada Lovelace' }).click();
   await expect(page.getByRole('heading', { level: 2, name: 'Ada Lovelace' })).toBeVisible();
+
+  // Record PersonParticulars (issue #71): the identity number and address a
+  // Payslip must freeze and print (issue #82) — the same reason
+  // EmployerParticulars was just recorded above.
+  const personParticularsRegion = page.getByRole('region', {
+    name: 'Identity number and address',
+  });
+  await personParticularsRegion.getByLabel('Identity number').fill('80012345678');
+  await personParticularsRegion.getByLabel('Address line 1').fill('2 Fidel Castro St');
+  await personParticularsRegion.getByLabel('City').fill('Swakopmund');
+  await personParticularsRegion.getByRole('button', { name: 'Save particulars' }).click();
+  await expect(personParticularsRegion.getByText('Particulars saved.')).toBeVisible();
 
   // Record CompensationTerms, effective from the start of the period this
   // Employment can first be paid for.
@@ -388,4 +410,20 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   expect(page.url()).toBe(finalizedUrl);
   await expect(page.getByText('This payroll is finalized and cannot be changed.')).toBeVisible();
   expect(await readFigures(page)).toEqual(figures);
+
+  // Download the Payslip (issue #82 review follow-up): a real browser
+  // download, off the real network, never a mocked response. The finalized
+  // payroll's own id is the last path segment of `finalizedUrl`.
+  const finalizedPayrollId = finalizedUrl.split('/').pop();
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Download payslip' }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe(`payslip-${finalizedPayrollId}.pdf`);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk as Buffer);
+  }
+  expect(Buffer.concat(chunks).subarray(0, 4).toString('ascii')).toBe('%PDF');
 });

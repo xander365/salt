@@ -23,7 +23,7 @@
 //!   id and period `finalized_payroll` already owns. A later correction to
 //!   an address or a name must never reach a payslip already issued.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use payroll::{Deduction, Earning, EmployerId, EmploymentId, PayPeriod};
 
 use crate::database::SaltDatabase;
@@ -34,6 +34,7 @@ use crate::finalized_payroll_read::{
     parse_finalized_payroll_id, particulars_from_snapshot,
 };
 use crate::payroll_run::PayrollFigures;
+use crate::provenance::FrozenPayLine;
 
 /// What a Payslip must say about reversal and replacement (issue #82,
 /// CONTEXT.md's own `Reversal`/`Replacement` entries).
@@ -41,6 +42,10 @@ use crate::payroll_run::PayrollFigures;
 pub struct PayslipReversal {
     /// The reason recorded on the `Reversal` (§6.1: always non-blank).
     pub reason: String,
+    /// When the `Reversal` was recorded (`reversal.reversed_at`, migration
+    /// 0011's own `DEFAULT now()`) — a Payslip must say *when* it was
+    /// reversed, not only why.
+    pub reversed_at: DateTime<Utc>,
     /// The `FinalizedPayroll` that took this one's place, if any — a
     /// reversal is complete on its own (CONTEXT.md's `Replacement` entry),
     /// so this is `None` until, and unless, a Correction names this record
@@ -77,6 +82,13 @@ pub struct PayslipData {
     pub replaces: Option<FinalizedPayrollId>,
     /// Present when this row has been reversed.
     pub reversal: Option<PayslipReversal>,
+    /// The frozen pay-line provenance snapshot (issue #80) — `None` for a
+    /// row finalized before that shipped, which never froze one at all.
+    /// Never backfilled (ADR-0004), and never rebuilt from today's standing
+    /// records: presence is read from the column itself, the same rule
+    /// [`crate::FinalizedPayrollDetail::pay_line_provenance`] already
+    /// follows.
+    pub pay_line_provenance: Option<Vec<FrozenPayLine>>,
 }
 
 /// Reads everything [`PayslipData`] needs in one query, scoped to
@@ -110,7 +122,9 @@ pub async fn get_payslip_data(
         Option<String>,            // payslip_template_version
         Option<String>,            // replaces_finalized_payroll_id
         Option<String>,            // reversal.reason
+        Option<DateTime<Utc>>,     // reversal.reversed_at
         Option<String>,            // the id of whatever replaces this row
+        Option<serde_json::Value>, // pay_line_provenance_json
     );
 
     let row: Option<Row> = sqlx::query_as(
@@ -123,7 +137,9 @@ pub async fn get_payslip_data(
                 finalized_payroll.payslip_template_version,
                 finalized_payroll.replaces_finalized_payroll_id::text,
                 reversal.reason,
-                replacement.id::text
+                reversal.reversed_at,
+                replacement.id::text,
+                finalized_payroll.pay_line_provenance_json
          FROM finalized_payroll
          JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
          LEFT JOIN reversal ON reversal.finalized_payroll_id = finalized_payroll.id
@@ -149,7 +165,9 @@ pub async fn get_payslip_data(
         payslip_template_version,
         replaces_finalized_payroll_id,
         reversal_reason,
+        reversal_reversed_at,
         replacement_id,
+        pay_line_provenance_json,
     ) =
         row.ok_or_else(|| PayrollAppError::FinalizedPayrollNotFound(finalized_payroll_id.clone()))?;
 
@@ -195,8 +213,31 @@ pub async fn get_payslip_data(
 
     let reversal = reversal_reason.map(|reason| PayslipReversal {
         reason,
+        reversed_at: reversal_reversed_at
+            .expect("reversal.reason is Some iff reversal.reversed_at is, from the same row"),
         replacement_id: replacement_id.map(FinalizedPayrollId::new),
     });
+
+    // `None` for a row finalized before issue #80 (never backfilled), and
+    // for any other row whose column is simply empty — the same
+    // "presence, never the version number" rule the two particulars above
+    // follow. Never reconstructed from today's `StandingPayItems`: this is
+    // exactly what froze at finalization, however the standing record reads
+    // now. Mirrors `get_finalized_payroll_detail`'s own decode.
+    let pay_line_provenance: Option<Vec<FrozenPayLine>> = pay_line_provenance_json
+        .map(|value| {
+            #[derive(serde::Deserialize)]
+            struct Snapshot {
+                lines: Vec<FrozenPayLine>,
+            }
+            serde_json::from_value::<Snapshot>(value)
+                .map(|snapshot| snapshot.lines)
+                .map_err(|_| PayrollAppError::FinalizedPayrollSnapshotUnreadable {
+                    finalized_payroll_id: finalized_payroll_id.clone(),
+                    schema_version,
+                })
+        })
+        .transpose()?;
 
     let figures = PayrollFigures::from_calculation(&calculation);
 
@@ -215,6 +256,7 @@ pub async fn get_payslip_data(
         figures,
         replaces: replaces_finalized_payroll_id.map(FinalizedPayrollId::new),
         reversal,
+        pay_line_provenance,
     })
 }
 

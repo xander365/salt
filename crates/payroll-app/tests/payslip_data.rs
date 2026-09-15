@@ -10,16 +10,17 @@
 
 use chrono::NaiveDate;
 use payroll::{
-    EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay, PriorEmployment, TaxYear,
-    UnsupportedDeductionStatus,
+    EarningInstruction, EarningLabel, EmployerId, EmploymentId, Money, PayPeriod, PeriodEndDay,
+    PriorEmployment, TaxYear, UnsupportedDeductionStatus,
 };
 use payroll_app::{
     EmployerParticularsFields, EmploymentPerson, FinalizedPayrollId, PAYSLIP_TEMPLATE_VERSION,
-    PayrollAppError, PersonParticularsFields, SaltDatabase, add_employment_to_correction_run,
-    calculate_payroll_run, create_correction_run, create_employer, create_employment,
-    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
-    finalize_payroll_run, get_payslip_data, record_compensation_terms, reverse_finalized_payroll,
-    set_employer_particulars, set_person_particulars,
+    PayLineSource, PayrollAppError, PersonParticularsFields, SaltDatabase,
+    add_employment_to_correction_run, calculate_payroll_run, create_correction_run,
+    create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
+    declare_unsupported_deduction_status, finalize_payroll_run, get_payslip_data,
+    record_compensation_terms, reverse_finalized_payroll, set_employer_particulars,
+    set_person_particulars, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -376,6 +377,15 @@ async fn a_reversed_payroll_with_no_replacement_names_its_reason_and_no_replacem
     assert_eq!(reversal.reason, "March salary was wrong");
     assert_eq!(reversal.replacement_id, None);
     assert_eq!(data.replaces, None);
+    // `reversed_at` defaults to `now()` (migration 0011) — not exact, but
+    // must be recent, the same tolerance `reverse_finalized_payroll.rs`'s
+    // own test already applies to the same column.
+    let elapsed = chrono::Utc::now() - reversal.reversed_at;
+    assert!(
+        elapsed >= chrono::Duration::zero() && elapsed < chrono::Duration::minutes(1),
+        "{:?}",
+        reversal.reversed_at
+    );
 }
 
 /// The full chain: the reversed record names the Correction that replaced
@@ -429,4 +439,83 @@ async fn a_replaced_payroll_and_its_replacement_name_each_other(pool: PgPool) {
         .unwrap();
     assert_eq!(replacement.replaces, Some(original_id));
     assert_eq!(replacement.reversal, None);
+}
+
+/// The frozen pay-line provenance (issue #80, issue #82 review): a one-off
+/// allowance typed onto this run freezes as a `FrozenPayLine` with source
+/// `OneOff`, read back on [`PayslipData::pay_line_provenance`] — never
+/// rebuilt from a current `StandingPayItem`, since there is none behind a
+/// one-off line to rebuild it from.
+#[sqlx::test]
+async fn a_one_off_allowances_frozen_source_comes_through_on_the_payslip(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    let (person_id, employment_id) =
+        a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        employer_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &person_id,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &employment_id,
+        vec![EarningInstruction::TaxableAllowance {
+            amount: Money::from_cents(50_000).unwrap(),
+            label: Some(EarningLabel::new("Standby allowance").unwrap()),
+        }],
+        vec![],
+    )
+    .await
+    .unwrap();
+    calculate_payroll_run(&db, &run_id, "calculator")
+        .await
+        .unwrap();
+    let outcome = finalize_payroll_run(&db, &run_id, "finalizer")
+        .await
+        .unwrap();
+    let finalized_payroll_id = outcome
+        .finalized
+        .into_iter()
+        .find(|(id, _)| id == &employment_id)
+        .expect("the Employment must have finalized")
+        .1;
+
+    let data = get_payslip_data(&db, &employer_id, finalized_payroll_id.as_str())
+        .await
+        .unwrap();
+
+    let provenance = data
+        .pay_line_provenance
+        .expect("issue #80 shipped before this row ever finalized");
+    let allowance = provenance
+        .iter()
+        .find(|line| line.pay_line.as_earning().is_some())
+        .expect("the one-off allowance froze its own provenance entry");
+    assert_eq!(allowance.source, PayLineSource::OneOff);
+    assert_eq!(allowance.standing_pay_item_id, None);
+    assert_eq!(allowance.override_reason, None);
+    assert_eq!(allowance.removed_reason, None);
 }

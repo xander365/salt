@@ -155,7 +155,7 @@ fn production_routes() -> Router<AppState> {
             get(finalized_payroll::get_finalized_payroll_traces),
         )
         .route(
-            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip",
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip.pdf",
             get(payslip::get_finalized_payroll_payslip),
         );
 
