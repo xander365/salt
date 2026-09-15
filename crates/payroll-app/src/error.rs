@@ -237,6 +237,21 @@ pub enum PayrollAppError {
     /// whitespace. A reversal is a deliberate, attributed act (§6.1), the
     /// same demand `RemovalReasonCannotBeEmpty` makes of a run removal.
     ReversalReasonCannotBeEmpty,
+    /// `GetPayslipData` was asked for a `FinalizedPayroll` whose frozen
+    /// `EmployerParticulars`, `PersonParticulars` or `PayslipTemplateVersion`
+    /// is absent (issue #82) — a row finalized before issue #73 began
+    /// freezing them, the same "predates the freeze" boundary
+    /// [`crate::FinalizedPayrollDetail`]'s own three optional fields already
+    /// read back as `None` for.
+    ///
+    /// `missing` names exactly which of the three are absent on this row —
+    /// the refusal keys on that, never on `snapshot_schema_version` (Deep
+    /// Instructions, issue #82): a present-and-decodable row always renders,
+    /// however a later version happens to number it.
+    PayslipParticularsNotFrozen {
+        finalized_payroll_id: FinalizedPayrollId,
+        missing: Vec<&'static str>,
+    },
     /// `RecordOpeningBalance` was asked to write or replace a row for an
     /// (Employment, TaxYear) that already has a `FinalizedPayroll` — Live or
     /// reversed (ADR-0013, §4.5). `OpeningBalance` is re-read into every
@@ -906,6 +921,15 @@ impl std::fmt::Display for PayrollAppError {
             Self::ReversalReasonCannotBeEmpty => {
                 write!(f, "a reversal reason must not be empty")
             }
+            Self::PayslipParticularsNotFrozen {
+                finalized_payroll_id,
+                missing,
+            } => write!(
+                f,
+                "FinalizedPayroll {finalized_payroll_id} cannot render a Payslip: {} never \
+                 froze on this row — it was finalized before Salt began freezing them",
+                missing.join(" and ")
+            ),
             Self::OpeningBalanceFrozenByFinalization {
                 employment_id,
                 tax_year,
@@ -1369,6 +1393,7 @@ impl std::error::Error for PayrollAppError {
             | Self::FinalizedPayrollSnapshotUnreadable { .. }
             | Self::FinalizedPayrollAlreadyReversed(_)
             | Self::ReversalReasonCannotBeEmpty
+            | Self::PayslipParticularsNotFrozen { .. }
             | Self::OpeningBalanceFrozenByFinalization { .. }
             | Self::PriorEmploymentFrozenByFinalization { .. }
             | Self::PayScheduleFrozenByFinalization { .. }

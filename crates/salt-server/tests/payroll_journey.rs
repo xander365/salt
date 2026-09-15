@@ -25,7 +25,9 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use payroll_app::{DatabaseConfig, MembershipRole, OperatorId, SaltDatabase};
+use payroll_app::{
+    DatabaseConfig, EmployerParticularsFields, MembershipRole, OperatorId, SaltDatabase,
+};
 use salt_server::{AppState, build_router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -689,6 +691,22 @@ fn finalized_traces_request(
         .unwrap()
 }
 
+/// `GET .../payslip` (issue #82).
+fn finalized_payslip_request(
+    employer_id: &str,
+    finalized_payroll_id: &str,
+    cookie: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip"
+        ))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
 /// `POST .../pay-lines/{standing_pay_item_id}/override` (issue #80).
 fn override_standing_pay_line_request(
     employer_id: &str,
@@ -1193,6 +1211,29 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
     let (_operator_id, cookie, employer_id) =
         an_authorized_operator(MembershipRole::PayrollOperator).await;
 
+    // `PUT .../particulars` is Owner-only (§0.6), so this PayrollOperator's
+    // own session cannot record it — set directly through `payroll_app`,
+    // only so the payslip route below has something frozen to print.
+    // Nothing about *this* still proves the payslip route Owner-only or not.
+    payroll_app::set_employer_particulars(
+        &test_db().await,
+        &payroll::EmployerId::new(employer_id.clone()),
+        EmployerParticularsFields {
+            registered_name: "Acme Corp (Pty) Ltd".to_string(),
+            address_line1: "1 Independence Ave".to_string(),
+            address_line2: None,
+            city: "Windhoek".to_string(),
+            postal_code: None,
+            income_tax_number: None,
+            social_security_number: None,
+        },
+        &[],
+        "",
+        "test-setup",
+    )
+    .await
+    .unwrap();
+
     assert_eq!(
         router()
             .await
@@ -1446,6 +1487,19 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
             .status(),
         StatusCode::OK
     );
+    assert_eq!(
+        router()
+            .await
+            .oneshot(finalized_payslip_request(
+                &employer_id,
+                &finalized_payroll_id,
+                &cookie
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1535,6 +1589,7 @@ async fn every_payroll_route_answers_401_without_a_session() {
         finalize_request(e, r, no_cookie, true),
         finalized_detail_request(e, f, no_cookie),
         finalized_traces_request(e, f, no_cookie),
+        finalized_payslip_request(e, f, no_cookie),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -1786,6 +1841,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/employments/{employment_id}/standing-pay-items/{standing_pay_item_id}/end",
             "/api/employers/{employer_id}/employments/{employment_id}/unsupported-deductions",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip",
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
             "/api/employers/{employer_id}/particulars",
             "/api/employers/{employer_id}/payroll-runs",
@@ -1813,7 +1869,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 26, "{paths:?}");
+    assert_eq!(paths.len(), 27, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

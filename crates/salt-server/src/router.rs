@@ -19,6 +19,7 @@ use crate::employments;
 use crate::error::ApiError;
 use crate::finalized_payroll;
 use crate::payroll_runs;
+use crate::payslip;
 use crate::person_particulars;
 use crate::request_id;
 use crate::session;
@@ -152,6 +153,10 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/traces",
             get(finalized_payroll::get_finalized_payroll_traces),
+        )
+        .route(
+            "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}/payslip",
+            get(payslip::get_finalized_payroll_payslip),
         );
 
     #[cfg(feature = "test-support")]

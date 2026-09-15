@@ -33,6 +33,8 @@ mod error;
 mod finalized_payroll;
 mod payroll_error;
 mod payroll_runs;
+mod payslip;
+mod payslip_render;
 mod person_particulars;
 mod request_id;
 mod router;

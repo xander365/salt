@@ -26,6 +26,7 @@ mod membership;
 mod opening_balance;
 mod operator;
 mod payroll_run;
+mod payslip;
 mod person_particulars;
 mod prior_employment;
 mod provenance;
@@ -81,6 +82,7 @@ pub use payroll_run::{
     create_correction_run, create_ordinary_payroll_run, get_payroll_run_detail, list_payroll_runs,
     remove_employment_from_run, set_run_pay_lines, verify_payroll_run_belongs_to_employer,
 };
+pub use payslip::{PayslipData, PayslipReversal, get_payslip_data};
 pub use person_particulars::{
     PersonParticulars, PersonParticularsFields, correct_person_full_name, get_person_particulars,
     set_person_particulars,

@@ -331,6 +331,21 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "reversal_reason_cannot_be_empty",
             None,
         ),
+        // A lifecycle conflict, not a 404 or a 422: the id names a real
+        // FinalizedPayroll, but this row predates issue #73 and never froze
+        // what a Payslip demands. `missing` names exactly which columns, so
+        // the client can say why without guessing at a schema version.
+        PayrollAppError::PayslipParticularsNotFrozen {
+            finalized_payroll_id,
+            missing,
+        } => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "payslip_particulars_not_frozen",
+            Some(json!({
+                "finalizedPayrollId": finalized_payroll_id.to_string(),
+                "missing": missing,
+            })),
+        ),
         PayrollAppError::OpeningBalanceFrozenByFinalization {
             employment_id,
             tax_year,

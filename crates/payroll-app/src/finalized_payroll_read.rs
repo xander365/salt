@@ -37,7 +37,7 @@ use crate::provenance::FrozenPayLine;
 /// `parse_payroll_run_id` applies: the `id` column's `::uuid` cast would
 /// otherwise fail as a database error, turning a client's malformed path
 /// segment into a 500 rather than the 404 it deserves.
-fn parse_finalized_payroll_id(
+pub(crate) fn parse_finalized_payroll_id(
     finalized_payroll_id: &str,
 ) -> Result<FinalizedPayrollId, PayrollAppError> {
     if uuid::Uuid::parse_str(finalized_payroll_id).is_err() {
@@ -61,7 +61,7 @@ fn parse_finalized_payroll_id(
 /// labelled and scalar allowances, and issue #76's version 3 adds overtime
 /// variants that are simply absent from older snapshots. Finalized snapshots
 /// are never migrated in place (ADR-0012).
-fn calculation_from_snapshot(
+pub(crate) fn calculation_from_snapshot(
     finalized_payroll_id: &FinalizedPayrollId,
     schema_version: i32,
     calculation_json: serde_json::Value,
@@ -94,7 +94,7 @@ fn calculation_from_snapshot(
 /// this one does not know, and that case is already the one
 /// [`calculation_from_snapshot`] answers with this same error rather than a
 /// 500 on the route whose whole job is explaining a past month.
-fn particulars_from_snapshot<T: serde::de::DeserializeOwned>(
+pub(crate) fn particulars_from_snapshot<T: serde::de::DeserializeOwned>(
     finalized_payroll_id: &FinalizedPayrollId,
     schema_version: i32,
     particulars_json: Option<serde_json::Value>,

@@ -51,6 +51,13 @@ uuid = { version = "1", features = ["v4"] }
 # echoing typed characters to the terminal needs real termios handling,
 # which is worth a small, single-purpose dependency rather than hand-rolling.
 rpassword = "7"
+# The Payslip renderer (issue #82, ADR-0021): pure Rust, no system PDF
+# library. Pinned to an exact version — a bump is a deliberate, reviewed
+# decision, the same commitment ADR-0021 makes about every retired
+# template's renderer staying buildable. `text_layout` is the one feature
+# this crate needs (font parsing and text layout); every other feature
+# (image codecs, an HTML-to-PDF engine, SVG) is switched off.
+printpdf = { version = "0.12.8", default-features = false, features = ["text_layout"] }
 
 [dev-dependencies]
 # Self dev-dependency, enabling `test-support` only for this crate's own
