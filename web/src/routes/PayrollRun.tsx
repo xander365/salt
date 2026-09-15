@@ -53,6 +53,7 @@ import { EmptyState } from '../components/states/EmptyState';
 import { FailedRequestState } from '../components/states/FailedRequestState';
 import { BlockedItem } from '../components/states/BlockedItem';
 import { StaleBanner } from '../components/states/StaleBanner';
+import { PayslipDownload } from '../finalizedPayroll/PayslipDownload';
 
 function runWasNotFound(caught: unknown): boolean {
   return (
@@ -521,13 +522,19 @@ function FinalizedLinks({
             (candidate) => candidate.employmentId === entry.employmentId,
           );
           return (
-            <li key={entry.employmentId}>
+            <li key={entry.employmentId} className="flex flex-wrap items-center gap-3">
               <Link
                 to={finalizedPayrollPath(employerId, entry.finalizedPayrollId)}
                 className="text-sm font-medium text-primary hover:underline"
               >
                 {member?.fullName ?? entry.employmentId}
               </Link>
+              {/* Issue #82: each person's Payslip downloads straight from the
+                  finalized run screen. */}
+              <PayslipDownload
+                finalizedPayrollId={entry.finalizedPayrollId}
+                personName={member?.fullName ?? entry.employmentId}
+              />
             </li>
           );
         })}

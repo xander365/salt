@@ -235,8 +235,32 @@ async fn a_fully_frozen_payroll_reads_back_everything_a_payslip_needs(pool: PgPo
 async fn a_payroll_predating_the_freeze_is_refused_naming_what_is_missing(pool: PgPool) {
     let db = SaltDatabase::from_pool(pool.clone());
     let employer_id = an_employer(&db).await;
-    let (_person_id, employment_id) =
+    let (person_id, employment_id) =
         a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    // Both master records exist and are complete today. The refusal below
+    // must still happen: a payslip never falls back to a current record
+    // when the frozen one is absent.
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        employer_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &person_id,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
 
     let finalized_payroll_id = finalize_march(&db, &employer_id, &employment_id).await;
 

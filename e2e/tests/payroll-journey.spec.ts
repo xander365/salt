@@ -22,7 +22,7 @@
 // Deep Instructions).
 
 import { readFile } from 'node:fs/promises';
-import { type Page, expect, test } from '@playwright/test';
+import { type Locator, type Page, expect, test } from '@playwright/test';
 import { type BootstrappedOperator, CREDENTIALS_PATH } from '../global-setup.js';
 
 /** The ten figures §0.29 names, plus issue #78's medical aid premium, and
@@ -260,6 +260,7 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // force.
   await expect(page.getByRole('heading', { level: 3, name: 'Ada Lovelace' })).toBeVisible();
   await expect(page.getByText('No standing blockers.')).toBeVisible();
+  const runUrl = page.url();
 
   // Add a taxable allowance.
   await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
@@ -415,15 +416,32 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // download, off the real network, never a mocked response. The finalized
   // payroll's own id is the last path segment of `finalizedUrl`.
   const finalizedPayrollId = finalizedUrl.split('/').pop();
-  const [download] = await Promise.all([
-    page.waitForEvent('download'),
-    page.getByRole('button', { name: 'Download payslip' }).click(),
-  ]);
-  expect(download.suggestedFilename()).toBe(`payslip-${finalizedPayrollId}.pdf`);
+  await expectPayslipDownload(
+    page,
+    page.getByRole('button', { name: 'Download payslip', exact: true }),
+    `payslip-${finalizedPayrollId}.pdf`,
+  );
+
+  // And from the finalized run screen itself (issue #82's first acceptance
+  // criterion): the run lists each finalized person with their own
+  // download.
+  await page.goto(runUrl);
+  await expectPayslipDownload(
+    page,
+    page.getByRole('button', { name: 'Download payslip for Ada Lovelace' }),
+    `payslip-${finalizedPayrollId}.pdf`,
+  );
+});
+
+/** Clicks `button`, waits for the real browser download it starts, and
+ * checks the saved file's name and that it is a PDF. */
+async function expectPayslipDownload(page: Page, button: Locator, filename: string) {
+  const [download] = await Promise.all([page.waitForEvent('download'), button.click()]);
+  expect(download.suggestedFilename()).toBe(filename);
   const stream = await download.createReadStream();
   const chunks: Buffer[] = [];
   for await (const chunk of stream) {
     chunks.push(chunk as Buffer);
   }
   expect(Buffer.concat(chunks).subarray(0, 4).toString('ascii')).toBe('%PDF');
-});
+}

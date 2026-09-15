@@ -33,17 +33,18 @@
 //! | Employee full name, identity number, address | `FinalizedPersonParticulars` (frozen) |
 //! | Pay period, pay date | `FinalizedPayroll`'s own frozen period and its `PayrollRun`'s pay date |
 //! | Wage basis | The `BasicPay` earning line itself — Salt has one wage basis, a salaried amount per period; there is no separate hourly-paid Employment kind to distinguish (CONTEXT.md's own `DerivedHourlyRate` entry) |
-//! | Hours and remuneration categories | Each earning line's own kind: `BasicPay` prints as the wage basis line above; `TaxableAllowance` prints its label; `Overtime` prints its hours and multiplier beside its free-text label |
+//! | Hours and remuneration categories | Each earning line's own kind: `BasicPay` prints as the wage basis line above; `TaxableAllowance` prints its label; `Overtime` prints its hours and multiplier beside its free-text label. **Not printed:** an Employment's `OrdinaryHours` — `standard-v1` shows overtime hours only, which is recorded here as a gap rather than claimed as compliant |
+//! | Reversal and replacement | The `Reversal` row's reason and instant, and the lineage columns — never inferred |
 //! | Gross, deductions, net | The frozen `PayrollFigures` |
 //! | Provenance | `SaltVersion` and `PayslipTemplateVersion`, both frozen |
 //!
-//! **`Q-OPEN-7` (unverified, stated rather than settled):** whether
-//! Annexure 1 requires overtime's hour *category* to be named, not merely
-//! multiplied. This renderer assumes it does not settle that question by
-//! printing only a multiplier — every overtime line prints **both** the
-//! multiplier (`OvertimeMultiplier`, the classification) and the free-text
-//! label an Operator typed, so a named category is on the page whenever one
-//! was given, without this renderer inventing a category where none was.
+//! **`Q-OPEN-7` (live and unverified — an assumption, not a settled
+//! answer):** whether Annexure 1 requires overtime's hour *category* to be
+//! named, not merely multiplied. Rather than pick one reading, every
+//! overtime line prints **both** the multiplier (`OvertimeMultiplier`, the
+//! classification) and the free-text label an Operator typed, so a named
+//! category is on the page whenever one was given, and this renderer never
+//! invents one where none was.
 //!
 //! INV-001 bans `f32`/`f64` workspace-wide so money can never silently
 //! become inexact — but this module's own money is always `i64` cents,
@@ -57,7 +58,7 @@
 //! this file, which hides the exception rather than naming it once.
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use printpdf::{
     Color, FontId, Line, LinePoint, Mm, Op, ParsedFont, PdfDocument, PdfFontHandle, PdfPage,
     PdfSaveOptions, Point, Pt, Rgb, TextItem,
@@ -93,10 +94,15 @@ pub struct PayslipLine {
 /// What a reversed Payslip must say (CONTEXT.md's own `Reversal` entry):
 /// the reason, when it happened, and — once a Correction has taken its
 /// place — the replacement's own id.
+///
+/// `reversed_at` is the stored instant itself, printed with its time and an
+/// explicit `UTC`: Salt records no business time zone, so reducing it to a
+/// bare date would silently print the day before for a reversal made just
+/// after local midnight in Windhoek.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayslipReversedNotice {
     pub reason: String,
-    pub reversed_at: NaiveDate,
+    pub reversed_at: DateTime<Utc>,
     pub replacement_id: Option<String>,
 }
 
@@ -189,6 +195,15 @@ const LINE_HEIGHT_MM: f32 = 4.2;
 /// provenance note, a reversal reason continuation).
 const SMALL_LINE_HEIGHT_MM: f32 = 3.8;
 const ROW_LINE_HEIGHT_MM: f32 = 4.6;
+
+/// The cursor advance for one wrapped line of `size_pt` text.
+fn line_height_mm(size_pt: f32) -> f32 {
+    if size_pt <= SMALL_SIZE {
+        SMALL_LINE_HEIGHT_MM
+    } else {
+        LINE_HEIGHT_MM
+    }
+}
 /// Reserved on the right of a pay-line row for its money column, so a
 /// wrapped label can never grow into the figure it belongs beside.
 const AMOUNT_COLUMN_WIDTH_MM: f32 = 30.0;
@@ -320,11 +335,12 @@ impl<'a> Layout<'a> {
     }
 
     /// Greedy word-wrap: every returned line's rendered width is at most
-    /// `max_width_mm`, except a single word that alone exceeds it — printed
-    /// on its own line rather than split, since a payslip never hyphenates a
-    /// name or an address. Always returns at least one line (empty for
-    /// empty input), so a caller never has to special-case "nothing to
-    /// wrap".
+    /// `max_width_mm`. Words break at whitespace; a single word that alone
+    /// exceeds the budget (an unbroken reference, a pasted reason with no
+    /// spaces) is split between characters instead, because text running
+    /// off the page loses content, and a broken word does not. Always
+    /// returns at least one line (empty for empty input), so a caller never
+    /// has to special-case "nothing to wrap".
     fn wrap(&self, text: &str, size_pt: f32, max_width_mm: f32) -> Vec<String> {
         let mut lines = Vec::new();
         let mut current = String::new();
@@ -334,11 +350,27 @@ impl<'a> Layout<'a> {
             } else {
                 format!("{current} {word}")
             };
-            if current.is_empty() || self.text_width_mm(&candidate, size_pt) <= max_width_mm {
+            if self.text_width_mm(&candidate, size_pt) <= max_width_mm {
                 current = candidate;
-            } else {
-                lines.push(current);
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if self.text_width_mm(word, size_pt) <= max_width_mm {
                 current = word.to_string();
+                continue;
+            }
+            for ch in word.chars() {
+                let mut candidate = current.clone();
+                candidate.push(ch);
+                // A budget narrower than one glyph still makes progress:
+                // the glyph goes on a line of its own.
+                if current.is_empty() || self.text_width_mm(&candidate, size_pt) <= max_width_mm {
+                    current = candidate;
+                } else {
+                    lines.push(std::mem::replace(&mut current, ch.to_string()));
+                }
             }
         }
         if !current.is_empty() || lines.is_empty() {
@@ -353,11 +385,19 @@ impl<'a> Layout<'a> {
     /// flows onto a new page rather than clipping off the bottom of this
     /// one.
     fn text_wrapped(&mut self, x_mm: f32, max_width_mm: f32, size_pt: f32, text: &str) {
+        let line_height = line_height_mm(size_pt);
         for line in self.wrap(text, size_pt, max_width_mm) {
-            self.ensure_room(LINE_HEIGHT_MM);
+            self.ensure_room(line_height);
             self.text_at(x_mm, size_pt, &line);
-            self.advance(LINE_HEIGHT_MM);
+            self.advance(line_height);
         }
+    }
+
+    /// One full-width, wrapped, page-break-aware line of text at the left
+    /// margin. Every free-standing line on a Payslip goes through here, so
+    /// no line can leave the page, however long its frozen content is.
+    fn paragraph(&mut self, size_pt: f32, text: &str) {
+        self.text_wrapped(MARGIN_MM, CONTENT_RIGHT_MM - MARGIN_MM, size_pt, text);
     }
 
     fn rule(&mut self) {
@@ -431,6 +471,11 @@ pub(crate) fn format_date(date: NaiveDate) -> String {
     date.format("%d %b %Y").to_string()
 }
 
+/// `12 May 2026, 21:30 UTC` — an instant, with its zone named.
+fn format_instant(instant: DateTime<Utc>) -> String {
+    instant.format("%d %b %Y, %H:%M UTC").to_string()
+}
+
 /// One earning or deduction row: a label (word-wrapped so it can never grow
 /// into the detail or amount columns), an optional detail (overtime's hours
 /// and multiplier, printed only beside the label's first line), an optional
@@ -448,13 +493,16 @@ fn row(
     provenance: Option<&str>,
     amount_cents: i64,
 ) {
-    let reserved = COLUMN_GAP_MM
-        + AMOUNT_COLUMN_WIDTH_MM
-        + if detail.is_some() {
-            DETAIL_COLUMN_WIDTH_MM
-        } else {
-            0.0
-        };
+    // Each reserved column is at least its nominal width, and wider when
+    // the text it actually holds needs more: a figure or a detail that
+    // outgrows its column pushes the label's budget left, never over the
+    // label.
+    let amount = format_money(amount_cents);
+    let amount_column = AMOUNT_COLUMN_WIDTH_MM.max(layout.text_width_mm(&amount, BODY_SIZE));
+    let detail_column = detail.map_or(0.0, |detail| {
+        DETAIL_COLUMN_WIDTH_MM.max(layout.text_width_mm(detail, SMALL_SIZE) + COLUMN_GAP_MM)
+    });
+    let reserved = COLUMN_GAP_MM + amount_column + detail_column;
     let label_max_width = (CONTENT_RIGHT_MM - MARGIN_MM - reserved).max(MIN_LABEL_WIDTH_MM);
     let label_lines = layout.wrap(label, BODY_SIZE, label_max_width);
     let provenance_lines = provenance
@@ -471,12 +519,12 @@ fn row(
         if index == 0 {
             if let Some(detail) = detail {
                 layout.text_right_at(
-                    CONTENT_RIGHT_MM - AMOUNT_COLUMN_WIDTH_MM,
+                    CONTENT_RIGHT_MM - amount_column - COLUMN_GAP_MM,
                     SMALL_SIZE,
                     detail,
                 );
             }
-            layout.text_right_at(CONTENT_RIGHT_MM, BODY_SIZE, &format_money(amount_cents));
+            layout.text_right_at(CONTENT_RIGHT_MM, BODY_SIZE, &amount);
         }
         layout.advance(ROW_LINE_HEIGHT_MM);
     }
@@ -495,7 +543,9 @@ fn total_row(layout: &mut Layout, label: &str, amount_cents: i64) {
 }
 
 fn heading(layout: &mut Layout, text: &str) {
-    layout.ensure_room(9.0);
+    // The heading's own 9mm plus one row beneath it, so a heading is never
+    // left alone at the foot of a page with its first line on the next.
+    layout.ensure_room(9.0 + ROW_LINE_HEIGHT_MM + 1.5);
     layout.text_at(MARGIN_MM, HEADING_SIZE, text);
     layout.advance(5.5);
     layout.rule();
@@ -520,92 +570,60 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
     );
     layout.advance(9.0);
 
-    let content_width = CONTENT_RIGHT_MM - MARGIN_MM;
-
     if let Some(reversed) = &input.reversed {
-        layout.text_at(MARGIN_MM, BODY_SIZE, "THIS PAYROLL HAS BEEN REVERSED");
-        layout.advance(5.0);
-        layout.text_wrapped(
-            MARGIN_MM,
-            content_width,
+        layout.paragraph(BODY_SIZE, "REVERSED");
+        layout.advance(0.8);
+        layout.paragraph(
             SMALL_SIZE,
-            &format!("Reason: {}", reversed.reason),
+            &format!("Reversed on: {}", format_instant(reversed.reversed_at)),
         );
-        layout.text_at(
-            MARGIN_MM,
-            SMALL_SIZE,
-            &format!("Reversed on: {}", format_date(reversed.reversed_at)),
-        );
-        layout.advance(4.5);
-        if let Some(replacement_id) = &reversed.replacement_id {
-            layout.text_at(
-                MARGIN_MM,
+        layout.paragraph(SMALL_SIZE, &format!("Reason: {}", reversed.reason));
+        match &reversed.replacement_id {
+            Some(replacement_id) => layout.paragraph(
                 SMALL_SIZE,
                 &format!("Replaced by finalized payroll {replacement_id}"),
-            );
-            layout.advance(4.5);
+            ),
+            None => layout.paragraph(SMALL_SIZE, "No replacement has been finalized."),
         }
         layout.advance(2.0);
     }
     if let Some(replaces) = &input.replaces {
-        layout.text_wrapped(
-            MARGIN_MM,
-            content_width,
-            BODY_SIZE,
-            &format!("This is a Replacement for finalized payroll {replaces}"),
+        layout.paragraph(BODY_SIZE, "REPLACEMENT");
+        layout.advance(0.8);
+        layout.paragraph(
+            SMALL_SIZE,
+            &format!("This payslip replaces finalized payroll {replaces}"),
         );
-        layout.advance(2.8);
+        layout.advance(2.0);
     }
 
     heading(&mut layout, "Employer");
-    layout.text_wrapped(
-        MARGIN_MM,
-        content_width,
-        BODY_SIZE,
-        &input.employer_registered_name,
-    );
+    layout.paragraph(BODY_SIZE, &input.employer_registered_name);
     layout.advance(0.8);
     for line in &input.employer_address_lines {
-        layout.text_wrapped(MARGIN_MM, content_width, SMALL_SIZE, line);
+        layout.paragraph(SMALL_SIZE, line);
     }
     if let Some(tax_number) = &input.employer_income_tax_number {
-        layout.text_at(
-            MARGIN_MM,
-            SMALL_SIZE,
-            &format!("Income Tax No: {tax_number}"),
-        );
-        layout.advance(4.2);
+        layout.paragraph(SMALL_SIZE, &format!("Income Tax No: {tax_number}"));
     }
     if let Some(ssc_number) = &input.employer_social_security_number {
-        layout.text_at(
-            MARGIN_MM,
-            SMALL_SIZE,
-            &format!("Social Security No: {ssc_number}"),
-        );
-        layout.advance(4.2);
+        layout.paragraph(SMALL_SIZE, &format!("Social Security No: {ssc_number}"));
     }
     layout.advance(3.0);
 
     heading(&mut layout, "Employee");
-    layout.text_wrapped(
-        MARGIN_MM,
-        content_width,
-        BODY_SIZE,
-        &input.employee_full_name,
-    );
+    layout.paragraph(BODY_SIZE, &input.employee_full_name);
     layout.advance(0.8);
     if let Some(identity_number) = &input.employee_identity_number {
-        layout.text_at(MARGIN_MM, SMALL_SIZE, &format!("ID No: {identity_number}"));
-        layout.advance(4.2);
+        layout.paragraph(SMALL_SIZE, &format!("ID No: {identity_number}"));
     }
     for line in &input.employee_address_lines {
-        layout.text_wrapped(MARGIN_MM, content_width, SMALL_SIZE, line);
+        layout.paragraph(SMALL_SIZE, line);
     }
     layout.advance(3.0);
 
     heading(&mut layout, "Pay Period");
-    layout.text_at(
-        MARGIN_MM,
+    layout.paragraph(
         BODY_SIZE,
         &format!(
             "{} to {}",
@@ -613,12 +631,11 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
             format_date(input.period_end)
         ),
     );
-    layout.text_right_at(
-        CONTENT_RIGHT_MM,
+    layout.paragraph(
         BODY_SIZE,
         &format!("Pay date: {}", format_date(input.pay_date)),
     );
-    layout.advance(9.0);
+    layout.advance(4.8);
 
     heading(&mut layout, "Earnings");
     for line in &input.earnings {
@@ -652,57 +669,101 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
     );
     layout.advance(4.0);
 
+    // The rule and the Net Pay beneath it move to a new page together.
+    layout.ensure_room(3.5 + 7.0);
     layout.rule();
     layout.advance(3.5);
     total_row(&mut layout, "Net Pay", input.net_pay_cents);
     layout.advance(9.0);
 
-    layout.text_at(
-        MARGIN_MM,
+    layout.paragraph(
         SMALL_SIZE,
         &format!(
             "Salt version {}  ·  Payslip template {}",
             input.salt_version, input.payslip_template_version
         ),
     );
-    layout.advance(4.2);
-    layout.text_at(
-        MARGIN_MM,
+    layout.paragraph(
         SMALL_SIZE,
         "Rendered on demand from Salt's frozen payroll record. Not stored.",
     );
-
     let pages = layout.finish();
     doc.with_pages(pages)
         .save(&PdfSaveOptions::default(), &mut Vec::new())
 }
 
-/// Extracts every printed text run from a rendered PDF, in order — Deep
-/// Instructions' own "verify by extracting the rendered values and comparing
-/// them, never by hashing bytes", shared here so this module's own unit
-/// tests and `salt-server`'s HTTP integration tests
-/// (`tests/payslip.rs`) read one PDF the same way rather than each keeping
-/// its own copy of this parser (issue #82 review). `cfg`-gated exactly like
-/// `router.rs`'s own `test-support` feature: `test` for this crate's own
-/// unit tests, `feature = "test-support"` for another crate's integration
-/// test binary that depends on this one as a dev-dependency with that
-/// feature enabled.
+/// One placed text run: the page index it was drawn on, its `(x_mm, y_mm)`
+/// origin (as [`Layout::text_at`] placed it — bottom-left, PDF coordinates),
+/// the font size it was set in, and the text itself.
+///
+/// This is what lets a test check *placement* — that a wrapped label never
+/// overlaps the detail or amount beside it, that no line lands past the
+/// page's own margins — which a flat extracted string cannot show, since
+/// flattening every `ShowText` into one string cannot tell two overlapping
+/// lines from two lines stacked cleanly one above the other.
 #[cfg(any(test, feature = "test-support"))]
-pub fn rendered_text(bytes: &[u8]) -> String {
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPlacement {
+    pub page: usize,
+    pub x_mm: f32,
+    pub y_mm: f32,
+    pub size_pt: f32,
+    pub text: String,
+}
+
+/// Every printed text run of a rendered PDF, in order, read by parsing the
+/// PDF back — Deep Instructions' own "verify by extracting the rendered
+/// values and comparing them, never by hashing bytes". The one parser this
+/// crate's unit tests and its HTTP integration tests (`tests/payslip.rs`)
+/// share (issue #82 review). `cfg`-gated like `router.rs`'s own
+/// `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub fn text_placements(bytes: &[u8]) -> Vec<TextPlacement> {
     let mut warnings: Vec<PdfWarnMsg> = Vec::new();
     let doc = PdfDocument::parse(bytes, &PdfParseOptions::default(), &mut warnings)
         .expect("render_payslip must always produce a parseable PDF");
-    let mut text = String::new();
-    for page in &doc.pages {
-        for op in &page.ops {
-            if let Op::ShowText { items } = op {
+    doc.pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page_index, page)| placements_in_ops(page_index, &page.ops))
+        .collect()
+}
+
+/// Every printed text run of a rendered PDF, joined into one string with a
+/// space between runs — for asserting what a Payslip says, and for
+/// comparing two renders' content.
+#[cfg(any(test, feature = "test-support"))]
+pub fn rendered_text(bytes: &[u8]) -> String {
+    text_placements(bytes)
+        .into_iter()
+        .map(|placement| placement.text)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Pairs every `Op::ShowText` with the `Op::SetTextCursor` and `Op::SetFont`
+/// before it. Safe to rely on positionally because [`Layout::text_at`]
+/// emits exactly that triple for *every single placement* (its own doc
+/// comment explains why). Works on `Layout`'s own ops and on ops parsed
+/// back out of PDF bytes alike.
+#[cfg(any(test, feature = "test-support"))]
+fn placements_in_ops(page: usize, ops: &[Op]) -> Vec<TextPlacement> {
+    let mut placements = Vec::new();
+    let mut cursor: Option<(f32, f32)> = None;
+    let mut size_pt = 0.0;
+    for op in ops {
+        match op {
+            Op::SetFont { size, .. } => size_pt = size.0,
+            Op::SetTextCursor { pos } => cursor = Some((pos.x.0, pos.y.0)),
+            Op::ShowText { items } => {
+                let mut text = String::new();
                 for item in items {
                     match item {
                         TextItem::Text(s) => text.push_str(s),
                         // External fonts round-trip as glyph ids, each
                         // carrying the character it decodes to via the
-                        // embedded ToUnicode CMap — this is where that
-                        // text actually comes back out.
+                        // embedded ToUnicode CMap — this is where that text
+                        // actually comes back out.
                         TextItem::GlyphIds(codepoints) => {
                             for codepoint in codepoints {
                                 if let Some(cid) = &codepoint.cid {
@@ -713,79 +774,17 @@ pub fn rendered_text(bytes: &[u8]) -> String {
                         TextItem::Offset(_) => {}
                     }
                 }
-                text.push(' ');
-            }
-        }
-    }
-    text
-}
-
-/// One placed text run: the page index it was drawn on, its `(x_mm, y_mm)`
-/// origin (as [`Layout::text_at`] placed it — bottom-left, PDF coordinates)
-/// and the text itself.
-///
-/// Extracted the same way [`rendered_text`] is, by parsing the PDF back —
-/// never by inspecting `Layout`'s own state, which the renderer never
-/// exposes. This is what lets a test check *placement* — that a wrapped
-/// label's own text never overlaps the detail or amount beside it, that a
-/// wrapped line never lands past the page's own width — the thing
-/// `rendered_text`'s flat string alone cannot show, since flattening every
-/// `ShowText` into one string cannot tell two overlapping lines from two
-/// lines stacked cleanly one above the other.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextPlacement {
-    pub page: usize,
-    pub x_mm: f32,
-    pub y_mm: f32,
-    pub text: String,
-}
-
-/// Pairs every `Op::SetTextCursor` with the `Op::ShowText` that immediately
-/// follows it. Safe to rely on positionally because [`Layout::text_at`]
-/// closes and reopens the PDF text object around *every single placement*
-/// (its own doc comment explains why): each `ShowText` in the op stream is
-/// always preceded directly by exactly one `SetTextCursor` naming where it
-/// landed.
-#[cfg(any(test, feature = "test-support"))]
-pub fn text_placements(bytes: &[u8]) -> Vec<TextPlacement> {
-    let mut warnings: Vec<PdfWarnMsg> = Vec::new();
-    let doc = PdfDocument::parse(bytes, &PdfParseOptions::default(), &mut warnings)
-        .expect("render_payslip must always produce a parseable PDF");
-    let mut placements = Vec::new();
-    for (page_index, page) in doc.pages.iter().enumerate() {
-        let mut cursor: Option<(f32, f32)> = None;
-        for op in &page.ops {
-            match op {
-                Op::SetTextCursor { pos } => {
-                    cursor = Some((pos.x.0, pos.y.0));
+                if let Some((x_pt, y_pt)) = cursor {
+                    placements.push(TextPlacement {
+                        page,
+                        x_mm: x_pt / 72.0 * 25.4,
+                        y_mm: y_pt / 72.0 * 25.4,
+                        size_pt,
+                        text,
+                    });
                 }
-                Op::ShowText { items } => {
-                    let mut text = String::new();
-                    for item in items {
-                        match item {
-                            TextItem::Text(s) => text.push_str(s),
-                            TextItem::GlyphIds(codepoints) => {
-                                for codepoint in codepoints {
-                                    if let Some(cid) = &codepoint.cid {
-                                        text.push_str(cid);
-                                    }
-                                }
-                            }
-                            TextItem::Offset(_) => {}
-                        }
-                    }
-                    if let Some((x_pt, y_pt)) = cursor {
-                        placements.push(TextPlacement {
-                            page: page_index,
-                            x_mm: x_pt / 72.0 * 25.4,
-                            y_mm: y_pt / 72.0 * 25.4,
-                            text,
-                        });
-                    }
-                }
-                _ => {}
             }
+            _ => {}
         }
     }
     placements
@@ -829,39 +828,16 @@ mod tests {
         }
     }
 
-    /// Extracts every `Op::ShowText` string on every page, in order — the
-    /// mechanism Deep Instructions demand: "verify by extracting the
-    /// rendered values and comparing them, never by hashing bytes".
-    fn rendered_text(bytes: &[u8]) -> String {
-        let mut warnings: Vec<PdfWarnMsg> = Vec::new();
-        let doc = PdfDocument::parse(bytes, &PdfParseOptions::default(), &mut warnings)
-            .expect("render_payslip must always produce a parseable PDF");
-        let mut text = String::new();
-        for page in &doc.pages {
-            for op in &page.ops {
-                if let Op::ShowText { items } = op {
-                    for item in items {
-                        match item {
-                            TextItem::Text(s) => text.push_str(s),
-                            // External fonts round-trip as glyph ids, each
-                            // carrying the character it decodes to via the
-                            // embedded ToUnicode CMap — this is where that
-                            // text actually comes back out.
-                            TextItem::GlyphIds(codepoints) => {
-                                for codepoint in codepoints {
-                                    if let Some(cid) = &codepoint.cid {
-                                        text.push_str(cid);
-                                    }
-                                }
-                            }
-                            TextItem::Offset(_) => {}
-                        }
-                    }
-                    text.push(' ');
-                }
-            }
-        }
-        text
+    fn a_layout(font: &ParsedFont) -> Layout<'_> {
+        let mut doc = PdfDocument::new("test");
+        let font_id = doc.add_font(font);
+        Layout::new(font, font_id)
+    }
+
+    fn dejavu() -> ParsedFont {
+        let mut warnings = Vec::new();
+        ParsedFont::from_bytes(DEJAVU_SANS, 0, &mut warnings)
+            .expect("DejaVuSans.ttf is a well-formed embedded font")
     }
 
     #[test]
@@ -882,23 +858,42 @@ mod tests {
         let bytes = render_payslip(&minimal_input()).unwrap();
 
         assert!(bytes.starts_with(b"%PDF"));
-        assert!(!bytes.is_empty());
+        assert!(!text_placements(&bytes).is_empty());
     }
 
     #[test]
     fn every_frozen_particular_and_figure_is_printed() {
-        let bytes = render_payslip(&minimal_input()).unwrap();
+        let mut input = minimal_input();
+        input.employer_social_security_number = Some("SSC-998877".to_string());
+        let bytes = render_payslip(&input).unwrap();
         let text = rendered_text(&bytes);
 
-        assert!(text.contains("Acme Corp (Pty) Ltd"), "{text}");
-        assert!(text.contains("Ada Lovelace"), "{text}");
-        assert!(text.contains("80012345678"), "{text}");
-        assert!(text.contains("12345678"), "{text}");
-        assert!(text.contains("N$ 15,000.00"), "{text}");
-        assert!(text.contains("N$ 1,200.00"), "{text}");
-        assert!(text.contains("N$ 13,755.00"), "{text}");
-        assert!(text.contains("0.1.0+abcdef1"), "{text}");
-        assert!(text.contains(STANDARD_V1), "{text}");
+        for expected in [
+            "Acme Corp (Pty) Ltd",
+            "1 Independence Ave",
+            "Windhoek",
+            "Income Tax No: 12345678",
+            "Social Security No: SSC-998877",
+            "Ada Lovelace",
+            "ID No: 80012345678",
+            "2 Fidel Castro St, Swakopmund",
+            "01 Mar 2026 to 31 Mar 2026",
+            "Pay date: 05 Apr 2026",
+            "Basic Pay",
+            "N$ 15,000.00",
+            "PAYE",
+            "N$ 1,200.00",
+            "Social Security",
+            "N$ 45.00",
+            "N$ 1,245.00",
+            "N$ 13,755.00",
+            "0.1.0+abcdef1",
+            STANDARD_V1,
+        ] {
+            assert!(text.contains(expected), "{expected:?} missing from {text}");
+        }
+        assert!(!text.contains("REVERSED"), "{text}");
+        assert!(!text.contains("REPLACEMENT"), "{text}");
     }
 
     /// Q-OPEN-7 (Deep Instructions): the multiplier and the free-text label
@@ -922,11 +917,11 @@ mod tests {
     }
 
     #[test]
-    fn a_reversed_payroll_prints_its_reason_and_replacement() {
+    fn a_reversed_payroll_prints_its_date_reason_and_replacement() {
         let mut input = minimal_input();
         input.reversed = Some(PayslipReversedNotice {
             reason: "March salary was wrong".to_string(),
-            reversed_at: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
+            reversed_at: "2026-05-12T22:30:00Z".parse().unwrap(),
             replacement_id: Some("22222222-2222-2222-2222-222222222222".to_string()),
         });
 
@@ -934,48 +929,77 @@ mod tests {
         let text = rendered_text(&bytes);
 
         assert!(text.contains("REVERSED"), "{text}");
-        assert!(text.contains("March salary was wrong"), "{text}");
-        assert!(text.contains("12 May 2026"), "{text}");
+        assert!(text.contains("Reason: March salary was wrong"), "{text}");
+        // The instant is printed with its zone, never truncated to a date
+        // that could be the wrong local day.
         assert!(
-            text.contains("22222222-2222-2222-2222-222222222222"),
+            text.contains("Reversed on: 12 May 2026, 22:30 UTC"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Replaced by finalized payroll 22222222-2222-2222-2222-222222222222"),
             "{text}"
         );
     }
 
+    /// A Reversal is complete on its own (CONTEXT.md's `Replacement`
+    /// entry): the payslip says plainly that nothing replaced it yet,
+    /// rather than leaving the reader to guess.
     #[test]
-    fn a_replacement_payroll_names_what_it_replaces() {
+    fn a_reversed_payroll_with_no_replacement_says_so() {
+        let mut input = minimal_input();
+        input.reversed = Some(PayslipReversedNotice {
+            reason: "Paid in error".to_string(),
+            reversed_at: "2026-05-12T08:00:00Z".parse().unwrap(),
+            replacement_id: None,
+        });
+
+        let text = rendered_text(&render_payslip(&input).unwrap());
+
+        assert!(text.contains("REVERSED"), "{text}");
+        assert!(
+            text.contains("No replacement has been finalized."),
+            "{text}"
+        );
+        assert!(!text.contains("Replaced by"), "{text}");
+    }
+
+    #[test]
+    fn a_replacement_payroll_is_marked_and_names_what_it_replaces() {
         let mut input = minimal_input();
         input.replaces = Some("33333333-3333-3333-3333-333333333333".to_string());
 
         let bytes = render_payslip(&input).unwrap();
         let text = rendered_text(&bytes);
 
+        assert!(text.contains("REPLACEMENT"), "{text}");
         assert!(
-            text.contains("33333333-3333-3333-3333-333333333333"),
+            text.contains(
+                "This payslip replaces finalized payroll 33333333-3333-3333-3333-333333333333"
+            ),
             "{text}"
         );
+        assert!(!text.contains("REVERSED"), "{text}");
     }
 
     /// The stability contract itself (ADR-0021): re-rendering the same
-    /// frozen input twice must print the same content. Compared as
-    /// extracted text, never as bytes (Deep Instructions).
+    /// frozen input twice must print the same content in the same places.
+    /// Compared as extracted placements, never as bytes (Deep Instructions).
     #[test]
     fn rendering_the_same_input_twice_prints_identical_content() {
         let input = minimal_input();
 
-        let first = rendered_text(&render_payslip(&input).unwrap());
-        let second = rendered_text(&render_payslip(&input).unwrap());
+        let first = text_placements(&render_payslip(&input).unwrap());
+        let second = text_placements(&render_payslip(&input).unwrap());
 
         assert_eq!(first, second);
     }
 
-    /// A frozen `EmployerParticulars` change and a frozen `PersonParticulars`
-    /// change are exactly what ADR-0021 says a re-render must survive
-    /// unchanged for any *other* record — proven properly at the
-    /// `payroll_app::get_payslip_data` level, since that is where "frozen"
-    /// is enforced. Here, the narrower claim: two different frozen inputs
-    /// print two different documents, so this renderer is not silently
-    /// ignoring the particulars it was handed.
+    /// The narrower renderer-level claim behind content stability: two
+    /// different frozen inputs print two different documents, so this
+    /// renderer is not silently ignoring the particulars it was handed. The
+    /// "a later correction never reaches an issued payslip" half is proven
+    /// end to end in `tests/payslip.rs`, where "frozen" is enforced.
     #[test]
     fn a_different_frozen_input_prints_different_content() {
         let mut changed = minimal_input();
@@ -994,30 +1018,14 @@ mod tests {
     fn format_money_groups_thousands_and_keeps_two_decimal_places() {
         assert_eq!(format_money(0), "N$ 0.00");
         assert_eq!(format_money(1), "N$ 0.01");
+        assert_eq!(format_money(-1), "N$ -0.01");
         assert_eq!(format_money(150_000), "N$ 1,500.00");
         assert_eq!(format_money(123_456_789), "N$ 1,234,567.89");
     }
 
-    fn a_layout(font: &ParsedFont) -> Layout<'_> {
-        let mut doc = PdfDocument::new("test");
-        let font_id = doc.add_font(font);
-        Layout::new(font, font_id)
-    }
-
-    fn dejavu() -> ParsedFont {
-        let mut warnings = Vec::new();
-        ParsedFont::from_bytes(DEJAVU_SANS, 0, &mut warnings)
-            .expect("DejaVuSans.ttf is a well-formed embedded font")
-    }
-
     /// The width-aware layout's own load-bearing property (issue #82
     /// review): every line [`Layout::wrap`] returns fits the budget it was
-    /// given — checked against `text_width_mm`, the same glyph-metric
-    /// calculation `Layout::text_at`'s callers already trust for right
-    /// alignment, so this is the layout-calculation-level test the review
-    /// asks for, not a guess at how many characters fit. Extracted text
-    /// alone (`rendered_text`) cannot show this: two placed lines of
-    /// different widths look identical once flattened into one string.
+    /// given, checked against the same glyph metrics right alignment uses.
     #[test]
     fn wrap_never_returns_a_line_wider_than_the_budget_it_was_given() {
         let font = dejavu();
@@ -1041,27 +1049,41 @@ mod tests {
         assert_eq!(lines.join(" "), text);
     }
 
-    /// A single word that alone exceeds the budget is printed whole rather
-    /// than split mid-word — a payslip never hyphenates a name.
+    /// A single word wider than the budget is broken between characters
+    /// rather than left to run off the page: every character survives, in
+    /// order, and every line fits.
     #[test]
-    fn wrap_never_splits_a_single_word_even_when_it_exceeds_the_budget() {
+    fn wrap_breaks_a_word_that_alone_exceeds_the_budget() {
         let font = dejavu();
         let layout = a_layout(&font);
 
-        let text = "Supercalifragilisticexpialidocious";
-        let lines = layout.wrap(text, BODY_SIZE, 5.0);
+        let word = "Supercalifragilisticexpialidocious".repeat(4);
+        let max_width_mm = 40.0;
+        let lines = layout.wrap(&format!("Before {word} after"), BODY_SIZE, max_width_mm);
 
-        assert_eq!(lines, vec![text.to_string()]);
+        assert!(lines.len() > 2, "{lines:?}");
+        for line in &lines {
+            assert!(
+                layout.text_width_mm(line, BODY_SIZE) <= max_width_mm + 0.01,
+                "{line:?} is wider than the {max_width_mm}mm budget"
+            );
+        }
+        assert_eq!(lines.concat(), format!("Before{word}after"));
+        assert_eq!(lines.first().map(String::as_str), Some("Before"));
+    }
+
+    #[test]
+    fn wrap_of_empty_text_is_one_empty_line() {
+        let font = dejavu();
+        let layout = a_layout(&font);
+
+        assert_eq!(layout.wrap("", BODY_SIZE, 50.0), vec![String::new()]);
     }
 
     /// The property [`row`] exists to guarantee: a label long enough to wrap
     /// still never lets its detail or its amount land on top of it, or on
     /// top of each other — checked against the actual `(x_mm, y_mm)` each
-    /// piece of text was placed at, paired straight off `Layout`'s own op
-    /// stream (`Layout::text_at`'s doc comment is why a `SetTextCursor`
-    /// always immediately precedes the `ShowText` it positions). This is
-    /// exactly the placement-level test Deep Instructions ask for: flat
-    /// extracted text cannot tell "beside" from "on top of".
+    /// piece of text was placed at.
     #[test]
     fn a_row_with_a_wrapped_label_never_places_its_amount_over_its_label() {
         let font = dejavu();
@@ -1075,68 +1097,45 @@ mod tests {
             124_615,
         );
 
-        let mut placements: Vec<(f32, f32, String)> = Vec::new();
-        let mut cursor: Option<(f32, f32)> = None;
-        for op in &layout.ops {
-            match op {
-                Op::SetTextCursor { pos } => cursor = Some((pos.x.0, pos.y.0)),
-                Op::ShowText { items } => {
-                    let mut text = String::new();
-                    for item in items {
-                        if let TextItem::Text(s) = item {
-                            text.push_str(s);
-                        }
-                    }
-                    if let Some((x_pt, y_pt)) = cursor {
-                        placements.push((x_pt / 72.0 * 25.4, y_pt / 72.0 * 25.4, text));
-                    }
-                }
-                _ => {}
-            }
-        }
+        let placements = placements_in_ops(0, &layout.ops);
 
-        // The label wrapped: at least two lines share the row's own left
-        // margin, at two different heights.
-        let label_lines: Vec<&(f32, f32, String)> = placements
+        // The label wrapped: at least two body-sized lines share the row's
+        // own left margin, at two different heights.
+        let label_lines: Vec<&TextPlacement> = placements
             .iter()
-            .filter(|(x, _, _)| (*x - MARGIN_MM).abs() < 0.01)
+            .filter(|p| (p.x_mm - MARGIN_MM).abs() < 0.01 && p.size_pt == BODY_SIZE)
             .collect();
         assert!(label_lines.len() >= 2, "{placements:?}");
 
-        let (label_x, label_y, label_text) = label_lines[0];
-        let label_right_edge = label_x + layout.text_width_mm(label_text, BODY_SIZE);
+        let label = label_lines[0];
+        let label_right_edge = label.x_mm + layout.text_width_mm(&label.text, BODY_SIZE);
 
-        // The detail and the amount both sit on the label's first line —
-        // never on a wrapped continuation line — and neither starts before
-        // the label (or, for the amount, the detail) it sits beside ends.
-        let same_line: Vec<&(f32, f32, String)> = placements
+        let same_line: Vec<&TextPlacement> = placements
             .iter()
-            .filter(|(_, y, _)| (*y - label_y).abs() < 0.01)
+            .filter(|p| (p.y_mm - label.y_mm).abs() < 0.01)
             .collect();
-        let (detail_x, _, detail_text) = same_line
+        let detail = same_line
             .iter()
-            .find(|(_, _, text)| text.contains("hrs @"))
+            .find(|p| p.text.contains("hrs @"))
             .expect("the detail is drawn on the label's first line");
-        let (amount_x, _, _) = same_line
+        let amount = same_line
             .iter()
-            .find(|(_, _, text)| text.contains("N$"))
+            .find(|p| p.text.contains("N$"))
             .expect("the amount is drawn on the label's first line");
 
         assert!(
-            *detail_x >= label_right_edge - 0.01,
-            "detail at {detail_x} overlaps the label ending at {label_right_edge}: {placements:?}"
+            detail.x_mm >= label_right_edge,
+            "detail overlaps the label ending at {label_right_edge}: {placements:?}"
         );
-        let detail_right_edge = detail_x + layout.text_width_mm(detail_text, SMALL_SIZE);
+        let detail_right_edge = detail.x_mm + layout.text_width_mm(&detail.text, SMALL_SIZE);
         assert!(
-            *amount_x >= detail_right_edge - 0.01,
-            "amount at {amount_x} overlaps the detail ending at {detail_right_edge}: {placements:?}"
+            amount.x_mm >= detail_right_edge,
+            "amount overlaps the detail ending at {detail_right_edge}: {placements:?}"
         );
     }
 
     /// A pay line's frozen provenance (issue #82 review) prints beneath its
-    /// label — `to_render_input`'s own job is building this sentence;
-    /// `render_payslip`'s job, proven here, is only ever to print it
-    /// verbatim.
+    /// label, verbatim.
     #[test]
     fn a_pay_line_with_provenance_prints_it_beneath_the_line() {
         let mut input = minimal_input();
@@ -1147,42 +1146,97 @@ mod tests {
             amount_cents: 50_000,
         });
 
-        let bytes = render_payslip(&input).unwrap();
-        let text = rendered_text(&bytes);
+        let placements = text_placements(&render_payslip(&input).unwrap());
 
-        assert!(text.contains("Standby allowance"), "{text}");
-        assert!(text.contains("Standing since 01 Mar 2026"), "{text}");
+        let label = placements
+            .iter()
+            .find(|p| p.text == "Standby allowance")
+            .expect("the label is printed");
+        let provenance = placements
+            .iter()
+            .find(|p| p.text == "Standing since 01 Mar 2026")
+            .expect("the provenance is printed");
+        assert_eq!(provenance.page, label.page);
+        assert!(provenance.y_mm < label.y_mm, "{placements:?}");
     }
 
-    /// A long employer registered name wraps onto more than one line rather
-    /// than running past the page's own right margin — proven against real
-    /// rendered PDF bytes, through the same `text_placements` this crate's
-    /// own HTTP integration tests use.
+    /// Every frozen string a Payslip prints at its most extreme at once:
+    /// long unbroken words, long names and addresses, a long reversal
+    /// reason, very large figures and enough pay lines to need a second
+    /// page. Checked against the real rendered PDF: no text run starts left
+    /// of the margin, ends past the right margin, or sits below the bottom
+    /// margin, and no two runs on the same baseline of the same page
+    /// overlap. This is the placement-level test extracted text alone
+    /// cannot be.
     #[test]
-    fn a_long_employer_name_wraps_instead_of_overflowing_the_page() {
+    fn nothing_on_an_extreme_payslip_leaves_the_page_or_overlaps() {
+        let long_word = "Unbrokenreferencewithoutanyspaces".repeat(5);
         let mut input = minimal_input();
         input.employer_registered_name =
-            "Extraordinarily Long Registered Employer Trading Name (Proprietary) Limited \
-             Incorporated In The Republic"
-                .to_string();
-
-        let bytes = render_payslip(&input).unwrap();
-        let placements = text_placements(&bytes);
-
-        let name_lines: Vec<&TextPlacement> = placements
-            .iter()
-            .filter(|p| p.text.contains("Extraordinarily") || p.text.contains("Republic"))
+            format!("Extraordinarily Long Registered Employer Trading Name {long_word}");
+        input.employer_address_lines = vec![format!("Plot {long_word}"); 3];
+        input.employee_full_name = format!("Ada {long_word} Lovelace");
+        input.employee_address_lines = vec![format!("Erf {long_word}"); 3];
+        input.reversed = Some(PayslipReversedNotice {
+            reason: format!("A long reason {long_word} and then some more words to wrap"),
+            reversed_at: "2026-05-12T08:00:00Z".parse().unwrap(),
+            replacement_id: Some("22222222-2222-2222-2222-222222222222".to_string()),
+        });
+        input.replaces = Some("33333333-3333-3333-3333-333333333333".to_string());
+        input.earnings = (0..40)
+            .map(|index| PayslipLine {
+                label: format!(
+                    "Allowance {index} with a label that is long enough to wrap {long_word}"
+                ),
+                detail: Some(format!("{index}.00 hrs @ 1.5x")),
+                provenance: Some(format!(
+                    "Standing since 01 Mar 2026 — changed for this run: {long_word}"
+                )),
+                amount_cents: 99_999_999_999,
+            })
             .collect();
-        assert!(name_lines.len() >= 2, "{placements:?}");
+        input.gross_pay_cents = 9_999_999_999_999;
+        input.net_pay_cents = 9_999_999_999_999;
 
+        let placements = text_placements(&render_payslip(&input).unwrap());
         let font = dejavu();
         let layout = a_layout(&font);
-        let content_width = CONTENT_RIGHT_MM - MARGIN_MM;
-        for placement in &name_lines {
+
+        assert!(
+            placements.iter().any(|p| p.page > 0),
+            "the fixture must be long enough to need a second page"
+        );
+        let mut runs = Vec::new();
+        for placement in &placements {
+            let left = placement.x_mm;
+            let right = left + layout.text_width_mm(&placement.text, placement.size_pt);
             assert!(
-                layout.text_width_mm(&placement.text, BODY_SIZE) <= content_width + 0.01,
-                "{placement:?} is wider than the {content_width}mm page content width"
+                left >= MARGIN_MM - 0.01,
+                "{placement:?} starts left of the margin"
             );
+            assert!(
+                right <= CONTENT_RIGHT_MM + 0.01,
+                "{placement:?} ends at {right}mm, past the right margin"
+            );
+            assert!(
+                placement.y_mm >= MARGIN_MM - 0.01,
+                "{placement:?} sits below the bottom margin"
+            );
+            runs.push((placement, left, right));
         }
+        for (index, (a, a_left, a_right)) in runs.iter().enumerate() {
+            for (b, b_left, b_right) in &runs[index + 1..] {
+                if a.page == b.page && (a.y_mm - b.y_mm).abs() < 0.01 {
+                    assert!(
+                        a_right <= b_left || b_right <= a_left,
+                        "{a:?} overlaps {b:?}"
+                    );
+                }
+            }
+        }
+
+        // Nothing was lost to make it fit: every allowance amount printed.
+        let text = rendered_text(&render_payslip(&input).unwrap());
+        assert_eq!(text.matches("N$ 999,999,999.99").count(), 40, "{text}");
     }
 }

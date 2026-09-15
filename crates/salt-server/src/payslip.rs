@@ -22,6 +22,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use payroll::{
     Deduction, Earning, EarningInstruction, EmployerId, StatutoryDeduction, VoluntaryDeduction,
+    VoluntaryDeductionInstruction,
 };
 use payroll_app::{
     FinalizedEmployerParticulars, FinalizedPersonParticulars, FrozenPayLine, PayLineInstruction,
@@ -104,9 +105,11 @@ fn to_render_input(data: PayslipData) -> PayslipInput {
         .earning_lines
         .iter()
         .map(|earning| {
-            let note = take_matching_provenance(&mut provenance, |instruction| {
-                earning_matches_instruction(earning, instruction)
-            })
+            let note = take_matching_provenance(
+                &mut provenance,
+                |instruction| earning_matches_exactly(earning, instruction),
+                |instruction| earning_matches_kind_and_label(earning, instruction),
+            )
             .map(|line| provenance_note(&line));
             earning_line(earning, note)
         })
@@ -115,9 +118,11 @@ fn to_render_input(data: PayslipData) -> PayslipInput {
         .deductions
         .iter()
         .map(|deduction| {
-            let note = take_matching_provenance(&mut provenance, |instruction| {
-                deduction_matches_instruction(deduction, instruction)
-            })
+            let note = take_matching_provenance(
+                &mut provenance,
+                |instruction| deduction_matches_exactly(deduction, instruction),
+                |instruction| deduction_matches_kind(deduction, instruction),
+            )
             .map(|line| provenance_note(&line));
             deduction_line(deduction, note)
         })
@@ -145,65 +150,103 @@ fn to_render_input(data: PayslipData) -> PayslipInput {
         replaces: data.replaces.map(|id| id.to_string()),
         reversed: data.reversal.map(|reversal| PayslipReversedNotice {
             reason: reversal.reason,
-            reversed_at: reversal.reversed_at.date_naive(),
+            reversed_at: reversal.reversed_at,
             replacement_id: reversal.replacement_id.map(|id| id.to_string()),
         }),
     }
 }
 
-/// Finds the first still-unclaimed frozen provenance entry `matches`
-/// accepts, and removes and returns it — "removes" so the same frozen line
-/// can never be claimed twice by two printed lines that both happen to
-/// match it (two allowances sharing a label, say).
+/// Finds a still-unclaimed frozen provenance entry for one printed line,
+/// removes it and returns it. "Removes" so the same frozen line can never be
+/// claimed twice by two printed lines that both match it.
+///
+/// Two passes: `exact` first (kind, label *and* the typed figure — amount,
+/// or overtime's hours and multiplier), then `loose` (kind and label only).
+/// The exact pass is what keeps two same-labelled lines from different
+/// sources — a standing "Travel" and a one-off "Travel" — each paired with
+/// its own source. The loose pass exists only so a line whose calculated
+/// figure legitimately differs from its instruction still carries its
+/// provenance rather than silently losing it.
 fn take_matching_provenance(
     lines: &mut Vec<FrozenPayLine>,
-    matches: impl Fn(&PayLineInstruction) -> bool,
+    exact: impl Fn(&PayLineInstruction) -> bool,
+    loose: impl Fn(&PayLineInstruction) -> bool,
 ) -> Option<FrozenPayLine> {
-    let index = lines.iter().position(|line| matches(&line.pay_line))?;
+    let index = lines
+        .iter()
+        .position(|line| exact(&line.pay_line))
+        .or_else(|| lines.iter().position(|line| loose(&line.pay_line)))?;
     Some(lines.remove(index))
 }
 
 /// Whether `instruction` is the frozen pay-line instruction that produced
-/// `earning`. `BasicPay` never matches anything: it is derived from the
-/// Employment's `CompensationTerms`, never itself a `payroll_run_pay_line`
-/// row, so it carries no provenance of its own to find.
-fn earning_matches_instruction(earning: &Earning, instruction: &PayLineInstruction) -> bool {
+/// `earning`, figure and all. `BasicPay` never matches anything: it is
+/// derived from the Employment's `CompensationTerms`, never itself a
+/// `payroll_run_pay_line` row, so it carries no provenance of its own.
+fn earning_matches_exactly(earning: &Earning, instruction: &PayLineInstruction) -> bool {
     let PayLineInstruction::Earning(instruction) = instruction else {
         return false;
     };
     match (earning, instruction) {
         (
-            Earning::TaxableAllowance { label, .. },
+            Earning::TaxableAllowance { amount, label },
             EarningInstruction::TaxableAllowance {
+                amount: instruction_amount,
                 label: instruction_label,
-                ..
             },
-        ) => label == instruction_label,
+        ) => label == instruction_label && amount == instruction_amount,
         (
-            Earning::Overtime { label, .. },
+            Earning::Overtime { trace, label, .. },
             EarningInstruction::Overtime {
+                hours,
+                multiplier,
                 label: instruction_label,
-                ..
             },
-        ) => label == instruction_label,
+        ) => label == instruction_label && trace.hours == *hours && trace.multiplier == *multiplier,
         _ => false,
     }
 }
 
-/// As [`earning_matches_instruction`], for a `Deduction`. Statutory
-/// deductions (PAYE, social security) are computed, never typed, so neither
-/// carries a frozen pay-line entry either — only a voluntary deduction can
-/// match. `MedicalAidPremium` is the one voluntary kind that exists today
-/// (`VoluntaryDeductionInstruction`'s own exhaustive comment) and carries no
-/// label to disambiguate by, so any one voluntary-deduction pay line matches
-/// any one `MedicalAidPremium` line — exactly as precise as the frozen data
-/// itself is.
-fn deduction_matches_instruction(deduction: &Deduction, instruction: &PayLineInstruction) -> bool {
-    matches!(instruction, PayLineInstruction::Deduction(_))
-        && matches!(
-            deduction,
-            Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium { .. })
+/// As [`earning_matches_exactly`], by kind and label alone.
+fn earning_matches_kind_and_label(earning: &Earning, instruction: &PayLineInstruction) -> bool {
+    let PayLineInstruction::Earning(instruction) = instruction else {
+        return false;
+    };
+    match (earning, instruction) {
+        (Earning::TaxableAllowance { label, .. }, EarningInstruction::TaxableAllowance { .. })
+        | (Earning::Overtime { label, .. }, EarningInstruction::Overtime { .. }) => {
+            label.as_ref() == instruction.label()
+        }
+        _ => false,
+    }
+}
+
+/// As [`earning_matches_exactly`], for a `Deduction`. Statutory deductions
+/// (PAYE, social security) are computed, never typed, so neither carries a
+/// frozen pay-line entry — only a voluntary deduction can match.
+/// `MedicalAidPremium` is the one voluntary kind today and carries no label,
+/// so its amount is the only thing to pair by.
+fn deduction_matches_exactly(deduction: &Deduction, instruction: &PayLineInstruction) -> bool {
+    match (deduction, instruction) {
+        (
+            Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium { amount, .. }),
+            PayLineInstruction::Deduction(VoluntaryDeductionInstruction::MedicalAidPremium(
+                instruction_amount,
+            )),
+        ) => amount == instruction_amount,
+        _ => false,
+    }
+}
+
+/// As [`deduction_matches_exactly`], by kind alone.
+fn deduction_matches_kind(deduction: &Deduction, instruction: &PayLineInstruction) -> bool {
+    matches!(
+        (deduction, instruction),
+        (
+            Deduction::Voluntary(VoluntaryDeduction::MedicalAidPremium { .. }),
+            PayLineInstruction::Deduction(VoluntaryDeductionInstruction::MedicalAidPremium(_)),
         )
+    )
 }
 
 /// One frozen pay line's provenance as a printed sentence — the same
@@ -464,6 +507,104 @@ mod tests {
 
         assert_eq!(line.label, "Overtime");
         assert_eq!(line.detail.as_deref(), Some("12.00 hrs @ 2x"));
+    }
+
+    fn a_frozen_allowance(
+        label: &str,
+        amount_cents: i64,
+        source: PayLineSource,
+        override_reason: Option<&str>,
+    ) -> FrozenPayLine {
+        FrozenPayLine {
+            pay_line: PayLineInstruction::Earning(EarningInstruction::TaxableAllowance {
+                amount: money(amount_cents),
+                label: Some(EarningLabel::new(label).unwrap()),
+            }),
+            source,
+            standing_pay_item_id: None,
+            standing_effective_from: (source == PayLineSource::Standing)
+                .then(|| chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()),
+            standing_pay_line: None,
+            override_reason: override_reason.map(str::to_string),
+            removed_reason: None,
+        }
+    }
+
+    fn an_allowance(label: &str, amount_cents: i64) -> Earning {
+        Earning::TaxableAllowance {
+            amount: money(amount_cents),
+            label: Some(EarningLabel::new(label).unwrap()),
+        }
+    }
+
+    fn note_for(earning: &Earning, provenance: &mut Vec<FrozenPayLine>) -> Option<String> {
+        take_matching_provenance(
+            provenance,
+            |instruction| earning_matches_exactly(earning, instruction),
+            |instruction| earning_matches_kind_and_label(earning, instruction),
+        )
+        .map(|line| provenance_note(&line))
+    }
+
+    /// Two allowances sharing a label but not a source each print their own
+    /// frozen source, whatever order the calculation lists them in — the
+    /// figure pairs them, never the order alone.
+    #[test]
+    fn same_labelled_lines_from_different_sources_each_print_their_own_source() {
+        let mut provenance = vec![
+            a_frozen_allowance("Travel", 10_000, PayLineSource::Standing, None),
+            a_frozen_allowance("Travel", 5_000, PayLineSource::OneOff, None),
+        ];
+
+        let one_off = note_for(&an_allowance("Travel", 5_000), &mut provenance);
+        let standing = note_for(&an_allowance("Travel", 10_000), &mut provenance);
+
+        assert_eq!(one_off.as_deref(), Some("Typed on this run"));
+        assert_eq!(standing.as_deref(), Some("Standing since 01 Mar 2026"));
+        assert!(provenance.is_empty());
+    }
+
+    /// No frozen line is ever claimed twice, and a line with nothing left to
+    /// claim prints no provenance rather than borrowing another line's.
+    #[test]
+    fn a_frozen_line_is_claimed_at_most_once() {
+        let mut provenance = vec![a_frozen_allowance(
+            "Travel",
+            10_000,
+            PayLineSource::Standing,
+            Some("March only"),
+        )];
+
+        let first = note_for(&an_allowance("Travel", 10_000), &mut provenance);
+        let second = note_for(&an_allowance("Travel", 10_000), &mut provenance);
+
+        assert_eq!(
+            first.as_deref(),
+            Some("Standing since 01 Mar 2026 — changed for this run: March only")
+        );
+        assert_eq!(second, None);
+    }
+
+    /// A frozen line whose figure differs from the printed one still pairs
+    /// by kind and label, so provenance is never silently dropped — and a
+    /// differently labelled line never pairs at all.
+    #[test]
+    fn a_line_pairs_by_label_when_no_figure_matches_but_never_across_labels() {
+        let mut provenance = vec![a_frozen_allowance(
+            "Travel",
+            10_000,
+            PayLineSource::FromReversedSnapshot,
+            None,
+        )];
+
+        assert_eq!(
+            note_for(&an_allowance("Housing", 10_000), &mut provenance),
+            None
+        );
+        assert_eq!(
+            note_for(&an_allowance("Travel", 9_000), &mut provenance).as_deref(),
+            Some("Copied from reversed payroll")
+        );
     }
 
     // `to_render_input`'s handling of `id`, `replaces` and `reversal` is

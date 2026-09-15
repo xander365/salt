@@ -16,7 +16,7 @@ use payroll_app::{
     DatabaseConfig, EmployerParticularsFields, EmploymentPerson, MembershipRole, OperatorId,
     SaltDatabase,
 };
-use salt_server::{AppState, build_router, rendered_text};
+use salt_server::{AppState, build_router, rendered_text, text_placements};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -423,6 +423,171 @@ async fn an_operator_downloads_a_payslip_as_an_uncacheable_pdf() {
     assert!(text.contains("Ada Lovelace"), "{text}");
     assert!(text.contains("N$ 15,000.00"), "{text}");
     assert!(text.contains("standard-v1"), "{text}");
+}
+
+/// Sends one reasoned master-data correction as an Operator would today:
+/// first without acknowledgement, which must be held naming the live
+/// January payroll it diverges from, then acknowledged, which must land. Returns nothing: the point is only that the correction really
+/// reached the master record.
+async fn correct_over_a_live_january(uri: String, cookie: &str, mut body: Value) {
+    let put = |body: &Value| {
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header(header::COOKIE, cookie)
+            .header("x-salt-request", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    body["reason"] = serde_json::json!("corrected after January was paid");
+    let held = router().await.oneshot(put(&body)).await.unwrap();
+    let status = held.status();
+    let held = body_json(held).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{uri}: {held}");
+    assert_eq!(
+        held["error"]["details"]["divergingPeriods"],
+        serde_json::json!([january_period()])
+    );
+
+    body["acknowledgedDivergingPeriods"] = serde_json::json!([january_period()]);
+    let accepted = router().await.oneshot(put(&body)).await.unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK, "{uri}");
+}
+
+async fn payslip_bytes(employer_id: &str, finalized_payroll_id: &str, cookie: &str) -> Vec<u8> {
+    let response = router()
+        .await
+        .oneshot(payslip_request(employer_id, finalized_payroll_id, cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec()
+}
+
+/// The content-stability contract itself (ADR-0021, parent #70's own test
+/// list): render a payslip, correct the Employer's address and the Person's
+/// name and address through the ordinary browser routes, render again, and
+/// the extracted content — every text run, where it sits and what size it
+/// is — is identical. Byte equality is deliberately not asserted.
+#[tokio::test]
+async fn a_payslip_reads_the_same_after_its_employer_address_and_person_name_are_corrected() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(&employer_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router()
+        .await
+        .oneshot(create_employment_request(
+            &employer_id,
+            &cookie,
+            "Ada Lovelace",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created = body_json(response).await;
+    let employment_id = created["employmentId"].as_str().unwrap().to_string();
+    let person_id = created["personId"].as_str().unwrap().to_string();
+
+    let response = router()
+        .await
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/employers/{employer_id}/people/{person_id}/particulars"
+                ))
+                .header(header::COOKIE, &cookie)
+                .header("x-salt-request", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "identityNumber": "80012345678",
+                        "addressLine1": "2 Fidel Castro St",
+                        "city": "Swakopmund",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let finalized_payroll_id =
+        finalize_a_fully_declared_employment(&employer_id, &employment_id, &cookie).await;
+
+    let before_bytes = payslip_bytes(&employer_id, &finalized_payroll_id, &cookie).await;
+    let before = text_placements(&before_bytes);
+    let before_text = rendered_text(&before_bytes);
+    for expected in [
+        "1 Independence Ave",
+        "Windhoek",
+        "Ada Lovelace",
+        "80012345678",
+        "2 Fidel Castro St",
+    ] {
+        assert!(
+            before_text.contains(expected),
+            "{expected:?}: {before_text}"
+        );
+    }
+
+    correct_over_a_live_january(
+        format!("/api/employers/{employer_id}/particulars"),
+        &cookie,
+        serde_json::json!({
+            "registeredName": "Acme Holdings (Pty) Ltd",
+            "addressLine1": "99 Sam Nujoma Dr",
+            "city": "Walvis Bay",
+        }),
+    )
+    .await;
+    correct_over_a_live_january(
+        format!("/api/employers/{employer_id}/people/{person_id}/name"),
+        &cookie,
+        serde_json::json!({ "fullName": "Augusta Ada King" }),
+    )
+    .await;
+    correct_over_a_live_january(
+        format!("/api/employers/{employer_id}/people/{person_id}/particulars"),
+        &cookie,
+        serde_json::json!({
+            "identityNumber": "80012345679",
+            "addressLine1": "7 Nelson Mandela Ave",
+            "city": "Oshakati",
+        }),
+    )
+    .await;
+
+    let after_bytes = payslip_bytes(&employer_id, &finalized_payroll_id, &cookie).await;
+    let after = text_placements(&after_bytes);
+
+    assert_eq!(before, after);
+    let after_text = rendered_text(&after_bytes);
+    for corrected in [
+        "Acme Holdings",
+        "Sam Nujoma",
+        "Walvis Bay",
+        "Augusta",
+        "80012345679",
+        "Nelson Mandela",
+        "Oshakati",
+    ] {
+        assert!(
+            !after_text.contains(corrected),
+            "{corrected:?}: {after_text}"
+        );
+    }
 }
 
 fn set_pay_lines_request(
@@ -875,10 +1040,9 @@ async fn a_reversed_and_replaced_payroll_names_both_directions_on_its_payslip() 
     payroll_app::reverse_finalized_payroll(&db, &original_id, "March salary was wrong", "actor")
         .await
         .unwrap();
-    // `reversal.reversed_at` defaults to `now()` (migration 0011) — printed
-    // as a plain date, the same `%d %b %Y` convention every other date on
-    // the payslip already uses.
-    let expected_reversed_on = chrono::Utc::now().format("%d %b %Y").to_string();
+    // `reversal.reversed_at` defaults to `now()` (migration 0011), printed
+    // as that UTC instant with its zone named.
+    let expected_reversed_on = format!("Reversed on: {}", chrono::Utc::now().format("%d %b %Y"));
 
     let run_id = payroll_app::create_correction_run(
         &db,
@@ -935,7 +1099,11 @@ async fn a_reversed_and_replaced_payroll_names_both_directions_on_its_payslip() 
         original_text.contains(&expected_reversed_on),
         "{original_text}"
     );
-    assert!(original_text.contains(&replacement_id), "{original_text}");
+    assert!(
+        original_text.contains(&format!("Replaced by finalized payroll {replacement_id}")),
+        "{original_text}"
+    );
+    assert!(!original_text.contains("REPLACEMENT"), "{original_text}");
 
     let replacement_response = router()
         .await
@@ -948,7 +1116,14 @@ async fn a_reversed_and_replaced_payroll_names_both_directions_on_its_payslip() 
         .unwrap();
     let replacement_text = rendered_text(&replacement_bytes);
     assert!(
-        replacement_text.contains(&original_id),
+        replacement_text.contains("REPLACEMENT"),
         "{replacement_text}"
     );
+    assert!(
+        replacement_text.contains(&format!(
+            "This payslip replaces finalized payroll {original_id}"
+        )),
+        "{replacement_text}"
+    );
+    assert!(!replacement_text.contains("REVERSED"), "{replacement_text}");
 }

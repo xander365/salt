@@ -217,7 +217,7 @@ The append-only record of who did what and when. Separate from payroll history, 
 _Avoid_: Audit trail, event log, history
 
 **Payslip**:
-A statutory statement rendered from a FinalizedPayroll. A view, never a source of truth. Rendered on demand and never stored: asking for it again renders it again. That is only safe because everything it prints — figures, rules, particulars and template version — froze with the FinalizedPayroll.
+A statutory statement rendered from a FinalizedPayroll. A view, never a source of truth. Rendered on demand and never stored: asking for it again renders it again. That is only safe because everything it prints — figures, rules, particulars and template version — froze with the FinalizedPayroll. Its promise is **content stability, not byte stability**: every render of one FinalizedPayroll shows the same figures, frozen particulars, labels and provenance, laid out by the same PayslipTemplateVersion, while the PDF bytes themselves may differ between renders and between Salt versions (ADR-0021).
 _Avoid_: Pay advice, payslip record
 
 **PayslipTemplateVersion**:

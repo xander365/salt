@@ -1,45 +1,73 @@
-// The Payslip download action (issue #82 review follow-up): an Operator
-// downloads one employee's Payslip as a real PDF straight from the
-// finalized-payroll screen. `usePayslipDownload` calls the render-on-demand
+// The Payslip download action (issue #82): an Operator downloads one
+// employee's Payslip as a real PDF, from the finalized run screen and from
+// each finalized payroll. `usePayslipDownload` calls the render-on-demand
 // endpoint; everything here is only ever about presenting the loading,
 // failure and success states around that one request — the PDF itself is
 // never inspected or held onto beyond handing it to the browser's own save.
 
+import { CircleAlert } from 'lucide-react';
 import { ApiError } from '../api/client';
-import { requestIdOf, sharedFactRefusalMessage } from '../api/refusal';
+import { sharedFactRefusalMessage } from '../api/refusal';
 import { usePayslipDownload } from './usePayslipDownload';
 import { Button } from '../components/ui/button';
 import { FailedRequestState } from '../components/states/FailedRequestState';
 
-function downloadFailureMessage(caught: unknown): string {
-  const shared = sharedFactRefusalMessage(caught);
-  if (shared !== null) {
-    return shared;
+/** The frozen records `payslip_particulars_not_frozen` names, in the
+ * server's own words, read as the sentence an Operator needs. Unknown names
+ * are passed through rather than dropped, so the reason is never shortened. */
+const MISSING_RECORD_NAMES: Record<string, string> = {
+  EmployerParticulars: 'the employer particulars',
+  PersonParticulars: 'the employee particulars',
+  PayslipTemplateVersion: 'the payslip template version',
+};
+
+function missingRecordsOf(details: unknown): string[] {
+  if (typeof details !== 'object' || details === null) {
+    return [];
   }
-
-  const error = caught as ApiError;
-  switch (error.code) {
-    // Issue #73: a row finalized before Salt began freezing the particulars
-    // and template version a Payslip demands has nothing safe to print.
-    case 'payslip_particulars_not_frozen':
-      return 'This payroll predates payslip records and cannot produce one.';
-
-    case 'internal_error': {
-      const requestId = requestIdOf(error.details);
-      return requestId === null
-        ? 'We could not prepare this payslip. Try again.'
-        : `We could not prepare this payslip. Try again, and quote reference ${requestId} if the problem continues.`;
-    }
-
-    default:
-      return 'We could not prepare this payslip. Try again.';
-  }
+  const missing = (details as { missing?: unknown }).missing;
+  return Array.isArray(missing)
+    ? missing.filter((name): name is string => typeof name === 'string')
+    : [];
 }
 
-/** Hands the browser a file to save, without ever writing the bytes to a
- * URL this document keeps navigable — `URL.revokeObjectURL` runs the moment
- * the click has been dispatched, since the anchor never leaves the DOM long
- * enough for a slower revoke to race it. */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) {
+    return names.join('');
+  }
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function downloadFailureMessage(caught: unknown): string {
+  if (caught instanceof ApiError) {
+    switch (caught.code) {
+      // Parent #70 D-9: a payroll finalized before Salt froze what a Payslip
+      // must print is refused, naming what is missing. Salt never fills the
+      // gap from today's records.
+      case 'payslip_particulars_not_frozen': {
+        const missing = missingRecordsOf(caught.details).map(
+          (name) => MISSING_RECORD_NAMES[name] ?? name,
+        );
+        const what =
+          missing.length > 0 ? joinNames(missing) : 'the particulars a payslip must print';
+        return `This payroll was finalized before Salt recorded ${what}, so it cannot produce a payslip. Salt does not fill them in from today's records.`;
+      }
+
+      case 'finalized_payroll_not_found':
+        return 'This finalized payroll is no longer available to you. Reload the page.';
+    }
+  }
+
+  return sharedFactRefusalMessage(caught) ?? 'We could not prepare this payslip. Try again.';
+}
+
+function isPermanentRefusal(caught: unknown): boolean {
+  return caught instanceof ApiError && caught.code === 'payslip_particulars_not_frozen';
+}
+
+/** Hands the browser a file to save. The object URL is revoked on the next
+ * task rather than straight after `click()`: some browsers start reading the
+ * blob asynchronously, and revoking it synchronously can cancel the save. */
 function saveAs(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -47,11 +75,19 @@ function saveAs(blob: Blob, filename: string) {
   link.download = filename;
   document.body.appendChild(link);
   link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export function PayslipDownload({ finalizedPayrollId }: { finalizedPayrollId: string }) {
+export function PayslipDownload({
+  finalizedPayrollId,
+  personName,
+}: {
+  finalizedPayrollId: string;
+  /** Names the button when several are on one screen, so each has its own
+   * accessible name. */
+  personName?: string;
+}) {
   const download = usePayslipDownload(finalizedPayrollId);
 
   async function handleDownload() {
@@ -64,6 +100,9 @@ export function PayslipDownload({ finalizedPayrollId }: { finalizedPayrollId: st
     }
   }
 
+  const idleLabel =
+    personName === undefined ? 'Download payslip' : `Download payslip for ${personName}`;
+
   return (
     <div className="flex flex-col items-start gap-2">
       <Button
@@ -72,9 +111,17 @@ export function PayslipDownload({ finalizedPayrollId }: { finalizedPayrollId: st
         disabled={download.isPending}
         onClick={() => void handleDownload()}
       >
-        {download.isPending ? 'Preparing payslip…' : 'Download payslip'}
+        {download.isPending ? 'Preparing payslip…' : idleLabel}
       </Button>
-      {download.isError && (
+      {/* A refusal is a fact about this payroll, so it offers no retry: the
+          same request can only be refused again. */}
+      {download.isError && isPermanentRefusal(download.error) && (
+        <p role="alert" className="flex items-start gap-1.5 text-sm text-destructive">
+          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span>{downloadFailureMessage(download.error)}</span>
+        </p>
+      )}
+      {download.isError && !isPermanentRefusal(download.error) && (
         <FailedRequestState
           message={downloadFailureMessage(download.error)}
           onRetry={() => void handleDownload()}
