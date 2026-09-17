@@ -5,7 +5,7 @@ Write notes (decisions, surprises, blockers) under the step.
 
 [x] 1  Register and payment summary read models (payroll-app) 16ce096
 [x] 2  Register and payment summary JSON routes (salt-server) 41ac436
-[ ] 3  Batch payslips PDF (payroll-app + salt-server)
+[x] 3  Batch payslips PDF (payroll-app + salt-server) 6585295
 [ ] 4  Register and payment summary PDFs (salt-server)
 [ ] 5  Outputs on the finalized run screen (web)
 [ ] 6  Browser test, docs, no-CSV guard
@@ -38,3 +38,20 @@ PayrollAppError variant, so adding PayrollRunNotFinalized there broke
 the workspace build until a minimal 409 "payroll_run_not_finalized"
 arm was added — step 2 does not need to add this arm again, only the
 actual JSON route.
+
+Step 3 (6585295): render_standard_v1 split into draw_standard_v1 (draws
+into a caller-owned Layout, no document/finish/save) plus a thin
+render_standard_v1 wrapper, so render_payslips can call the same
+drawing function once per input into one shared document —
+render_payslip itself is now just render_payslips(&[input]). No public
+use case can leave a fully-declared FinalizedPayroll row missing a
+frozen particular (identity_number/address are optional sub-fields,
+but the particulars_json column itself always freezes at finalize time
+once EmployerParticulars is set even once for the whole Employer) —
+the "first row in member order refuses the whole batch" test had to
+force it with a raw UPDATE on one row only, the same technique
+tests/payslip_data.rs already used for the single-payslip predates-#73
+case. Added get_run_payslip_data's own route to
+tests/payroll_journey.rs's declared route table and its two "every
+route" loops (401, PayrollOperator reachability), same as step 2 had
+to for register/payment-summary.
