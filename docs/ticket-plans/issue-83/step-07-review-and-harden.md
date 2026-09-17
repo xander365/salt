@@ -10,9 +10,9 @@ This follows the repo's per-issue commit chain: implement → review → harden.
   to `HEAD`, against issue #83 and spec #70 §D-9/§D-10.
 - Check each item in `README.md` "What #83 asks for" has a test that proves
   it. Write the mapping (criterion → test name) in the commit body.
-- Fix every confirmed finding.
+
 - Run the full verification.
-- Commit: `Act on the code review of #83`.
+
 
 ## 7b. Harden
 
