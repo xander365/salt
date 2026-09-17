@@ -418,6 +418,31 @@ fn payment_summary_pdf_request(employer_id: &str, run_id: &str, cookie: &str) ->
         .unwrap()
 }
 
+#[tokio::test]
+async fn run_outputs_have_no_csv_routes() {
+    // D37: Salt deliberately produces neither CSV nor a bank file.
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let (run_id, _finalized) = finalize_a_run_of_two(&employer_id, &cookie).await;
+
+    for output in ["register", "payment-summary", "payslips"] {
+        let response = router()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/employers/{employer_id}/payroll-runs/{run_id}/{output}.csv"
+                    ))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_ne!(response.headers()[header::CONTENT_TYPE], "text/csv");
+    }
+}
+
 /// `N$ 12,345.67`, matching `pdf_layout::format_money` exactly — copied
 /// rather than shared, the same per-file fixture discipline this file's own
 /// header comment already follows for `tests/payslip.rs`'s fixtures.

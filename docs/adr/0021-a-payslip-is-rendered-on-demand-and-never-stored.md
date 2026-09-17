@@ -2,6 +2,8 @@
 
 An Operator downloads a Payslip as a real PDF from a finalized run (issue #82, parent #70). Salt renders it in `salt-server`, from a `FinalizedPayroll`'s frozen columns, on every request, and writes the bytes nowhere: no document table, no object store, no cache. Asking for the same Payslip again a decade later renders it again.
 
+Payroll Register and Payment Summary PDFs are likewise rendered on demand and never stored, but are views rather than versioned documents, so they carry no template version.
+
 The rejected alternative is what most payroll products do: render once at finalize time and keep the original bytes forever. We rejected it because it does not actually buy the guarantee it looks like it buys.
 
 ## Why "keep the original bytes" is the wrong promise

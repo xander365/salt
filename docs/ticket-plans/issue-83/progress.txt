@@ -8,7 +8,7 @@ Write notes (decisions, surprises, blockers) under the step.
 [x] 3  Batch payslips PDF (payroll-app + salt-server) 6585295
 [x] 4  Register and payment summary PDFs (salt-server) ec3ae95
 [x] 5  Outputs on the finalized run screen (web) 0e2cb8c
-[ ] 6  Browser test, docs, no-CSV guard
+[x] 6  Browser test, docs, no-CSV guard
 [ ] 7a Code review of #83
 [ ] 7b Harden the run outputs of #83
 

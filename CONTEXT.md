@@ -225,9 +225,9 @@ The identifier of the layout that a Payslip is rendered with, frozen on the Fina
 _Avoid_: Template, layout version, format
 
 **PayrollRegister**:
-Every Employment in one PayrollRun with its figures and the run's totals. A view over FinalizedPayrolls, never a source of truth.
+Every Employment in one PayrollRun with its figures and liveness. Its two totals are all rows as finalized by the run, and only rows still live from it. A view over FinalizedPayrolls, never a source of truth.
 _Avoid_: Payroll report, summary, run listing
 
 **PaymentSummary**:
-Who is to be paid what, for one PayrollRun. A view, and an instruction to a human — producing one never means money moved, and it is deliberately not a bank import file.
+Who is to be paid what, for one PayrollRun: live records only, with reversed rows excluded and counted. A view and an instruction to a person, never a bank file (D37) — producing one never means money moved.
 _Avoid_: Payment file, bank file, EFT export

@@ -36,7 +36,23 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${WEB_PORT}`,
     trace: 'retain-on-failure',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  // The outputs proof continues the ordinary journey with the next month's
+  // two-member run. `bootstrap` may create only one Operator, so keeping the
+  // specs in this order preserves its real first-run contract without a
+  // test-only provisioning route.
+  projects: [
+    {
+      name: 'journey',
+      testMatch: /payroll-journey\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'chromium',
+      testMatch: /outputs\.spec\.ts/,
+      dependencies: ['journey'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
   webServer: [
     {
       // `DATABASE_URL` is inherited from this process's own environment
