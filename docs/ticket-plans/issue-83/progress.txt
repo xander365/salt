@@ -8,11 +8,17 @@ Write notes (decisions, surprises, blockers) under the step.
 [x] 3  Batch payslips PDF (payroll-app + salt-server) 6585295
 [x] 4  Register and payment summary PDFs (salt-server) ec3ae95
 [x] 5  Outputs on the finalized run screen (web) 0e2cb8c
-[x] 6  Browser test, docs, no-CSV guard
-[ ] 7a Code review of #83
+[x] 6  Browser test, docs, no-CSV guard 305a077
+[x] 7a Code review of #83 1ef769c
 [ ] 7b Harden the run outputs of #83
 
 Notes:
+
+Step 7a review: reviewed `31c6c35..305a077` against issue #83 and issue #70
+§D-9/§D-10. Findings and an ordered, single-context fix plan are in
+`step-07a-code-review-findings.md`; commit `1ef769c` fixes every finding.
+Rust/web full verification passed, as did the complete Playwright suite and
+`outputs.spec.ts` alone, each against a separately recreated database.
 
 Step 5 (pending commit): `apiDownload` (issue #82) already took just a path
 and read the filename off `Content-Disposition`, so it needed no change to
