@@ -9,7 +9,12 @@ import { ArrowLeft, CircleCheck, Undo2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
-import type { FiguresDto, LivenessDto, PayrollRegisterRowDto } from '../api/types';
+import type {
+  FiguresDto,
+  LivenessDto,
+  PayrollRegisterResponse,
+  PayrollRegisterRowDto,
+} from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDateRange, humanDate } from '../format';
 import { Money } from '../components/Money';
@@ -21,17 +26,7 @@ import { FailedRequestState } from '../components/states/FailedRequestState';
 import { RunNotFinalized } from '../runOutputs/RunNotFinalized';
 import { RunOutputPdfButton } from '../runOutputs/RunOutputPdfButton';
 import { usePayrollRegister } from '../runOutputs/usePayrollRegister';
-
-function runWasNotFound(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    ['not_found', 'employer_not_found', 'payroll_run_not_found'].includes(caught.code)
-  );
-}
-
-function runNotFinalized(caught: unknown): boolean {
-  return caught instanceof ApiError && caught.code === 'payroll_run_not_finalized';
-}
+import { runNotFinalized, runWasNotFound } from '../runOutputs/errors';
 
 function loadFailureMessage(caught: unknown): string {
   if (caught instanceof ApiError && caught.code === 'internal_error') {
@@ -150,6 +145,66 @@ function TotalsRow({ label, figures }: { label: string; figures: FiguresDto }) {
   );
 }
 
+export function PayrollRegisterResults({
+  employerId,
+  rows,
+  totalAsFinalized,
+  totalStillLive,
+}: {
+  employerId: string;
+  rows: PayrollRegisterResponse['rows'];
+  totalAsFinalized: FiguresDto;
+  totalStillLive: FiguresDto;
+}) {
+  return (
+    <>
+      {rows.length === 0 && (
+        <EmptyState>This run finalized nobody, so there is nothing to register.</EmptyState>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <caption className="sr-only">
+            Every finalized payroll this run produced, with each row&rsquo;s liveness and the
+            run&rsquo;s two totals.
+          </caption>
+          <thead>
+            <tr className="border-b">
+              <th scope="col" className="py-1.5 pr-3 font-medium">
+                Name
+              </th>
+              {REGISTER_MONEY_COLUMNS.map(({ key, label }) => (
+                <th key={key} scope="col" className="py-1.5 pr-3 text-right font-medium">
+                  {label}
+                </th>
+              ))}
+              <th scope="col" className="py-1.5 font-medium">
+                Status
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <RegisterRow key={row.finalizedPayrollId} employerId={employerId} row={row} />
+            ))}
+          </tbody>
+          <tfoot>
+            <TotalsRow label="Total as finalized by this run" figures={totalAsFinalized} />
+            <TotalsRow label="Total still live from this run" figures={totalStillLive} />
+          </tfoot>
+        </table>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        <span className="font-medium text-foreground">Total as finalized by this run</span> includes
+        every row this run produced, a reversed one included.{' '}
+        <span className="font-medium text-foreground">Total still live from this run</span> counts
+        only the rows still live from it — a reversal is shown above, never hidden, and never
+        counted in both totals.
+      </p>
+    </>
+  );
+}
+
 export function PayrollRegister() {
   const { runId } = useParams();
   if (runId === undefined) {
@@ -200,57 +255,12 @@ export function PayrollRegister() {
 
           <RunOutputPdfButton payrollRunId={runId} kind="register" label="Download PDF" />
 
-          {register.data.rows.length === 0 ? (
-            <EmptyState>This run finalized nobody, so there is nothing to register.</EmptyState>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <caption className="sr-only">
-                    Every finalized payroll this run produced, with each row&rsquo;s liveness and
-                    the run&rsquo;s two totals.
-                  </caption>
-                  <thead>
-                    <tr className="border-b">
-                      <th scope="col" className="py-1.5 pr-3 font-medium">
-                        Name
-                      </th>
-                      {REGISTER_MONEY_COLUMNS.map(({ key, label }) => (
-                        <th key={key} scope="col" className="py-1.5 pr-3 text-right font-medium">
-                          {label}
-                        </th>
-                      ))}
-                      <th scope="col" className="py-1.5 font-medium">
-                        Status
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {register.data.rows.map((row) => (
-                      <RegisterRow key={row.finalizedPayrollId} employerId={employerId} row={row} />
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <TotalsRow
-                      label="Total as finalized by this run"
-                      figures={register.data.totalAsFinalized}
-                    />
-                    <TotalsRow
-                      label="Total still live from this run"
-                      figures={register.data.totalStillLive}
-                    />
-                  </tfoot>
-                </table>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                <span className="font-medium text-foreground">Total as finalized by this run</span>{' '}
-                includes every row this run produced, a reversed one included.{' '}
-                <span className="font-medium text-foreground">Total still live from this run</span>{' '}
-                counts only the rows still live from it — a reversal is shown above, never hidden,
-                and never counted in both totals.
-              </p>
-            </>
-          )}
+          <PayrollRegisterResults
+            employerId={employerId}
+            rows={register.data.rows}
+            totalAsFinalized={register.data.totalAsFinalized}
+            totalStillLive={register.data.totalStillLive}
+          />
         </>
       )}
     </main>

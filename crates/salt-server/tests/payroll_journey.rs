@@ -1993,3 +1993,30 @@ fn the_router_source_parser_finds_the_routes_that_are_there() {
         "{paths:?}"
     );
 }
+
+/// Issue #83 deliberately exposes human-readable PDFs only. Keep this next
+/// to `declared_route_paths` so the production router has one source parser,
+/// not a second hand-maintained route inventory. `payment-summary` is an
+/// allowed human-readable view; the forbidden vocabulary is specifically a
+/// bank/payment file, CSV, or generic export route.
+#[test]
+fn production_routes_have_no_csv_bank_or_payment_file_export() {
+    let paths = declared_route_paths();
+
+    for path in paths {
+        let lower = path.to_ascii_lowercase();
+        assert!(
+            !lower.ends_with(".csv"),
+            "CSV output route declared: {path}"
+        );
+        for segment in lower.split('/') {
+            assert!(
+                !segment.contains("bank")
+                    && !segment.contains("payment-file")
+                    && !segment.contains("payments-file")
+                    && !segment.contains("export"),
+                "bank/payment-file or export output route declared: {path}"
+            );
+        }
+    }
+}

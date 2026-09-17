@@ -7,7 +7,7 @@
     "node": "24.14.0"
   },
   "scripts": {
-    "test": "playwright test --project=chromium",
+    "test": "playwright test",
     "typecheck": "tsc"
   },
   "devDependencies": {

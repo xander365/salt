@@ -36,10 +36,10 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${WEB_PORT}`,
     trace: 'retain-on-failure',
   },
-  // The outputs proof continues the ordinary journey with the next month's
-  // two-member run. `bootstrap` may create only one Operator, so keeping the
-  // specs in this order preserves its real first-run contract without a
-  // test-only provisioning route.
+  // One browser and one worker keep the two stateful, independently-arranged
+  // specs deterministic against the one bootstrapped Employer. The outputs
+  // spec also runs alone from a fresh database; there is deliberately no
+  // Playwright project dependency between it and the original journey.
   projects: [
     {
       name: 'journey',
@@ -49,7 +49,6 @@ export default defineConfig({
     {
       name: 'chromium',
       testMatch: /outputs\.spec\.ts/,
-      dependencies: ['journey'],
       use: { ...devices['Desktop Chrome'] },
     },
   ],

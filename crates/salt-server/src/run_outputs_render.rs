@@ -292,18 +292,20 @@ fn draw_table_row(
     layout.advance(0.6);
 }
 
-/// A row's printed status: `Live` or `Reversed` — words, never colour alone
-/// (README.md). Kept to one short word so the status cell never needs to
-/// wrap a 36-character finalized-payroll id across a table row already
-/// carrying ten money columns; the fuller lineage a reversed or replacement
-/// row carries — the reversal reason, which id replaced it, which id it
-/// itself replaces — prints beneath the table as a row-numbered note
-/// instead, the same place the reason already goes, so the table itself
-/// stays scannable and no line is ever lost to a page's own width.
-fn status_word(liveness: &RegisterPdfLiveness) -> &'static str {
+/// A row's complete printed status: `Live`, `Reversed`, or `Reversed —
+/// replaced by <id>`. The status column wraps this owned text within its
+/// measured width; the row-numbered note remains below the table because it
+/// also carries the reversal reason.
+fn status_text(liveness: &RegisterPdfLiveness) -> String {
     match liveness {
-        RegisterPdfLiveness::Live => "Live",
-        RegisterPdfLiveness::Reversed { .. } => "Reversed",
+        RegisterPdfLiveness::Live => "Live".to_string(),
+        RegisterPdfLiveness::Reversed {
+            replaced_by: Some(replacement_id),
+            ..
+        } => format!("Reversed — replaced by {replacement_id}"),
+        RegisterPdfLiveness::Reversed {
+            replaced_by: None, ..
+        } => "Reversed".to_string(),
     }
 }
 
@@ -389,13 +391,14 @@ pub fn render_register(input: &RegisterPdfInput) -> Vec<u8> {
     for (index, row) in input.rows.iter().enumerate() {
         let row_number = index + 1;
         notes.extend(row_notes(row_number, row));
+        let status = status_text(&row.liveness);
         draw_table_row(
             &mut layout,
             &columns,
             Some(row_number),
             &row.full_name,
             Some(&row.figures),
-            status_word(&row.liveness),
+            &status,
         );
     }
 
@@ -595,12 +598,21 @@ mod tests {
         assert!(text.contains("March salary was wrong"), "{text}");
     }
 
-    /// The full lineage a reversed-and-replaced row carries is not lost —
-    /// it prints as that row's own note beneath the table, since the status
-    /// cell itself carries only the short word `status_word` returns (its
-    /// own doc comment explains why a 36-character id never goes there).
     #[test]
-    fn a_reversed_and_replaced_row_names_the_replacement_in_its_row_numbered_note() {
+    fn a_reversed_and_replaced_row_status_names_the_replacement() {
+        let liveness = RegisterPdfLiveness::Reversed {
+            reason: "March salary was wrong".to_string(),
+            replaced_by: Some("22222222-2222-2222-2222-222222222222".to_string()),
+        };
+
+        assert_eq!(
+            status_text(&liveness),
+            "Reversed — replaced by 22222222-2222-2222-2222-222222222222"
+        );
+    }
+
+    #[test]
+    fn a_reversed_and_replaced_row_keeps_its_reason_in_the_row_numbered_note() {
         let mut input = minimal_register();
         input.rows[0].liveness = RegisterPdfLiveness::Reversed {
             reason: "March salary was wrong".to_string(),
@@ -638,6 +650,10 @@ mod tests {
         input.rows = (0..50)
             .map(|index| a_register_row(&format!("Employee Number {index}"), 1_375_500 + index))
             .collect();
+        input.rows[0].liveness = RegisterPdfLiveness::Reversed {
+            reason: "March salary was wrong".to_string(),
+            replaced_by: Some("22222222-2222-2222-2222-222222222222".to_string()),
+        };
 
         let bytes = render_register(&input);
         let placements = crate::pdf_layout::text_placements(&bytes);

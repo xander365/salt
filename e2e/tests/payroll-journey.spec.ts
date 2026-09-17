@@ -21,9 +21,8 @@
 // route — is that test's job, not this one's (§0.37, the same issue's own
 // Deep Instructions).
 
-import { readFile } from 'node:fs/promises';
 import { type Locator, type Page, expect, test } from '@playwright/test';
-import { type BootstrappedOperator, CREDENTIALS_PATH } from '../global-setup.js';
+import { signIn } from './helpers/payroll-setup.js';
 
 /** The ten figures §0.29 names, plus issue #78's medical aid premium, and
  * the accessible names the screen gives them. Order is immaterial: each value is read by what a person calls it,
@@ -116,7 +115,7 @@ function parseCentsText(text: string): number {
  * which share this one `Figures` component. Each named group is its own wait:
  * counting every `definition` on the page would accidentally include facts
  * outside the figures component as the finalized screen grows. */
-async function readFigures(page: Page | Locator): Promise<Figures> {
+async function readFigures(page: Page): Promise<Figures> {
   const figures = {} as Figures;
   for (const { field, name } of FIGURE_FIELDS) {
     // By the name a person reads beside the amount, never by position in the
@@ -133,13 +132,8 @@ async function readFigures(page: Page | Locator): Promise<Figures> {
 }
 
 test('signing in and running one ordinary payroll end to end', async ({ page }) => {
-  const operator: BootstrappedOperator = JSON.parse(await readFile(CREDENTIALS_PATH, 'utf-8'));
-
   // Sign in.
-  await page.goto('/login');
-  await page.getByLabel('Email').fill(operator.email);
-  await page.getByLabel('Password').fill(operator.password);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  const operator = await signIn(page);
 
   // One membership: land in the single Employer, never a switcher screen.
   await expect(page.getByRole('heading', { level: 1, name: operator.employerName })).toBeVisible();
@@ -241,44 +235,6 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
     page.getByText(`Recorded: no unsupported deductions from ${periodStartText}.`),
   ).toBeVisible();
 
-  // A second fully declared Employment makes the finalized run exercise the
-  // same multi-person path its outputs use. Ada remains the member whose
-  // richer earnings and workings this journey examines below.
-  await page.getByRole('link', { name: 'People', exact: true }).click();
-  await page.getByLabel('Full name').fill('Bob Marley');
-  await page.getByRole('button', { name: 'Add person' }).click();
-  await expect(page.getByRole('status')).toHaveText('Added Bob Marley.');
-  await page.getByRole('link', { name: 'Bob Marley', exact: true }).click();
-
-  const bobParticulars = page.getByRole('region', { name: 'Identity number and address' });
-  await bobParticulars.getByLabel('Identity number').fill('81012345678');
-  await bobParticulars.getByLabel('Address line 1').fill('3 Sam Nujoma Drive');
-  await bobParticulars.getByLabel('City').fill('Walvis Bay');
-  await bobParticulars.getByRole('button', { name: 'Save particulars' }).click();
-  await expect(bobParticulars.getByText('Particulars saved.')).toBeVisible();
-
-  const bobPay = page.getByRole('region', { name: 'Pay', exact: true });
-  await bobPay.getByLabel('Effective from').fill(periodStartText);
-  await bobPay.getByLabel('Basic pay').fill('12000.00');
-  await bobPay.getByLabel('Ordinary hours per week').fill('40.00');
-  await bobPay.getByRole('button', { name: 'Save pay' }).click();
-
-  const bobPriorEmployment = page.getByRole('region', { name: 'Prior employment', exact: true });
-  await bobPriorEmployment.getByLabel('Tax year starting').fill(String(taxYearStarting));
-  await bobPriorEmployment.getByRole('radio', { name: 'No', exact: true }).check();
-  await bobPriorEmployment.getByRole('button', { name: 'Save prior employment' }).click();
-
-  const bobUnsupportedDeductions = page.getByRole('region', {
-    name: 'Unsupported deductions',
-    exact: true,
-  });
-  await bobUnsupportedDeductions.getByLabel('Effective from').fill(periodStartText);
-  await bobUnsupportedDeductions.getByRole('radio', { name: 'No', exact: true }).check();
-  await bobUnsupportedDeductions.getByLabel('Reason').fill('no unsupported deductions');
-  await bobUnsupportedDeductions
-    .getByRole('button', { name: 'Save unsupported deductions' })
-    .click();
-
   // Back to the Employer's own home — reached from here only by the
   // browser's own back button, since no screen this deep links there
   // directly — then on to Payroll.
@@ -293,42 +249,38 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   await page.getByLabel('Pay date').fill(payDateText);
   await page.getByRole('button', { name: 'Create run' }).click();
 
-  const adaMember = page
-    .getByRole('listitem')
-    .filter({ has: page.getByRole('heading', { level: 3, name: 'Ada Lovelace' }) });
-  // See Ada's proposed member, with no blockers standing in the way of
+  // See the member proposed, with no blockers standing in the way of
   // Calculate: both declarations and CompensationTerms are already in
   // force.
-  await expect(adaMember.getByRole('heading', { level: 3, name: 'Ada Lovelace' })).toBeVisible();
-  await expect(adaMember.getByText('No standing blockers.')).toBeVisible();
+  await expect(page.getByRole('heading', { level: 3, name: 'Ada Lovelace' })).toBeVisible();
+  await expect(page.getByText('No standing blockers.')).toBeVisible();
   const runUrl = page.url();
 
   // Add a taxable allowance.
-  await adaMember.getByRole('button', { name: 'Add a taxable allowance' }).click();
-  await adaMember.getByLabel('Allowance label').fill('standby allowance');
-  await adaMember.getByLabel('Amount', { exact: true }).fill('200.00');
+  await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
+  await page.getByLabel('Allowance label').fill('standby allowance');
+  await page.getByLabel('Amount', { exact: true }).fill('200.00');
 
   // Add overtime as **hours at a multiplier** (issue #76, D14): the form
   // takes no amount at all, because Salt prices the line itself. The
   // multiplier is a closed set of two (D31), so it is a `<select>` and
   // 1.5 is what a new line starts on.
-  await adaMember.getByRole('button', { name: 'Add overtime' }).click();
-  await adaMember.getByLabel('Overtime label (optional)').fill('Sunday overtime');
-  await adaMember.getByLabel('Hours', { exact: true }).fill('10');
-  await expect(adaMember.getByLabel('Multiplier')).toHaveValue('1.5');
+  await page.getByRole('button', { name: 'Add overtime' }).click();
+  await page.getByLabel('Overtime label (optional)').fill('Sunday overtime');
+  await page.getByLabel('Hours', { exact: true }).fill('10');
+  await expect(page.getByLabel('Multiplier')).toHaveValue('1.5');
 
   // Withhold the employee's own medical aid premium (issue #78): a
   // voluntary deduction, taken after PAYE and social security at exactly the
   // amount entered.
-  await adaMember.getByRole('button', { name: 'Add a medical aid premium' }).click();
-  await adaMember.getByLabel('Premium amount').fill('500.00');
-  await adaMember.getByRole('button', { name: 'Save earnings' }).click();
+  await page.getByRole('button', { name: 'Add a medical aid premium' }).click();
+  await page.getByLabel('Premium amount').fill('500.00');
+  await page.getByRole('button', { name: 'Save earnings' }).click();
   await expect(page.getByText('Earnings saved.')).toBeVisible();
-  await page.getByRole('button', { name: 'Save earnings' }).last().click();
 
   // Calculate, then read the figures the wire carries (§0.29, issue #78).
   await page.getByRole('button', { name: 'Calculate' }).click();
-  const figures = await readFigures(adaMember);
+  const figures = await readFigures(page);
 
   // `basicPayCents` is prorated (see above), so this only bounds it: never
   // nothing, and never more than the full R15000.00 recorded.
@@ -372,7 +324,7 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
     page.waitForResponse(
       (response) => response.request().method() === 'PUT' && response.url().endsWith('/pay-lines'),
     ),
-    adaMember.getByRole('button', { name: 'Save earnings' }).click(),
+    page.getByRole('button', { name: 'Save earnings' }).click(),
   ]);
   await expect(page.getByText('Earnings changed since these figures were calculated.')).toHaveCount(
     0,
@@ -381,14 +333,11 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // Change the line shape without changing its total. This specifically
   // proves Calculate clears the stale state from its own success rather
   // than relying on an equal Figures object receiving a new identity.
-  await adaMember.getByRole('textbox', { name: 'Amount', exact: true }).fill('100.00');
-  await adaMember.getByRole('button', { name: 'Add a taxable allowance' }).click();
-  await adaMember
-    .getByRole('textbox', { name: 'Allowance label', exact: true })
-    .nth(1)
-    .fill('travel');
-  await adaMember.getByRole('textbox', { name: 'Amount', exact: true }).nth(1).fill('100.00');
-  await adaMember.getByRole('button', { name: 'Save earnings' }).click();
+  await page.getByRole('textbox', { name: 'Amount', exact: true }).fill('100.00');
+  await page.getByRole('button', { name: 'Add a taxable allowance' }).click();
+  await page.getByRole('textbox', { name: 'Allowance label', exact: true }).nth(1).fill('travel');
+  await page.getByRole('textbox', { name: 'Amount', exact: true }).nth(1).fill('100.00');
+  await page.getByRole('button', { name: 'Save earnings' }).click();
   await expect(
     page.getByText('Earnings changed since these figures were calculated.'),
   ).toBeVisible();
@@ -396,12 +345,12 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // (§0's story 75: "say so and hide the old figures") — every one of the
   // figures predates the edit that was just saved, so none of them is on the
   // screen to be read.
-  await expect(adaMember.getByRole('definition')).toHaveCount(0);
+  await expect(page.getByRole('definition')).toHaveCount(0);
   await page.getByRole('button', { name: 'Calculate' }).click();
   await expect(page.getByText('Earnings changed since these figures were calculated.')).toHaveCount(
     0,
   );
-  expect(await readFigures(adaMember)).toEqual(figures);
+  expect(await readFigures(page)).toEqual(figures);
 
   // Finalize through the confirmation. The confirmation is the deliberate
   // step (§0.26): it has to be on the screen, and it has to say how many
@@ -409,13 +358,12 @@ test('signing in and running one ordinary payroll end to end', async ({ page }) 
   // rather than a ritual.
   await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(
-    page.getByText('This creates immutable payroll history for 2 people.'),
+    page.getByText('This creates immutable payroll history for 1 person.'),
   ).toBeVisible();
   await page.getByRole('button', { name: 'Confirm finalize' }).click();
 
-  // See Ada's finalized payroll. A two-member run stays on the run screen and
-  // offers each finalized record explicitly, rather than guessing one.
-  await page.getByRole('link', { name: 'Ada Lovelace', exact: true }).click();
+  // See the finalized payroll: the one member this run finalized navigates
+  // straight there, and its figures read exactly as Calculate's did.
   await expect(page.getByText('This payroll is finalized and cannot be changed.')).toBeVisible();
   expect(await readFigures(page)).toEqual(figures);
   const finalizedUrl = page.url();

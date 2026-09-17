@@ -7,7 +7,7 @@ import { ArrowLeft } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { requestIdOf } from '../api/refusal';
-import type { PaymentSummaryRowDto } from '../api/types';
+import type { PaymentSummaryResponse, PaymentSummaryRowDto } from '../api/types';
 import { useEmployerId } from '../employments/useEmployments';
 import { humanDate, humanDateRange } from '../format';
 import { Money } from '../components/Money';
@@ -24,17 +24,7 @@ import {
   REPLACEMENT_SENTENCE,
 } from '../runOutputs/paymentSummaryText';
 import { usePaymentSummary } from '../runOutputs/usePaymentSummary';
-
-function runWasNotFound(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    ['not_found', 'employer_not_found', 'payroll_run_not_found'].includes(caught.code)
-  );
-}
-
-function runNotFinalized(caught: unknown): boolean {
-  return caught instanceof ApiError && caught.code === 'payroll_run_not_finalized';
-}
+import { runNotFinalized, runWasNotFound } from '../runOutputs/errors';
 
 function loadFailureMessage(caught: unknown): string {
   if (caught instanceof ApiError && caught.code === 'internal_error') {
@@ -79,6 +69,59 @@ function SummaryRow({ employerId, row }: { employerId: string; row: PaymentSumma
         <Money cents={row.netPayCents} />
       </td>
     </tr>
+  );
+}
+
+export function PaymentSummaryResults({
+  employerId,
+  rows,
+  totalNetPayCents,
+  excludedReversedCount,
+}: {
+  employerId: string;
+  rows: PaymentSummaryResponse['rows'];
+  totalNetPayCents: number;
+  excludedReversedCount: number;
+}) {
+  return (
+    <>
+      {rows.length === 0 && <EmptyState>No live record from this run to pay.</EmptyState>}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <caption className="sr-only">
+            Names and net pay for this run&rsquo;s live records only.
+          </caption>
+          <thead>
+            <tr className="border-b">
+              <th scope="col" className="py-1.5 pr-3 font-medium">
+                Name
+              </th>
+              <th scope="col" className="py-1.5 text-right font-medium">
+                Net Pay
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <SummaryRow key={row.finalizedPayrollId} employerId={employerId} row={row} />
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="border-t font-medium">
+              <th scope="row" className="py-1.5 pr-3 text-left font-medium">
+                Total net pay
+              </th>
+              <td className="money py-1.5 whitespace-nowrap">
+                <Money cents={totalNetPayCents} />
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <p className="text-sm text-muted-foreground">Excluded as reversed: {excludedReversedCount}</p>
+    </>
   );
 }
 
@@ -138,46 +181,12 @@ export function PaymentSummary() {
 
           <RunOutputPdfButton payrollRunId={runId} kind="paymentSummary" label="Download PDF" />
 
-          {summary.data.rows.length === 0 ? (
-            <EmptyState>No live record from this run to pay.</EmptyState>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <caption className="sr-only">
-                  Names and net pay for this run&rsquo;s live records only.
-                </caption>
-                <thead>
-                  <tr className="border-b">
-                    <th scope="col" className="py-1.5 pr-3 font-medium">
-                      Name
-                    </th>
-                    <th scope="col" className="py-1.5 text-right font-medium">
-                      Net Pay
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.data.rows.map((row) => (
-                    <SummaryRow key={row.finalizedPayrollId} employerId={employerId} row={row} />
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="border-t font-medium">
-                    <th scope="row" className="py-1.5 pr-3 text-left font-medium">
-                      Total net pay
-                    </th>
-                    <td className="money py-1.5 whitespace-nowrap">
-                      <Money cents={summary.data.totalNetPayCents} />
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          )}
-
-          <p className="text-sm text-muted-foreground">
-            Excluded as reversed: {summary.data.excludedReversedCount}
-          </p>
+          <PaymentSummaryResults
+            employerId={employerId}
+            rows={summary.data.rows}
+            totalNetPayCents={summary.data.totalNetPayCents}
+            excludedReversedCount={summary.data.excludedReversedCount}
+          />
         </>
       )}
     </main>
