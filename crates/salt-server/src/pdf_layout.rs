@@ -478,6 +478,55 @@ pub(crate) fn placements_in_ops(page: usize, ops: &[Op]) -> Vec<TextPlacement> {
     placements
 }
 
+/// Asserts that a rendered PDF laid out on `page_size_mm` with
+/// `margin_mm` keeps every text run inside the left, right and bottom
+/// margins, and that no two runs on the same baseline of the same page
+/// overlap — the one placement-level check every renderer's
+/// long-content test shares (issue #83 hardening). Returns the placements
+/// so a caller can assert more.
+#[cfg(test)]
+pub(crate) fn assert_text_fits_without_overlap(
+    bytes: &[u8],
+    page_size_mm: (f32, f32),
+    margin_mm: f32,
+) -> Vec<TextPlacement> {
+    let placements = text_placements(bytes);
+    let font = load_font();
+    let mut doc = PdfDocument::new("measure");
+    let font_id = doc.add_font(&font);
+    let layout = Layout::new(&font, font_id, page_size_mm, margin_mm);
+
+    let mut runs = Vec::new();
+    for placement in &placements {
+        let left = placement.x_mm;
+        let right = left + layout.text_width_mm(&placement.text, placement.size_pt);
+        assert!(
+            left >= margin_mm - 0.01,
+            "{placement:?} starts left of the margin"
+        );
+        assert!(
+            right <= layout.content_right_mm() + 0.01,
+            "{placement:?} ends at {right}mm, past the right margin"
+        );
+        assert!(
+            placement.y_mm >= margin_mm - 0.01,
+            "{placement:?} sits below the bottom margin"
+        );
+        runs.push((placement, left, right));
+    }
+    for (index, (a, a_left, a_right)) in runs.iter().enumerate() {
+        for (b, b_left, b_right) in &runs[index + 1..] {
+            if a.page == b.page && (a.y_mm - b.y_mm).abs() < 0.01 {
+                assert!(
+                    a_right <= b_left || b_right <= a_left,
+                    "{a:?} overlaps {b:?}"
+                );
+            }
+        }
+    }
+    placements
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

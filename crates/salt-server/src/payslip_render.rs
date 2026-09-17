@@ -430,7 +430,10 @@ fn draw_standard_v1(layout: &mut Layout, input: &PayslipInput) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pdf_layout::{TextPlacement, placements_in_ops, rendered_text, text_placements};
+    use crate::pdf_layout::{
+        TextPlacement, assert_text_fits_without_overlap, placements_in_ops, rendered_text,
+        text_placements,
+    };
     use printpdf::ParsedFont;
 
     fn a_line(label: &str, amount_cents: i64) -> PayslipLine {
@@ -795,47 +798,49 @@ mod tests {
         input.gross_pay_cents = 9_999_999_999_999;
         input.net_pay_cents = 9_999_999_999_999;
 
-        let placements = text_placements(&render_payslip(&input).unwrap());
-        let font = dejavu();
-        let layout = a_layout(&font);
-        let content_right = layout.content_right_mm();
-
+        let placements = assert_text_fits_without_overlap(
+            &render_payslip(&input).unwrap(),
+            A4_PORTRAIT_MM,
+            MARGIN_MM,
+        );
         assert!(
             placements.iter().any(|p| p.page > 0),
             "the fixture must be long enough to need a second page"
         );
-        let mut runs = Vec::new();
-        for placement in &placements {
-            let left = placement.x_mm;
-            let right = left + layout.text_width_mm(&placement.text, placement.size_pt);
-            assert!(
-                left >= MARGIN_MM - 0.01,
-                "{placement:?} starts left of the margin"
-            );
-            assert!(
-                right <= content_right + 0.01,
-                "{placement:?} ends at {right}mm, past the right margin"
-            );
-            assert!(
-                placement.y_mm >= MARGIN_MM - 0.01,
-                "{placement:?} sits below the bottom margin"
-            );
-            runs.push((placement, left, right));
-        }
-        for (index, (a, a_left, a_right)) in runs.iter().enumerate() {
-            for (b, b_left, b_right) in &runs[index + 1..] {
-                if a.page == b.page && (a.y_mm - b.y_mm).abs() < 0.01 {
-                    assert!(
-                        a_right <= b_left || b_right <= a_left,
-                        "{a:?} overlaps {b:?}"
-                    );
-                }
-            }
-        }
 
         // Nothing was lost to make it fit: every allowance amount printed.
         let text = rendered_text(&render_payslip(&input).unwrap());
         assert_eq!(text.matches("N$ 999,999,999.99").count(), 40, "{text}");
+    }
+
+    /// A batch of 50 payslips with very long employee and employer names:
+    /// one page (at least) per payslip, every page's text inside the
+    /// margins and free of overlap, and every employee named.
+    #[test]
+    fn a_fifty_payslip_batch_with_long_names_fits_without_overlapping_text() {
+        let long_word = "Unbrokenfamilynamewithoutanyspaces".repeat(3);
+        let inputs: Vec<PayslipInput> = (0..50)
+            .map(|index| {
+                let mut input = minimal_input();
+                input.employee_full_name = format!("Employee {index} {long_word} Nakale");
+                input.employer_registered_name =
+                    format!("Extraordinarily Long Registered Employer Trading Name {long_word}");
+                input
+            })
+            .collect();
+
+        let bytes = render_payslips(&inputs).unwrap();
+        let placements = assert_text_fits_without_overlap(&bytes, A4_PORTRAIT_MM, MARGIN_MM);
+
+        let pages = placements.iter().map(|p| p.page).max().unwrap() + 1;
+        assert!(pages >= 50, "expected a page per payslip, got {pages}");
+        let text = rendered_text(&bytes);
+        for index in 0..50 {
+            assert!(
+                text.contains(&format!("Employee {index} ")),
+                "employee {index} missing"
+            );
+        }
     }
 
     /// Test-only accessor: `row`'s placement test needs the raw ops of an

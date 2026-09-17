@@ -31,6 +31,11 @@ async function expectPdfDownload(page: Page, trigger: Locator) {
 
 async function finalizedNetPay(page: Page, name: string): Promise<number> {
   await page.getByRole('link', { name, exact: true }).click();
+  // The run screen also shows a Net figure per member; wait until the
+  // single payroll's own screen has replaced it.
+  await expect(
+    page.getByRole('heading', { level: 2, name: `${name}:`, exact: false }),
+  ).toBeVisible();
   const net = page.getByRole('group', { name: 'Net', exact: true });
   await expect(net).toBeVisible();
   return parseCents(await net.getByRole('definition').innerText());
@@ -43,9 +48,15 @@ test('a finalized run renders and reconciles every output', async ({ page }) => 
   // When the original journey has already run, use the following calendar
   // month and retire its fixture first. When this spec runs alone, use the
   // current month. Either way this spec itself creates exactly two eligible
-  // Employments and never consumes another test's finalized run.
+  // Employments and never consumes another test's finalized run. Decide
+  // from the run list the page itself loads: counting links right after the
+  // click races that load and would always pick the current month.
+  const runList = page.waitForResponse(
+    (response) => response.request().method() === 'GET' && /\/payroll-runs$/.test(response.url()),
+  );
   await page.getByRole('link', { name: 'Payroll' }).click();
-  const followsExistingRun = (await page.getByRole('link', { name: /, paid / }).count()) > 0;
+  const { payrollRuns } = (await (await runList).json()) as { payrollRuns: unknown[] };
+  const followsExistingRun = payrollRuns.length > 0;
   const period = calendarMonth(followsExistingRun ? 1 : 0);
 
   await page.getByRole('link', { name: 'People' }).click();

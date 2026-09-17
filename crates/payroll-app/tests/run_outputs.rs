@@ -14,13 +14,15 @@ use payroll::{
     UnsupportedDeductionStatus,
 };
 use payroll_app::{
-    EmploymentPerson, FinalizedPayrollId, FinalizedPayrollLiveness, PayrollAppError,
-    PayrollFigures, PayrollRegisterTotals, PayrollRunId, PersonParticularsFields, RunKind,
-    SaltDatabase, add_employment_to_correction_run, calculate_payroll_run,
-    correct_person_full_name, create_correction_run, create_employer, create_employment,
-    create_ordinary_payroll_run, declare_prior_employment, declare_unsupported_deduction_status,
-    finalize_payroll_run, get_finalized_payroll_detail, get_payment_summary, get_payroll_register,
-    record_compensation_terms, reverse_finalized_payroll, set_person_particulars,
+    EmployerParticularsFields, EmploymentPerson, FinalizedPayrollId, FinalizedPayrollLiveness,
+    PaymentSummary, PayrollAppError, PayrollFigures, PayrollRegister, PayrollRegisterTotals,
+    PayrollRunId, PersonParticularsFields, RunKind, SaltDatabase, add_employment_to_correction_run,
+    calculate_payroll_run, correct_person_full_name, create_correction_run, create_employer,
+    create_employment, create_ordinary_payroll_run, declare_prior_employment,
+    declare_unsupported_deduction_status, finalize_payroll_run, get_finalized_payroll_detail,
+    get_payment_summary, get_payroll_register, get_run_payslip_data, record_compensation_terms,
+    record_employment_end_date, reverse_finalized_payroll, set_employer_particulars,
+    set_person_particulars, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -161,43 +163,80 @@ fn add(a: Money, b: Money) -> Money {
         .expect("test fixture figures never overflow Money")
 }
 
-/// The eleven fields of a [`PayrollRegisterTotals`] are each exactly the sum
-/// of the same field across `a` and `b` — the whole point of a totals-summing
-/// helper next to the type, checked field by field rather than trusted.
-fn assert_totals_are_the_sum_of(
-    totals: &PayrollRegisterTotals,
-    a: &PayrollFigures,
-    b: &PayrollFigures,
-) {
-    assert_eq!(totals.basic_pay, add(a.basic_pay, b.basic_pay));
-    assert_eq!(
-        totals.taxable_allowances,
-        add(a.taxable_allowances, b.taxable_allowances)
-    );
-    assert_eq!(totals.overtime, add(a.overtime, b.overtime));
-    assert_eq!(totals.gross, add(a.gross, b.gross));
-    assert_eq!(
-        totals.taxable_remuneration,
-        add(a.taxable_remuneration, b.taxable_remuneration)
-    );
-    assert_eq!(totals.paye, add(a.paye, b.paye));
+/// Every field of `totals` is exactly the checked sum of that field over
+/// `figures` — `Money::ZERO` for none at all.
+fn assert_totals_sum(totals: &PayrollRegisterTotals, figures: &[PayrollFigures]) {
+    let sum =
+        |field: fn(&PayrollFigures) -> Money| figures.iter().map(field).fold(Money::ZERO, add);
+    assert_eq!(totals.basic_pay, sum(|f| f.basic_pay));
+    assert_eq!(totals.taxable_allowances, sum(|f| f.taxable_allowances));
+    assert_eq!(totals.overtime, sum(|f| f.overtime));
+    assert_eq!(totals.gross, sum(|f| f.gross));
+    assert_eq!(totals.taxable_remuneration, sum(|f| f.taxable_remuneration));
+    assert_eq!(totals.paye, sum(|f| f.paye));
     assert_eq!(
         totals.employee_social_security,
-        add(a.employee_social_security, b.employee_social_security)
+        sum(|f| f.employee_social_security)
     );
     assert_eq!(
         totals.employer_social_security,
-        add(a.employer_social_security, b.employer_social_security)
+        sum(|f| f.employer_social_security)
     );
+    assert_eq!(totals.medical_aid_premium, sum(|f| f.medical_aid_premium));
+    assert_eq!(totals.total_deductions, sum(|f| f.total_deductions));
+    assert_eq!(totals.net_pay, sum(|f| f.net_pay));
+}
+
+/// A register never disagrees with itself: "as finalized" is the sum of
+/// every row, "still live" the sum of the Live rows only.
+fn assert_register_reconciles(register: &PayrollRegister) {
+    let every: Vec<PayrollFigures> = register.rows.iter().map(|row| row.figures).collect();
+    let live: Vec<PayrollFigures> = register
+        .rows
+        .iter()
+        .filter(|row| row.liveness == FinalizedPayrollLiveness::Live)
+        .map(|row| row.figures)
+        .collect();
+    assert_totals_sum(&register.total_as_finalized, &every);
+    assert_totals_sum(&register.total_still_live, &live);
+}
+
+/// A summary never disagrees with itself: its total is the sum of its rows.
+fn assert_summary_reconciles(summary: &PaymentSummary) {
     assert_eq!(
-        totals.medical_aid_premium,
-        add(a.medical_aid_premium, b.medical_aid_premium)
+        summary.total_net_pay,
+        summary
+            .rows
+            .iter()
+            .fold(Money::ZERO, |total, row| add(total, row.net_pay))
     );
-    assert_eq!(
-        totals.total_deductions,
-        add(a.total_deductions, b.total_deductions)
-    );
-    assert_eq!(totals.net_pay, add(a.net_pay, b.net_pay));
+}
+
+/// Reads a register that must exist, and proves it reconciles — every
+/// successful read in this file goes through here.
+async fn register_of(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    run_id: &PayrollRunId,
+) -> PayrollRegister {
+    let register = get_payroll_register(db, employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_register_reconciles(&register);
+    register
+}
+
+/// Reads a summary that must exist, and proves it reconciles.
+async fn summary_of(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    run_id: &PayrollRunId,
+) -> PaymentSummary {
+    let summary = get_payment_summary(db, employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_summary_reconciles(&summary);
+    summary
 }
 
 /// Two Live members: both read models show both rows, in employment-id
@@ -213,9 +252,7 @@ async fn two_finalized_members_appear_in_the_register_and_summary(pool: PgPool) 
 
     let (run_id, _) = finalize_march(&db, &employer_id).await;
 
-    let register = get_payroll_register(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let register = register_of(&db, &employer_id, &run_id).await;
     assert_eq!(register.payroll_run_id, run_id);
     assert_eq!(register.kind, RunKind::Ordinary);
     assert_eq!(register.period, period());
@@ -230,20 +267,16 @@ async fn two_finalized_members_appear_in_the_register_and_summary(pool: PgPool) 
     assert_eq!(register.rows[0].replaces, None);
     assert_eq!(register.rows[1].replaces, None);
 
-    assert_totals_are_the_sum_of(
+    assert_totals_sum(
         &register.total_as_finalized,
-        &register.rows[0].figures,
-        &register.rows[1].figures,
+        &[register.rows[0].figures, register.rows[1].figures],
     );
-    assert_totals_are_the_sum_of(
+    assert_totals_sum(
         &register.total_still_live,
-        &register.rows[0].figures,
-        &register.rows[1].figures,
+        &[register.rows[0].figures, register.rows[1].figures],
     );
 
-    let summary = get_payment_summary(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let summary = summary_of(&db, &employer_id, &run_id).await;
     assert_eq!(summary.rows.len(), 2);
     assert_eq!(summary.excluded_reversed_count, 0);
     assert_eq!(
@@ -285,9 +318,7 @@ async fn reversing_a_row_keeps_it_in_the_register_but_drops_it_from_the_summary(
     .await
     .unwrap();
 
-    let register = get_payroll_register(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let register = register_of(&db, &employer_id, &run_id).await;
     let row_a = register
         .rows
         .iter()
@@ -311,13 +342,14 @@ async fn reversing_a_row_keeps_it_in_the_register_but_drops_it_from_the_summary(
     );
     assert_eq!(row_b.liveness, FinalizedPayrollLiveness::Live);
 
-    assert_totals_are_the_sum_of(&register.total_as_finalized, &row_a.figures, &row_b.figures);
+    assert_totals_sum(
+        &register.total_as_finalized,
+        &[row_a.figures, row_b.figures],
+    );
     assert_eq!(register.total_still_live.net_pay, row_b.figures.net_pay);
     assert_eq!(register.total_still_live.gross, row_b.figures.gross);
 
-    let summary = get_payment_summary(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let summary = summary_of(&db, &employer_id, &run_id).await;
     assert_eq!(summary.rows.len(), 1);
     assert_eq!(summary.rows[0].employment_id, employment_b);
     assert_eq!(summary.excluded_reversed_count, 1);
@@ -344,9 +376,7 @@ async fn a_replaced_row_names_its_replacement_both_ways(pool: PgPool) {
     let (correction_run_id, replacement_id) =
         finalize_a_correction(&db, &employer_id, &employment_id, Some(&original_id)).await;
 
-    let original_register = get_payroll_register(&db, &employer_id, original_run_id.as_str())
-        .await
-        .unwrap();
+    let original_register = register_of(&db, &employer_id, &original_run_id).await;
     assert_eq!(original_register.rows.len(), 1);
     assert_eq!(
         original_register.rows[0].liveness,
@@ -360,9 +390,7 @@ async fn a_replaced_row_names_its_replacement_both_ways(pool: PgPool) {
         }
     );
 
-    let correction_register = get_payroll_register(&db, &employer_id, correction_run_id.as_str())
-        .await
-        .unwrap();
+    let correction_register = register_of(&db, &employer_id, &correction_run_id).await;
     assert_eq!(correction_register.kind, RunKind::Correction);
     assert_eq!(correction_register.rows.len(), 1);
     assert_eq!(
@@ -378,9 +406,7 @@ async fn a_replaced_row_names_its_replacement_both_ways(pool: PgPool) {
         FinalizedPayrollLiveness::Live
     );
 
-    let correction_summary = get_payment_summary(&db, &employer_id, correction_run_id.as_str())
-        .await
-        .unwrap();
+    let correction_summary = summary_of(&db, &employer_id, &correction_run_id).await;
     assert_eq!(correction_summary.rows.len(), 1);
     assert_eq!(correction_summary.rows[0].replaces, Some(original_id));
     assert_eq!(
@@ -403,15 +429,11 @@ async fn a_row_with_no_frozen_particulars_still_reads_back_with_the_live_name(po
 
     let (run_id, _) = finalize_march(&db, &employer_id).await;
 
-    let register = get_payroll_register(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let register = register_of(&db, &employer_id, &run_id).await;
     assert_eq!(register.rows.len(), 1);
     assert_eq!(register.rows[0].full_name, "Ada Lovelace");
 
-    let summary = get_payment_summary(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let summary = summary_of(&db, &employer_id, &run_id).await;
     assert_eq!(summary.rows[0].full_name, "Ada Lovelace");
 }
 
@@ -450,9 +472,7 @@ async fn the_frozen_name_wins_over_a_later_correction(pool: PgPool) {
     .await
     .unwrap();
 
-    let register = get_payroll_register(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let register = register_of(&db, &employer_id, &run_id).await;
     assert_eq!(register.rows[0].full_name, "Ada Lovelace");
 }
 
@@ -547,9 +567,7 @@ async fn register_figures_match_the_finalized_payroll_detail(pool: PgPool) {
     let (run_id, finalized) = finalize_march(&db, &employer_id).await;
     let finalized_payroll_id = finalized[0].1.clone();
 
-    let register = get_payroll_register(&db, &employer_id, run_id.as_str())
-        .await
-        .unwrap();
+    let register = register_of(&db, &employer_id, &run_id).await;
     let row = register
         .rows
         .iter()
@@ -561,4 +579,281 @@ async fn register_figures_match_the_finalized_payroll_detail(pool: PgPool) {
         .unwrap();
 
     assert_eq!(row.figures, detail.figures);
+}
+
+// ---- Step 7b hardening -------------------------------------------------
+
+fn reversed_reason(liveness: &FinalizedPayrollLiveness) -> &str {
+    match liveness {
+        FinalizedPayrollLiveness::Reversed { reason, .. } => reason,
+        FinalizedPayrollLiveness::Live => panic!("expected a Reversed row, found a Live one"),
+    }
+}
+
+/// Every row of the run reversed: the register still shows them all, its
+/// "still live" total is zero, and the summary lists nobody, totals N$0.00
+/// and counts every row as excluded.
+#[sqlx::test]
+async fn a_run_whose_every_row_is_reversed_has_a_zero_live_total_and_an_empty_summary(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    a_fully_declared_employment(&db, &employer_id, "Bob Marker").await;
+    let (run_id, finalized) = finalize_march(&db, &employer_id).await;
+    for (_, finalized_payroll_id) in &finalized {
+        reverse_finalized_payroll(
+            &db,
+            finalized_payroll_id,
+            "the whole run was wrong",
+            "actor",
+        )
+        .await
+        .unwrap();
+    }
+
+    let register = register_of(&db, &employer_id, &run_id).await;
+    assert_eq!(register.rows.len(), 2);
+    for row in &register.rows {
+        assert_eq!(reversed_reason(&row.liveness), "the whole run was wrong");
+    }
+    assert_totals_sum(&register.total_still_live, &[]);
+    assert_eq!(register.total_still_live.net_pay, Money::ZERO);
+    assert_ne!(register.total_as_finalized.net_pay, Money::ZERO);
+
+    let summary = summary_of(&db, &employer_id, &run_id).await;
+    assert!(summary.rows.is_empty());
+    assert_eq!(summary.total_net_pay, Money::ZERO);
+    assert_eq!(summary.excluded_reversed_count, 2);
+}
+
+/// A Replacement that is itself reversed later: the Correction run's
+/// register shows it Reversed (still naming what it replaced), and its
+/// summary excludes it — a replacement gets no exemption from liveness.
+#[sqlx::test]
+async fn a_replacement_reversed_later_is_reversed_in_its_register_and_excluded_from_its_summary(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    let (_person_id, employment_id) =
+        a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    let (_, finalized) = finalize_march(&db, &employer_id).await;
+    let original_id = finalized[0].1.clone();
+    reverse_finalized_payroll(&db, &original_id, "March salary was wrong", "actor")
+        .await
+        .unwrap();
+    let (correction_run_id, replacement_id) =
+        finalize_a_correction(&db, &employer_id, &employment_id, Some(&original_id)).await;
+
+    reverse_finalized_payroll(
+        &db,
+        &replacement_id,
+        "the correction was wrong too",
+        "actor",
+    )
+    .await
+    .unwrap();
+
+    let register = register_of(&db, &employer_id, &correction_run_id).await;
+    assert_eq!(register.rows.len(), 1);
+    assert_eq!(register.rows[0].finalized_payroll_id, replacement_id);
+    assert_eq!(register.rows[0].replaces, Some(original_id));
+    assert_eq!(
+        reversed_reason(&register.rows[0].liveness),
+        "the correction was wrong too"
+    );
+    assert_eq!(register.total_still_live.net_pay, Money::ZERO);
+
+    let summary = summary_of(&db, &employer_id, &correction_run_id).await;
+    assert!(summary.rows.is_empty());
+    assert_eq!(summary.excluded_reversed_count, 1);
+    assert_eq!(summary.total_net_pay, Money::ZERO);
+}
+
+/// A Person's name corrected after finalization changes none of the three
+/// outputs: register, summary and batch payslips all print the frozen name.
+#[sqlx::test]
+async fn a_name_corrected_after_finalization_leaves_all_three_outputs_on_the_frozen_name(
+    pool: PgPool,
+) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        EmployerParticularsFields {
+            registered_name: "Acme Corp (Pty) Ltd".to_string(),
+            address_line1: "1 Independence Ave".to_string(),
+            address_line2: None,
+            city: "Windhoek".to_string(),
+            postal_code: Some("10001".to_string()),
+            income_tax_number: Some("12345678".to_string()),
+            social_security_number: None,
+        },
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (person_id, _) = a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &person_id,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (run_id, _) = finalize_march(&db, &employer_id).await;
+
+    correct_person_full_name(
+        &db,
+        &employer_id,
+        &person_id,
+        "Ada King, Countess of Lovelace",
+        &[period()],
+        "full legal name recorded",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let register = register_of(&db, &employer_id, &run_id).await;
+    assert_eq!(register.rows[0].full_name, "Ada Lovelace");
+    let summary = summary_of(&db, &employer_id, &run_id).await;
+    assert_eq!(summary.rows[0].full_name, "Ada Lovelace");
+    let payslips = get_run_payslip_data(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(payslips.len(), 1);
+    assert_eq!(payslips[0].person_particulars.full_name, "Ada Lovelace");
+}
+
+/// A mixed run — a prorated leaver, a member with overtime and medical aid,
+/// and a plain member: every register row's figures are exactly the
+/// figures `get_finalized_payroll_detail` reads for that row.
+#[sqlx::test]
+async fn a_mixed_run_register_matches_the_finalized_payroll_detail_row_by_row(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    let (_, leaver) = a_fully_declared_employment(&db, &employer_id, "Lena Leaver").await;
+    let (_, busy) = a_fully_declared_employment(&db, &employer_id, "Otto Overtime").await;
+    a_fully_declared_employment(&db, &employer_id, "Pat Plain").await;
+    record_employment_end_date(
+        &db,
+        &employer_id,
+        &leaver,
+        date(2026, 3, 15),
+        "resigned",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+    set_run_pay_lines(
+        &db,
+        &run_id,
+        &busy,
+        vec![payroll::EarningInstruction::Overtime {
+            hours: payroll::OvertimeHours::new(rust_decimal::Decimal::new(12, 0)).unwrap(),
+            multiplier: payroll::OvertimeMultiplier::OneAndAHalf,
+            label: None,
+        }],
+        vec![payroll::VoluntaryDeductionInstruction::MedicalAidPremium(
+            Money::from_cents(75_000).unwrap(),
+        )],
+    )
+    .await
+    .unwrap();
+    assert!(
+        calculate_payroll_run(&db, &run_id, "calculator")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let finalized = finalize_payroll_run(&db, &run_id, "finalizer")
+        .await
+        .unwrap()
+        .finalized;
+
+    let register = register_of(&db, &employer_id, &run_id).await;
+    assert_eq!(register.rows.len(), 3);
+    for row in &register.rows {
+        let finalized_payroll_id = &finalized
+            .iter()
+            .find(|(employment_id, _)| employment_id == &row.employment_id)
+            .unwrap()
+            .1;
+        let detail = get_finalized_payroll_detail(&db, &employer_id, finalized_payroll_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(row.figures, detail.figures);
+    }
+
+    let row = |employment_id: &EmploymentId| {
+        register
+            .rows
+            .iter()
+            .find(|row| &row.employment_id == employment_id)
+            .unwrap()
+            .figures
+    };
+    assert!(row(&leaver).basic_pay < Money::from_cents(1_500_000).unwrap());
+    assert_ne!(row(&busy).overtime, Money::ZERO);
+    assert_eq!(
+        row(&busy).medical_aid_premium,
+        Money::from_cents(75_000).unwrap()
+    );
+}
+
+/// Reversals landing while the outputs are read never yield a register or
+/// summary that disagrees with its own rows: each read is one snapshot.
+#[sqlx::test]
+async fn reads_racing_reversals_always_reconcile(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    for name in ["A", "B", "C", "D", "E", "F"] {
+        a_fully_declared_employment(&db, &employer_id, name).await;
+    }
+    let (run_id, finalized) = finalize_march(&db, &employer_id).await;
+
+    let reverser = {
+        let db = SaltDatabase::from_pool(pool.clone());
+        tokio::spawn(async move {
+            for (_, finalized_payroll_id) in finalized {
+                reverse_finalized_payroll(&db, &finalized_payroll_id, "racing", "actor")
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    let reader = {
+        let db = SaltDatabase::from_pool(pool);
+        let employer_id = employer_id.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            for _ in 0..40 {
+                let register = register_of(&db, &employer_id, &run_id).await;
+                assert_eq!(register.rows.len(), 6);
+                let summary = summary_of(&db, &employer_id, &run_id).await;
+                assert_eq!(summary.rows.len() + summary.excluded_reversed_count, 6);
+            }
+        })
+    };
+    reverser.await.unwrap();
+    reader.await.unwrap();
+
+    let summary = summary_of(&db, &employer_id, &run_id).await;
+    assert_eq!(summary.excluded_reversed_count, 6);
 }

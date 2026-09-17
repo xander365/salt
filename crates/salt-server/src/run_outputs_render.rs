@@ -470,6 +470,9 @@ const REPLACEMENT_SENTENCE: &str = "This replaces an earlier payroll for the sam
 const CORRECTION_SENTENCE: &str = "Reversing a payroll in Salt does not recover money already \
      paid and does not amend a submitted statutory return.";
 
+/// The Payment Summary's page margin, on every side.
+const SUMMARY_MARGIN_MM: f32 = 18.0;
+
 /// Renders `input` to PDF bytes: A4 portrait, names and net pay for Live
 /// records only, the count excluded as reversed (always printed, even when
 /// zero), and every acceptance-criterion sentence README.md's own Payment
@@ -479,7 +482,7 @@ pub fn render_payment_summary(input: &PaymentSummaryPdfInput) -> Vec<u8> {
     let font = load_font();
     let mut doc = PdfDocument::new("Payment summary");
     let font_id = doc.add_font(&font);
-    let mut layout = Layout::new(&font, font_id, A4_PORTRAIT_MM, 18.0);
+    let mut layout = Layout::new(&font, font_id, A4_PORTRAIT_MM, SUMMARY_MARGIN_MM);
 
     let margin = layout.margin_mm();
     layout.text_at(margin, TITLE_SIZE, "Payment summary");
@@ -533,7 +536,7 @@ pub fn render_payment_summary(input: &PaymentSummaryPdfInput) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pdf_layout::rendered_text;
+    use crate::pdf_layout::{assert_text_fits_without_overlap, rendered_text};
 
     fn a_figures(net_pay_cents: i64) -> RegisterFiguresInput {
         RegisterFiguresInput {
@@ -640,61 +643,77 @@ mod tests {
         );
     }
 
-    /// A 50-row Register spans several pages; no two text runs on the same
-    /// baseline of the same page may overlap, and nothing may print past
-    /// either margin — the same placement-level property
-    /// `payslip_render`'s own extreme-payslip test proves for a Payslip.
+    /// A long name worth printing at its most extreme: an unbroken word no
+    /// wrap can split, inside an otherwise ordinary full name.
+    fn a_very_long_name(index: usize) -> String {
+        format!(
+            "Employee {index} {} Van Der Merwe-Nakale",
+            "Unbrokenfamilynamewithoutanyspaces".repeat(3)
+        )
+    }
+
+    /// A 50-row Register with very long names spans several pages; no two
+    /// text runs on the same baseline of the same page may overlap, and
+    /// nothing may print past either margin — the same placement-level
+    /// property `payslip_render`'s own extreme-payslip test proves for a
+    /// Payslip.
     #[test]
-    fn a_fifty_row_register_paginates_without_overlapping_text() {
+    fn a_fifty_row_register_with_long_names_paginates_without_overlapping_text() {
         let mut input = minimal_register();
         input.rows = (0..50)
-            .map(|index| a_register_row(&format!("Employee Number {index}"), 1_375_500 + index))
+            .map(|index| a_register_row(&a_very_long_name(index), 1_375_500 + index as i64))
             .collect();
         input.rows[0].liveness = RegisterPdfLiveness::Reversed {
             reason: "March salary was wrong".to_string(),
             replaced_by: Some("22222222-2222-2222-2222-222222222222".to_string()),
         };
+        input.rows[1].replaces = Some("33333333-3333-3333-3333-333333333333".to_string());
 
         let bytes = render_register(&input);
-        let placements = crate::pdf_layout::text_placements(&bytes);
+        let placements =
+            assert_text_fits_without_overlap(&bytes, A4_LANDSCAPE_MM, REGISTER_MARGIN_MM);
         assert!(
             placements.iter().any(|p| p.page > 0),
             "the fixture must be long enough to need a second page"
         );
-
-        let font = load_font();
-        let mut doc = PdfDocument::new("measure");
-        let font_id = doc.add_font(&font);
-        let layout = Layout::new(&font, font_id, A4_LANDSCAPE_MM, REGISTER_MARGIN_MM);
-
-        let mut runs = Vec::new();
-        for placement in &placements {
-            let left = placement.x_mm;
-            let right = left + layout.text_width_mm(&placement.text, placement.size_pt);
-            assert!(
-                left >= REGISTER_MARGIN_MM - 0.01,
-                "{placement:?} starts left of the margin"
-            );
-            assert!(
-                right <= layout.content_right_mm() + 0.01,
-                "{placement:?} ends at {right}mm, past the right margin"
-            );
-            assert!(
-                placement.y_mm >= REGISTER_MARGIN_MM - 0.01,
-                "{placement:?} sits below the bottom margin"
-            );
-            runs.push((placement, left, right));
+        // Nothing was lost to make it fit: every row's net pay printed.
+        let text = rendered_text(&bytes);
+        for index in 0..50 {
+            let net_pay = format_money(1_375_500 + index);
+            assert!(text.contains(&net_pay), "{net_pay} missing: {text}");
         }
-        for (index, (a, a_left, a_right)) in runs.iter().enumerate() {
-            for (b, b_left, b_right) in &runs[index + 1..] {
-                if a.page == b.page && (a.y_mm - b.y_mm).abs() < 0.01 {
-                    assert!(
-                        a_right <= b_left || b_right <= a_left,
-                        "{a:?} overlaps {b:?}"
-                    );
-                }
-            }
+    }
+
+    /// A 50-row Payment Summary with very long names, some of them
+    /// Replacements, spans several pages without overlap or leaving the
+    /// page, and still prints every row's net pay and the closing lines.
+    #[test]
+    fn a_fifty_row_payment_summary_with_long_names_paginates_without_overlapping_text() {
+        let mut input = minimal_summary();
+        input.rows = (0..50)
+            .map(|index| PaymentSummaryPdfRow {
+                full_name: a_very_long_name(index),
+                net_pay_cents: 1_000_000 + index as i64,
+                replaces: (index % 7 == 0)
+                    .then(|| "33333333-3333-3333-3333-333333333333".to_string()),
+            })
+            .collect();
+        input.is_correction = true;
+        input.excluded_reversed_count = 4;
+
+        let bytes = render_payment_summary(&input);
+        let placements =
+            assert_text_fits_without_overlap(&bytes, A4_PORTRAIT_MM, SUMMARY_MARGIN_MM);
+        assert!(
+            placements.iter().any(|p| p.page > 0),
+            "the fixture must be long enough to need a second page"
+        );
+        let text = rendered_text(&bytes);
+        for index in 0..50 {
+            let net_pay = format_money(1_000_000 + index);
+            assert!(text.contains(&net_pay), "{net_pay} missing: {text}");
         }
+        assert!(text.contains("Excluded as reversed: 4"), "{text}");
     }
 
     fn minimal_summary() -> PaymentSummaryPdfInput {
