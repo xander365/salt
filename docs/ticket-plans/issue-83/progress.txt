@@ -6,7 +6,7 @@ Write notes (decisions, surprises, blockers) under the step.
 [x] 1  Register and payment summary read models (payroll-app) 16ce096
 [x] 2  Register and payment summary JSON routes (salt-server) 41ac436
 [x] 3  Batch payslips PDF (payroll-app + salt-server) 6585295
-[x] 4  Register and payment summary PDFs (salt-server) PENDING_COMMIT
+[x] 4  Register and payment summary PDFs (salt-server) ec3ae95
 [ ] 5  Outputs on the finalized run screen (web)
 [ ] 6  Browser test, docs, no-CSV guard
 [ ] 7a Code review of #83
@@ -39,7 +39,7 @@ the workspace build until a minimal 409 "payroll_run_not_finalized"
 arm was added — step 2 does not need to add this arm again, only the
 actual JSON route.
 
-Step 4 (pending commit): step 3 left Layout/format_money/heading/etc as
+Step 4 (ec3ae95): step 3 left Layout/format_money/heading/etc as
 private items inside payslip_render.rs (not shared), so this step pulled
 them into a new pdf_layout.rs — Layout now takes page_size_mm and margin_mm
 as constructor args instead of fixed A4-portrait module constants, so the
