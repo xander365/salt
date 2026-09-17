@@ -3,7 +3,7 @@ Plan: docs/ticket-plans/issue-83/README.md
 Mark a step [x] when its commit is made. Add the commit hash after it.
 Write notes (decisions, surprises, blockers) under the step.
 
-[ ] 1  Register and payment summary read models (payroll-app)
+[x] 1  Register and payment summary read models (payroll-app) 16ce096
 [ ] 2  Register and payment summary JSON routes (salt-server)
 [ ] 3  Batch payslips PDF (payroll-app + salt-server)
 [ ] 4  Register and payment summary PDFs (salt-server)
@@ -13,3 +13,12 @@ Write notes (decisions, surprises, blockers) under the step.
 [ ] 7b Harden the run outputs of #83
 
 Notes:
+
+Step 1 (16ce096): RunKind was pub(crate) — made it pub, plus made
+RunKind::from_column, RunStatus::from_column and parse_payroll_run_id
+pub(crate) so run_outputs.rs could use them. salt-server's
+payroll_error.rs has a deliberate no-wildcard match over every
+PayrollAppError variant, so adding PayrollRunNotFinalized there broke
+the workspace build until a minimal 409 "payroll_run_not_finalized"
+arm was added — step 2 does not need to add this arm again, only the
+actual JSON route.
