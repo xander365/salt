@@ -31,6 +31,7 @@ mod person_particulars;
 mod prior_employment;
 mod provenance;
 mod reversal;
+mod run_outputs;
 mod run_override;
 mod sequencing;
 mod session;
@@ -78,9 +79,10 @@ pub use operator::{
 };
 pub use payroll_run::{
     CalculationState, PayLineInstruction, PayLineSource, PayrollFigures, PayrollRunBlocker,
-    PayrollRunDetail, PayrollRunId, PayrollRunMember, PayrollRunSummary, RunPayLine, RunStatus,
-    create_correction_run, create_ordinary_payroll_run, get_payroll_run_detail, list_payroll_runs,
-    remove_employment_from_run, set_run_pay_lines, verify_payroll_run_belongs_to_employer,
+    PayrollRunDetail, PayrollRunId, PayrollRunMember, PayrollRunSummary, RunKind, RunPayLine,
+    RunStatus, create_correction_run, create_ordinary_payroll_run, get_payroll_run_detail,
+    list_payroll_runs, remove_employment_from_run, set_run_pay_lines,
+    verify_payroll_run_belongs_to_employer,
 };
 pub use payslip::{PayslipData, PayslipReversal, get_payslip_data};
 pub use person_particulars::{
@@ -90,6 +92,10 @@ pub use person_particulars::{
 pub use prior_employment::{declare_prior_employment, get_prior_employment};
 pub use provenance::FrozenPayLine;
 pub use reversal::reverse_finalized_payroll;
+pub use run_outputs::{
+    FinalizedPayrollLiveness, PaymentSummary, PaymentSummaryRow, PayrollRegister,
+    PayrollRegisterRow, PayrollRegisterTotals, get_payment_summary, get_payroll_register,
+};
 pub use run_override::{
     MemberProposalRefresh, StandingItemProposal, StandingItemsChangedSinceProposal,
     StandingProposalRefresh, override_standing_pay_line, refresh_standing_proposals,

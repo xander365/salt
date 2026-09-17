@@ -597,9 +597,11 @@ pub(crate) struct LockedRun {
 
 /// The two kinds of run §4.6 names, as a type rather than the `TEXT` the
 /// column holds — every lifecycle decision made on a bare string is one
-/// typo away from silently taking the wrong branch.
+/// typo away from silently taking the wrong branch. Public — issue #83's
+/// register and payment summary read models (`crate::run_outputs`) hand it
+/// straight to `salt-server`, the same split [`RunStatus`] already draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunKind {
+pub enum RunKind {
     Ordinary,
     Correction,
 }
@@ -609,7 +611,7 @@ impl RunKind {
     /// [`crate::employer::pay_schedule_from_columns`] does: `payroll_run`'s
     /// own CHECK admits these two values only, so a third would mean the
     /// schema no longer matches this code, not a fact about the run.
-    fn from_column(kind: &str) -> Self {
+    pub(crate) fn from_column(kind: &str) -> Self {
         match kind {
             "ordinary" => Self::Ordinary,
             "correction" => Self::Correction,
@@ -634,7 +636,7 @@ pub enum RunStatus {
 
 impl RunStatus {
     /// Panics for the same reason [`RunKind::from_column`] does.
-    fn from_column(status: &str) -> Self {
+    pub(crate) fn from_column(status: &str) -> Self {
         match status {
             "draft" => Self::Draft,
             "calculated" => Self::Calculated,
@@ -1290,7 +1292,7 @@ pub async fn set_run_pay_lines(
 /// column's `::uuid` cast would otherwise fail as a database error, turning
 /// a client's malformed path segment into a 500 rather than the 404 it
 /// deserves.
-fn parse_payroll_run_id(payroll_run_id: &str) -> Result<PayrollRunId, PayrollAppError> {
+pub(crate) fn parse_payroll_run_id(payroll_run_id: &str) -> Result<PayrollRunId, PayrollAppError> {
     if uuid::Uuid::parse_str(payroll_run_id).is_err() {
         return Err(PayrollAppError::PayrollRunNotFound(PayrollRunId::new(
             payroll_run_id,

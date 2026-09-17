@@ -716,6 +716,12 @@ pub enum PayrollAppError {
     /// an ordinary allowance, so an operator is never nudged into disguising
     /// one as one.
     EarningLabelIsOutOfScope { label: String },
+    /// `GetPayrollRegister` or `GetPaymentSummary` was asked for a PayrollRun
+    /// that is not yet `Finalized` (issue #83) — a Draft or Calculated run
+    /// has no `FinalizedPayroll` row for either read model to show yet, the
+    /// same "nothing to read back" reasoning [`Self::FinalizedPayrollNotFound`]
+    /// applies to a single row.
+    PayrollRunNotFinalized(PayrollRunId),
 }
 
 /// Which stored fact carries the boundary a `PaySchedule` change would
@@ -1341,6 +1347,10 @@ impl std::fmt::Display for PayrollAppError {
                  calculate (leave payout, notice pay and severance are out of scope); record \
                  and pay it outside Salt"
             ),
+            Self::PayrollRunNotFinalized(payroll_run_id) => write!(
+                f,
+                "PayrollRun {payroll_run_id} has no outputs: it is not finalized"
+            ),
         }
     }
 }
@@ -1456,7 +1466,8 @@ impl std::error::Error for PayrollAppError {
             | Self::StandingPayLineChangedWithoutOverride { .. }
             | Self::EmploymentEndDateReasonCannotBeEmpty
             | Self::EmploymentEndDatePrecedesPaidPeriods { .. }
-            | Self::EarningLabelIsOutOfScope { .. } => None,
+            | Self::EarningLabelIsOutOfScope { .. }
+            | Self::PayrollRunNotFinalized(_) => None,
         }
     }
 }

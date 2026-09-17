@@ -273,6 +273,16 @@ fn classify_payroll_app_error(err: &PayrollAppError) -> Classification {
             "payroll_run_not_calculated",
             Some(json!({ "payrollRunId": id.to_string() })),
         ),
+        // Issue #83, step 1's own README: a Draft or Calculated run has no
+        // outputs yet. The route that reaches this (step 2) is not wired up
+        // yet, but `classify_payroll_app_error`'s no-wildcard match (see the
+        // module doc) demands every `PayrollAppError` variant is named the
+        // moment it exists, not only once a caller can reach it.
+        PayrollAppError::PayrollRunNotFinalized(id) => Classification::Mapped(
+            StatusCode::CONFLICT,
+            "payroll_run_not_finalized",
+            Some(json!({ "payrollRunId": id.to_string() })),
+        ),
         // The nested refusal's own `Display` is never repeated into this
         // response: it is already embedded in this variant's own `Display`
         // (used as this refusal's `message` once we return `Mapped`), and
