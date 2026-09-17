@@ -84,7 +84,7 @@ pub use payroll_run::{
     list_payroll_runs, remove_employment_from_run, set_run_pay_lines,
     verify_payroll_run_belongs_to_employer,
 };
-pub use payslip::{PayslipData, PayslipReversal, get_payslip_data};
+pub use payslip::{PayslipData, PayslipReversal, get_payslip_data, get_run_payslip_data};
 pub use person_particulars::{
     PersonParticulars, PersonParticularsFields, correct_person_full_name, get_person_particulars,
     set_person_particulars,

@@ -15,12 +15,12 @@ use payroll::{
 };
 use payroll_app::{
     EmployerParticularsFields, EmploymentPerson, FinalizedPayrollId, PAYSLIP_TEMPLATE_VERSION,
-    PayLineSource, PayrollAppError, PersonParticularsFields, SaltDatabase,
+    PayLineSource, PayrollAppError, PayrollRunId, PersonParticularsFields, SaltDatabase,
     add_employment_to_correction_run, calculate_payroll_run, create_correction_run,
     create_employer, create_employment, create_ordinary_payroll_run, declare_prior_employment,
     declare_unsupported_deduction_status, finalize_payroll_run, get_payslip_data,
-    record_compensation_terms, reverse_finalized_payroll, set_employer_particulars,
-    set_person_particulars, set_run_pay_lines,
+    get_run_payslip_data, record_compensation_terms, reverse_finalized_payroll,
+    set_employer_particulars, set_person_particulars, set_run_pay_lines,
 };
 use sqlx::PgPool;
 
@@ -134,6 +134,26 @@ async fn finalize_march(
         .find(|(id, _)| id == employment_id)
         .expect("the Employment must have finalized")
         .1
+}
+
+/// As [`finalize_march`], but for every currently-active Employment at
+/// once — the shortest path to a batch worth ordering, and returns the
+/// full outcome so a caller can look a given Employment's own id up rather
+/// than trust array order.
+async fn finalize_march_run(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+) -> (PayrollRunId, Vec<(EmploymentId, FinalizedPayrollId)>) {
+    let run_id = create_ordinary_payroll_run(db, employer_id, period(), date(2026, 4, 5), "actor")
+        .await
+        .unwrap();
+    calculate_payroll_run(db, &run_id, "calculator")
+        .await
+        .unwrap();
+    let outcome = finalize_payroll_run(db, &run_id, "finalizer")
+        .await
+        .unwrap();
+    (run_id, outcome.finalized)
 }
 
 async fn finalize_a_correction(
@@ -542,4 +562,258 @@ async fn a_one_off_allowances_frozen_source_comes_through_on_the_payslip(pool: P
     assert_eq!(allowance.standing_pay_item_id, None);
     assert_eq!(allowance.override_reason, None);
     assert_eq!(allowance.removed_reason, None);
+}
+
+/// `get_run_payslip_data` (issue #83): every member of a finalized run, in
+/// `ORDER BY employment_id` — Ada was created first, so she prints first.
+#[sqlx::test]
+async fn get_run_payslip_data_reads_every_row_in_member_order(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        employer_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (ada_person, ada_employment) =
+        a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &ada_person,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (bob_person, bob_employment) =
+        a_fully_declared_employment(&db, &employer_id, "Bob Marley").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &bob_person,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let (run_id, finalized) = finalize_march_run(&db, &employer_id).await;
+    let ada_finalized_id = finalized
+        .iter()
+        .find(|(id, _)| *id == ada_employment)
+        .unwrap()
+        .1
+        .clone();
+    let bob_finalized_id = finalized
+        .iter()
+        .find(|(id, _)| *id == bob_employment)
+        .unwrap()
+        .1
+        .clone();
+
+    let rows = get_run_payslip_data(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].employment_id, ada_employment);
+    assert_eq!(rows[0].id, ada_finalized_id);
+    assert_eq!(rows[1].employment_id, bob_employment);
+    assert_eq!(rows[1].id, bob_finalized_id);
+}
+
+/// A Correction's replacement row belongs to its own run, never the
+/// original — `get_run_payslip_data` on the original run must keep showing
+/// only its own two members, the reversed original included, and never the
+/// replacement a later run produced.
+#[sqlx::test]
+async fn get_run_payslip_data_scopes_to_its_own_run_even_after_a_correction(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        employer_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (ada_person, ada_employment) =
+        a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &ada_person,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (bob_person, _bob_employment) =
+        a_fully_declared_employment(&db, &employer_id, "Bob Marley").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &bob_person,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let (run_id, finalized) = finalize_march_run(&db, &employer_id).await;
+    let ada_finalized_id = finalized
+        .iter()
+        .find(|(id, _)| *id == ada_employment)
+        .unwrap()
+        .1
+        .clone();
+
+    reverse_finalized_payroll(&db, &ada_finalized_id, "March salary was wrong", "actor")
+        .await
+        .unwrap();
+    let replacement_id =
+        finalize_a_correction(&db, &employer_id, &ada_employment, Some(&ada_finalized_id)).await;
+
+    let rows = get_run_payslip_data(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap();
+    let ids: Vec<FinalizedPayrollId> = rows.iter().map(|row| row.id.clone()).collect();
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "the correction's own row belongs to a different run"
+    );
+    assert!(ids.contains(&ada_finalized_id));
+    assert!(!ids.contains(&replacement_id));
+}
+
+/// **Missing particulars in a batch refuse the whole batch**, naming the
+/// *first* row in member order that lacks them — Ada's row here, never
+/// Bob's, since Ada was created first. No public use case leaves a
+/// fully-declared row missing a frozen particular (the same reasoning
+/// `a_payroll_predating_the_freeze_is_refused_naming_what_is_missing` above
+/// already applies to one row): a raw `UPDATE` stands in for the
+/// "predates issue #73" state on Ada's row only, so this proves the
+/// refusal names the first offending row, not merely *a* row.
+#[sqlx::test]
+async fn a_batchs_first_missing_row_refuses_the_whole_batch(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool.clone());
+    let employer_id = an_employer(&db).await;
+    set_employer_particulars(
+        &db,
+        &employer_id,
+        employer_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (ada_person, ada_employment) =
+        a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &ada_person,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+    let (bob_person, _bob_employment) =
+        a_fully_declared_employment(&db, &employer_id, "Bob Marley").await;
+    set_person_particulars(
+        &db,
+        &employer_id,
+        &bob_person,
+        person_particulars_fields(),
+        &[],
+        "",
+        "operator:alice",
+    )
+    .await
+    .unwrap();
+
+    let (run_id, finalized) = finalize_march_run(&db, &employer_id).await;
+    let ada_finalized_id = finalized
+        .iter()
+        .find(|(id, _)| *id == ada_employment)
+        .unwrap()
+        .1
+        .clone();
+
+    sqlx::query("UPDATE finalized_payroll SET payslip_template_version = NULL WHERE id = $1::uuid")
+        .bind(ada_finalized_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = get_run_payslip_data(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        PayrollAppError::PayslipParticularsNotFrozen {
+            finalized_payroll_id: ada_finalized_id,
+            missing: vec!["PayslipTemplateVersion"],
+        }
+    );
+}
+
+/// A Draft (never calculated) run has no `FinalizedPayroll` rows for a
+/// batch to read.
+#[sqlx::test]
+async fn get_run_payslip_data_refuses_a_run_that_has_not_finalized(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    let run_id =
+        create_ordinary_payroll_run(&db, &employer_id, period(), date(2026, 4, 5), "actor")
+            .await
+            .unwrap();
+
+    let err = get_run_payslip_data(&db, &employer_id, run_id.as_str())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, PayrollAppError::PayrollRunNotFinalized(run_id));
+}
+
+/// ADR-0017's own rule, restated for this read model: a run id belonging to
+/// another Employer reads back exactly as an unknown one would.
+#[sqlx::test]
+async fn get_run_payslip_data_refuses_a_run_belonging_to_another_employer(pool: PgPool) {
+    let db = SaltDatabase::from_pool(pool);
+    let employer_id = an_employer(&db).await;
+    let (_person_id, _employment_id) =
+        a_fully_declared_employment(&db, &employer_id, "Ada Lovelace").await;
+    let (run_id, _finalized) = finalize_march_run(&db, &employer_id).await;
+
+    let other_employer_id = an_employer(&db).await;
+
+    let err = get_run_payslip_data(&db, &other_employer_id, run_id.as_str())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, PayrollAppError::PayrollRunNotFound(run_id));
 }

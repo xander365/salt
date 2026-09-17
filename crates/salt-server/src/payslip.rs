@@ -32,7 +32,7 @@ use payroll_app::{
 use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::error::ApiError;
 use crate::payslip_render::{
-    PayslipInput, PayslipLine, PayslipReversedNotice, format_date, render_payslip,
+    PayslipInput, PayslipLine, PayslipReversedNotice, format_date, render_payslip, render_payslips,
 };
 use crate::state::AppState;
 
@@ -55,6 +55,33 @@ pub(crate) async fn get_finalized_payroll_payslip(
     let filename = format!("payslip-{}.pdf", data.id);
     let input = to_render_input(data);
     let bytes = render_payslip(&input)
+        .map_err(|err| ApiError::internal(format!("payslip render refused: {err}")))?;
+
+    Ok(pdf_response(bytes, &filename))
+}
+
+/// `GET /api/employers/{e}/payroll-runs/{r}/payslips.pdf` (issue #83): every
+/// payslip a finalized run produced, one after another, each starting on a
+/// new page, in member order (`employment.id`) — that run's own
+/// `FinalizedPayroll` rows only, including a reversed one (still marked
+/// REVERSED) and a CorrectionRun's single member. Refused (409,
+/// `payroll_run_not_finalized`) for a Draft or Calculated run, and (409,
+/// `payslip_particulars_not_frozen`) for the first row in member order that
+/// never froze what a Payslip demands — the whole batch, not only that row.
+/// An unknown or cross-Employer run id answers 404 (ADR-0017), the same
+/// refusal `get_finalized_payroll_payslip` gives a bad `finalized_payroll_id`.
+pub(crate) async fn get_payroll_run_payslips(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+
+    let data = payroll_app::get_run_payslip_data(state.db(), &employer_id, &payroll_run_id).await?;
+
+    let filename = format!("payslips-{payroll_run_id}.pdf");
+    let inputs: Vec<PayslipInput> = data.into_iter().map(to_render_input).collect();
+    let bytes = render_payslips(&inputs)
         .map_err(|err| ApiError::internal(format!("payslip render refused: {err}")))?;
 
     Ok(pdf_response(bytes, &filename))

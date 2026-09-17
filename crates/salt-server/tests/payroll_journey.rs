@@ -731,6 +731,18 @@ fn payment_summary_request(employer_id: &str, run_id: &str, cookie: &str) -> Req
         .unwrap()
 }
 
+/// `GET .../payslips.pdf` (issue #83).
+fn run_payslips_request(employer_id: &str, run_id: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/payslips.pdf"
+        ))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
 /// `POST .../pay-lines/{standing_pay_item_id}/override` (issue #80).
 fn override_standing_pay_line_request(
     employer_id: &str,
@@ -1542,6 +1554,15 @@ async fn a_payroll_operator_reaches_every_route_in_spec_2() {
             .status(),
         StatusCode::OK
     );
+    assert_eq!(
+        router()
+            .await
+            .oneshot(run_payslips_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1634,6 +1655,7 @@ async fn every_payroll_route_answers_401_without_a_session() {
         finalized_payslip_request(e, f, no_cookie),
         register_request(e, r, no_cookie),
         payment_summary_request(e, r, no_cookie),
+        run_payslips_request(e, r, no_cookie),
     ] {
         let uri = request.uri().clone();
         let method = request.method().clone();
@@ -1896,6 +1918,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/override",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/members/{employment_id}/pay-lines/{standing_pay_item_id}/remove",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/payment-summary",
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/payslips.pdf",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/refresh-proposals",
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/register",
             "/api/employers/{employer_id}/people/{person_id}/name",
@@ -1915,7 +1938,7 @@ fn the_declared_route_table_is_exactly_the_one_these_tests_walk() {
 #[test]
 fn the_router_source_parser_finds_the_routes_that_are_there() {
     let paths = declared_route_paths();
-    assert_eq!(paths.len(), 29, "{paths:?}");
+    assert_eq!(paths.len(), 30, "{paths:?}");
     assert!(paths.iter().any(|path| path == "/api/health"), "{paths:?}");
     assert!(
         paths

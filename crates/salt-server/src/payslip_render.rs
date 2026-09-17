@@ -168,12 +168,55 @@ impl std::fmt::Display for PayslipRenderError {
 /// `FinalizedPayroll` frozen under `"standard-v1"` must keep rendering
 /// exactly as `render_standard_v1` renders it, for the life of the record.
 pub fn render_payslip(input: &PayslipInput) -> Result<Vec<u8>, PayslipRenderError> {
-    match input.payslip_template_version.as_str() {
-        STANDARD_V1 => Ok(render_standard_v1(input)),
-        other => Err(PayslipRenderError::UnknownTemplateVersion(
-            other.to_string(),
-        )),
+    render_payslips(std::slice::from_ref(input))
+}
+
+/// As [`render_payslip`], for every payslip in a run (issue #83): one PDF,
+/// each payslip starting on a fresh page, in the order `inputs` is given —
+/// callers pass member order (`employment.id`), never sorted here. Each
+/// input still dispatches on its own `payslip_template_version`, so a run
+/// whose rows span two template versions renders every row under its own
+/// frozen layout.
+///
+/// An empty `inputs` still returns a valid, parseable PDF — one page saying
+/// no payslips were finalized in this run — never a 404: that refusal
+/// belongs to whether the run itself exists and has finalized, which the
+/// caller has already checked before calling this.
+pub fn render_payslips(inputs: &[PayslipInput]) -> Result<Vec<u8>, PayslipRenderError> {
+    let mut warnings = Vec::new();
+    let font = ParsedFont::from_bytes(DEJAVU_SANS, 0, &mut warnings)
+        .expect("DejaVuSans.ttf is a well-formed embedded font — see assets/fonts/LICENSE.txt");
+
+    let mut doc = PdfDocument::new("Payslip");
+    let font_id = doc.add_font(&font);
+    let mut layout = Layout::new(&font, font_id);
+
+    if inputs.is_empty() {
+        layout.text_at(MARGIN_MM, TITLE_SIZE, "PAYSLIPS");
+        layout.advance(9.0);
+        layout.paragraph(BODY_SIZE, "No payslips were finalized in this run.");
     }
+
+    for (index, input) in inputs.iter().enumerate() {
+        match input.payslip_template_version.as_str() {
+            STANDARD_V1 => {
+                if index > 0 {
+                    layout.new_page();
+                }
+                draw_standard_v1(&mut layout, input);
+            }
+            other => {
+                return Err(PayslipRenderError::UnknownTemplateVersion(
+                    other.to_string(),
+                ));
+            }
+        }
+    }
+
+    let pages = layout.finish();
+    Ok(doc
+        .with_pages(pages)
+        .save(&PdfSaveOptions::default(), &mut Vec::new()))
 }
 
 const PAGE_WIDTH_MM: f32 = 210.0;
@@ -552,16 +595,12 @@ fn heading(layout: &mut Layout, text: &str) {
     layout.advance(3.5);
 }
 
-fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
-    let mut warnings = Vec::new();
-    let font = ParsedFont::from_bytes(DEJAVU_SANS, 0, &mut warnings)
-        .expect("DejaVuSans.ttf is a well-formed embedded font — see assets/fonts/LICENSE.txt");
-
-    let mut doc = PdfDocument::new("Payslip");
-    let font_id = doc.add_font(&font);
-
-    let mut layout = Layout::new(&font, font_id);
-
+/// Draws one Payslip's full content into `layout`, starting at its current
+/// cursor — never opening a document or a font, and never calling
+/// [`Layout::finish`], so [`render_payslips`] can call this once per input
+/// into one shared document. The single-payslip visible content this draws
+/// is exactly what `render_standard_v1` always drew.
+fn draw_standard_v1(layout: &mut Layout, input: &PayslipInput) {
     layout.text_at(MARGIN_MM, TITLE_SIZE, "PAYSLIP");
     layout.text_right_at(
         CONTENT_RIGHT_MM,
@@ -597,7 +636,7 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
         layout.advance(2.0);
     }
 
-    heading(&mut layout, "Employer");
+    heading(layout, "Employer");
     layout.paragraph(BODY_SIZE, &input.employer_registered_name);
     layout.advance(0.8);
     for line in &input.employer_address_lines {
@@ -611,7 +650,7 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
     }
     layout.advance(3.0);
 
-    heading(&mut layout, "Employee");
+    heading(layout, "Employee");
     layout.paragraph(BODY_SIZE, &input.employee_full_name);
     layout.advance(0.8);
     if let Some(identity_number) = &input.employee_identity_number {
@@ -622,7 +661,7 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
     }
     layout.advance(3.0);
 
-    heading(&mut layout, "Pay Period");
+    heading(layout, "Pay Period");
     layout.paragraph(
         BODY_SIZE,
         &format!(
@@ -637,10 +676,10 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
     );
     layout.advance(4.8);
 
-    heading(&mut layout, "Earnings");
+    heading(layout, "Earnings");
     for line in &input.earnings {
         row(
-            &mut layout,
+            layout,
             &line.label,
             line.detail.as_deref(),
             line.provenance.as_deref(),
@@ -648,13 +687,13 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
         );
     }
     layout.advance(1.5);
-    total_row(&mut layout, "Gross Pay", input.gross_pay_cents);
+    total_row(layout, "Gross Pay", input.gross_pay_cents);
     layout.advance(4.0);
 
-    heading(&mut layout, "Deductions");
+    heading(layout, "Deductions");
     for line in &input.deductions {
         row(
-            &mut layout,
+            layout,
             &line.label,
             line.detail.as_deref(),
             line.provenance.as_deref(),
@@ -662,18 +701,14 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
         );
     }
     layout.advance(1.5);
-    total_row(
-        &mut layout,
-        "Total Deductions",
-        input.total_deductions_cents,
-    );
+    total_row(layout, "Total Deductions", input.total_deductions_cents);
     layout.advance(4.0);
 
     // The rule and the Net Pay beneath it move to a new page together.
     layout.ensure_room(3.5 + 7.0);
     layout.rule();
     layout.advance(3.5);
-    total_row(&mut layout, "Net Pay", input.net_pay_cents);
+    total_row(layout, "Net Pay", input.net_pay_cents);
     layout.advance(9.0);
 
     layout.paragraph(
@@ -687,9 +722,6 @@ fn render_standard_v1(input: &PayslipInput) -> Vec<u8> {
         SMALL_SIZE,
         "Rendered on demand from Salt's frozen payroll record. Not stored.",
     );
-    let pages = layout.finish();
-    doc.with_pages(pages)
-        .save(&PdfSaveOptions::default(), &mut Vec::new())
 }
 
 /// One placed text run: the page index it was drawn on, its `(x_mm, y_mm)`

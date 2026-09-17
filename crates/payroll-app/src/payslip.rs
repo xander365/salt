@@ -33,7 +33,7 @@ use crate::finalized_payroll_read::{
     FinalizedEmployerParticulars, FinalizedPersonParticulars, calculation_from_snapshot,
     parse_finalized_payroll_id, particulars_from_snapshot,
 };
-use crate::payroll_run::PayrollFigures;
+use crate::payroll_run::{PayrollFigures, PayrollRunId, RunStatus, parse_payroll_run_id};
 use crate::provenance::FrozenPayLine;
 
 /// What a Payslip must say about reversal and replacement (issue #82,
@@ -91,68 +91,39 @@ pub struct PayslipData {
     pub pay_line_provenance: Option<Vec<FrozenPayLine>>,
 }
 
-/// Reads everything [`PayslipData`] needs in one query, scoped to
-/// `employer_id` in SQL (ADR-0017) — the same "unknown and cross-Employer
-/// are indistinguishable" reasoning [`crate::get_finalized_payroll_detail`]
-/// already applies.
-///
-/// Refused as [`PayrollAppError::PayslipParticularsNotFrozen`] when any of
-/// the three frozen columns this type demands is absent — a row finalized
-/// before issue #73. Refused as
+/// The raw columns [`PayslipData`] is built from, before particulars,
+/// schema and reversal decoding — every column [`get_payslip_data`] and
+/// [`get_run_payslip_data`] both select, in the same order, so the two can
+/// never decode the same row two different ways.
+struct PayslipRow {
+    finalized_payroll_id: FinalizedPayrollId,
+    employment_id: String,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    pay_date: NaiveDate,
+    schema_version: i32,
+    calculation_json: serde_json::Value,
+    salt_version: String,
+    employer_particulars_json: Option<serde_json::Value>,
+    person_particulars_json: Option<serde_json::Value>,
+    payslip_template_version: Option<String>,
+    replaces_finalized_payroll_id: Option<String>,
+    reversal_reason: Option<String>,
+    reversal_reversed_at: Option<DateTime<Utc>>,
+    replacement_id: Option<String>,
+    pay_line_provenance_json: Option<serde_json::Value>,
+}
+
+/// Decodes one [`PayslipRow`] into [`PayslipData`]. Refused as
+/// [`PayrollAppError::PayslipParticularsNotFrozen`] when any of the three
+/// frozen columns this type demands is absent — a row finalized before
+/// issue #73. Refused as
 /// [`PayrollAppError::FinalizedPayrollSnapshotUnreadable`] when a present
 /// column does not decode, exactly as every other frozen-snapshot reader in
 /// this crate already answers that.
-pub async fn get_payslip_data(
-    db: &SaltDatabase,
-    employer_id: &EmployerId,
-    finalized_payroll_id: &str,
-) -> Result<PayslipData, PayrollAppError> {
-    let finalized_payroll_id = parse_finalized_payroll_id(finalized_payroll_id)?;
-
-    type Row = (
-        String,                    // employment_id
-        NaiveDate,                 // period_start
-        NaiveDate,                 // period_end
-        NaiveDate,                 // pay_date
-        i32,                       // snapshot_schema_version
-        serde_json::Value,         // payroll_calculation_json
-        String,                    // salt_version
-        Option<serde_json::Value>, // employer_particulars_json
-        Option<serde_json::Value>, // person_particulars_json
-        Option<String>,            // payslip_template_version
-        Option<String>,            // replaces_finalized_payroll_id
-        Option<String>,            // reversal.reason
-        Option<DateTime<Utc>>,     // reversal.reversed_at
-        Option<String>,            // the id of whatever replaces this row
-        Option<serde_json::Value>, // pay_line_provenance_json
-    );
-
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT finalized_payroll.employment_id, finalized_payroll.period_start,
-                finalized_payroll.period_end, payroll_run.pay_date,
-                finalized_payroll.snapshot_schema_version,
-                finalized_payroll.payroll_calculation_json, finalized_payroll.salt_version,
-                finalized_payroll.employer_particulars_json,
-                finalized_payroll.person_particulars_json,
-                finalized_payroll.payslip_template_version,
-                finalized_payroll.replaces_finalized_payroll_id::text,
-                reversal.reason,
-                reversal.reversed_at,
-                replacement.id::text,
-                finalized_payroll.pay_line_provenance_json
-         FROM finalized_payroll
-         JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
-         LEFT JOIN reversal ON reversal.finalized_payroll_id = finalized_payroll.id
-         LEFT JOIN finalized_payroll AS replacement
-                ON replacement.replaces_finalized_payroll_id = finalized_payroll.id
-         WHERE finalized_payroll.id = $1::uuid AND finalized_payroll.employer_id = $2",
-    )
-    .bind(finalized_payroll_id.as_str())
-    .bind(employer_id.as_str())
-    .fetch_optional(db.pool())
-    .await?;
-
-    let (
+fn payslip_data_from_row(row: PayslipRow) -> Result<PayslipData, PayrollAppError> {
+    let PayslipRow {
+        finalized_payroll_id,
         employment_id,
         period_start,
         period_end,
@@ -168,8 +139,7 @@ pub async fn get_payslip_data(
         reversal_reversed_at,
         replacement_id,
         pay_line_provenance_json,
-    ) =
-        row.ok_or_else(|| PayrollAppError::FinalizedPayrollNotFound(finalized_payroll_id.clone()))?;
+    } = row;
 
     let employer_particulars: Option<FinalizedEmployerParticulars> = particulars_from_snapshot(
         &finalized_payroll_id,
@@ -258,6 +228,237 @@ pub async fn get_payslip_data(
         reversal,
         pay_line_provenance,
     })
+}
+
+/// Reads everything [`PayslipData`] needs in one query, scoped to
+/// `employer_id` in SQL (ADR-0017) — the same "unknown and cross-Employer
+/// are indistinguishable" reasoning [`crate::get_finalized_payroll_detail`]
+/// already applies.
+pub async fn get_payslip_data(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    finalized_payroll_id: &str,
+) -> Result<PayslipData, PayrollAppError> {
+    let finalized_payroll_id = parse_finalized_payroll_id(finalized_payroll_id)?;
+
+    type Row = (
+        String,                    // employment_id
+        NaiveDate,                 // period_start
+        NaiveDate,                 // period_end
+        NaiveDate,                 // pay_date
+        i32,                       // snapshot_schema_version
+        serde_json::Value,         // payroll_calculation_json
+        String,                    // salt_version
+        Option<serde_json::Value>, // employer_particulars_json
+        Option<serde_json::Value>, // person_particulars_json
+        Option<String>,            // payslip_template_version
+        Option<String>,            // replaces_finalized_payroll_id
+        Option<String>,            // reversal.reason
+        Option<DateTime<Utc>>,     // reversal.reversed_at
+        Option<String>,            // the id of whatever replaces this row
+        Option<serde_json::Value>, // pay_line_provenance_json
+    );
+
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT finalized_payroll.employment_id, finalized_payroll.period_start,
+                finalized_payroll.period_end, payroll_run.pay_date,
+                finalized_payroll.snapshot_schema_version,
+                finalized_payroll.payroll_calculation_json, finalized_payroll.salt_version,
+                finalized_payroll.employer_particulars_json,
+                finalized_payroll.person_particulars_json,
+                finalized_payroll.payslip_template_version,
+                finalized_payroll.replaces_finalized_payroll_id::text,
+                reversal.reason,
+                reversal.reversed_at,
+                replacement.id::text,
+                finalized_payroll.pay_line_provenance_json
+         FROM finalized_payroll
+         JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
+         LEFT JOIN reversal ON reversal.finalized_payroll_id = finalized_payroll.id
+         LEFT JOIN finalized_payroll AS replacement
+                ON replacement.replaces_finalized_payroll_id = finalized_payroll.id
+         WHERE finalized_payroll.id = $1::uuid AND finalized_payroll.employer_id = $2",
+    )
+    .bind(finalized_payroll_id.as_str())
+    .bind(employer_id.as_str())
+    .fetch_optional(db.pool())
+    .await?;
+
+    let (
+        employment_id,
+        period_start,
+        period_end,
+        pay_date,
+        schema_version,
+        calculation_json,
+        salt_version,
+        employer_particulars_json,
+        person_particulars_json,
+        payslip_template_version,
+        replaces_finalized_payroll_id,
+        reversal_reason,
+        reversal_reversed_at,
+        replacement_id,
+        pay_line_provenance_json,
+    ) =
+        row.ok_or_else(|| PayrollAppError::FinalizedPayrollNotFound(finalized_payroll_id.clone()))?;
+
+    payslip_data_from_row(PayslipRow {
+        finalized_payroll_id,
+        employment_id,
+        period_start,
+        period_end,
+        pay_date,
+        schema_version,
+        calculation_json,
+        salt_version,
+        employer_particulars_json,
+        person_particulars_json,
+        payslip_template_version,
+        replaces_finalized_payroll_id,
+        reversal_reason,
+        reversal_reversed_at,
+        replacement_id,
+        pay_line_provenance_json,
+    })
+}
+
+/// Confirms `payroll_run_id` belongs to `employer_id` and has finalized,
+/// refusing exactly like a missing run when it does not (ADR-0017: unknown
+/// and cross-Employer are indistinguishable), and as
+/// [`PayrollAppError::PayrollRunNotFinalized`] for a Draft or Calculated
+/// one — a run with no finalized rows has nothing for a batch of Payslips
+/// to render.
+async fn verify_run_is_finalized(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    payroll_run_id: &PayrollRunId,
+) -> Result<(), PayrollAppError> {
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM payroll_run WHERE id = $1::uuid AND employer_id = $2",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employer_id.as_str())
+    .fetch_optional(db.pool())
+    .await?;
+    let status =
+        status.ok_or_else(|| PayrollAppError::PayrollRunNotFound(payroll_run_id.clone()))?;
+    if RunStatus::from_column(&status) != RunStatus::Finalized {
+        return Err(PayrollAppError::PayrollRunNotFinalized(
+            payroll_run_id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reads everything [`PayslipData`] needs for every `FinalizedPayroll`
+/// `payroll_run_id` produced, in `ORDER BY employment_id` — the one member
+/// order batch payslips, the register and the summary all share
+/// (issue #83 README.md). Scoped to `employer_id` and to that run's own
+/// rows only, exactly as [`get_payslip_data`] scopes a single one.
+///
+/// **Missing particulars in a batch refuse the whole batch:** the first row
+/// (in member order) that lacks a frozen particular is returned as
+/// [`PayrollAppError::PayslipParticularsNotFrozen`] — a batch with silent
+/// holes is worse than a clear refusal.
+pub async fn get_run_payslip_data(
+    db: &SaltDatabase,
+    employer_id: &EmployerId,
+    payroll_run_id: &str,
+) -> Result<Vec<PayslipData>, PayrollAppError> {
+    let payroll_run_id = parse_payroll_run_id(payroll_run_id)?;
+    verify_run_is_finalized(db, employer_id, &payroll_run_id).await?;
+
+    type Row = (
+        String,                    // finalized_payroll.id
+        String,                    // employment_id
+        NaiveDate,                 // period_start
+        NaiveDate,                 // period_end
+        NaiveDate,                 // pay_date
+        i32,                       // snapshot_schema_version
+        serde_json::Value,         // payroll_calculation_json
+        String,                    // salt_version
+        Option<serde_json::Value>, // employer_particulars_json
+        Option<serde_json::Value>, // person_particulars_json
+        Option<String>,            // payslip_template_version
+        Option<String>,            // replaces_finalized_payroll_id
+        Option<String>,            // reversal.reason
+        Option<DateTime<Utc>>,     // reversal.reversed_at
+        Option<String>,            // the id of whatever replaces this row
+        Option<serde_json::Value>, // pay_line_provenance_json
+    );
+
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT finalized_payroll.id::text, finalized_payroll.employment_id,
+                finalized_payroll.period_start, finalized_payroll.period_end,
+                payroll_run.pay_date, finalized_payroll.snapshot_schema_version,
+                finalized_payroll.payroll_calculation_json, finalized_payroll.salt_version,
+                finalized_payroll.employer_particulars_json,
+                finalized_payroll.person_particulars_json,
+                finalized_payroll.payslip_template_version,
+                finalized_payroll.replaces_finalized_payroll_id::text,
+                reversal.reason,
+                reversal.reversed_at,
+                replacement.id::text,
+                finalized_payroll.pay_line_provenance_json
+         FROM finalized_payroll
+         JOIN payroll_run ON payroll_run.id = finalized_payroll.payroll_run_id
+         LEFT JOIN reversal ON reversal.finalized_payroll_id = finalized_payroll.id
+         LEFT JOIN finalized_payroll AS replacement
+                ON replacement.replaces_finalized_payroll_id = finalized_payroll.id
+         WHERE finalized_payroll.payroll_run_id = $1::uuid AND finalized_payroll.employer_id = $2
+         ORDER BY finalized_payroll.employment_id",
+    )
+    .bind(payroll_run_id.as_str())
+    .bind(employer_id.as_str())
+    .fetch_all(db.pool())
+    .await?;
+
+    rows.into_iter()
+        .map(
+            |(
+                finalized_payroll_id,
+                employment_id,
+                period_start,
+                period_end,
+                pay_date,
+                schema_version,
+                calculation_json,
+                salt_version,
+                employer_particulars_json,
+                person_particulars_json,
+                payslip_template_version,
+                replaces_finalized_payroll_id,
+                reversal_reason,
+                reversal_reversed_at,
+                replacement_id,
+                pay_line_provenance_json,
+            )| {
+                payslip_data_from_row(PayslipRow {
+                    finalized_payroll_id: FinalizedPayrollId::new(finalized_payroll_id),
+                    employment_id,
+                    period_start,
+                    period_end,
+                    pay_date,
+                    schema_version,
+                    calculation_json,
+                    salt_version,
+                    employer_particulars_json,
+                    person_particulars_json,
+                    payslip_template_version,
+                    replaces_finalized_payroll_id,
+                    reversal_reason,
+                    reversal_reversed_at,
+                    replacement_id,
+                    pay_line_provenance_json,
+                })
+            },
+        )
+        // A `Result` iterator short-circuits on the first `Err` in
+        // iteration order, which is exactly the "first row in member
+        // order" the refusal above promises — the rows are already
+        // `ORDER BY employment_id`.
+        .collect()
 }
 
 #[cfg(test)]
