@@ -689,3 +689,67 @@ export interface FinalizedPayrollTracesResponse {
   /** One entry per overtime line; empty for a salary-only payroll. */
   overtime: OvertimeTraceDto[];
 }
+
+// `GET /api/employers/{e}/payroll-runs/{r}/register` and `GET
+// .../payroll-runs/{r}/payment-summary` (`crates/salt-server/src/
+// run_outputs.rs`, issue #83, parent #70 §D-9, §D-10): views over a
+// finalized run's own `FinalizedPayroll` rows — every row this run
+// produced (Register) or only its live ones (PaymentSummary). Neither
+// route recomputes a figure; both read the frozen `FiguresDto` this app
+// already renders everywhere else.
+
+export type PayrollRunKindDto = 'ordinary' | 'correction';
+
+/** One `FinalizedPayroll` row's liveness, tagged by `state` (README.md's
+ * own rule: this JSON carries facts only, never the Operator-facing
+ * sentence — that is built from `state`/`replacedBy`/`replaces` on the
+ * client, the same way `LivenessDto`'s Rust twin documents it). */
+export type LivenessDto =
+  | { state: 'live' }
+  | { state: 'reversed'; reason: string; reversedAt: string; replacedBy: string | null };
+
+export interface PayrollRegisterRowDto {
+  finalizedPayrollId: string;
+  employmentId: string;
+  fullName: string;
+  figures: FiguresDto;
+  liveness: LivenessDto;
+  /** The finalized payroll this row replaces, when this row is itself a
+   * replacement — independent of `liveness`, which is this row's own. */
+  replaces: string | null;
+}
+
+export interface PayrollRegisterResponse {
+  payrollRunId: string;
+  kind: PayrollRunKindDto;
+  period: PayPeriodDto;
+  payDate: string;
+  rows: PayrollRegisterRowDto[];
+  /** Every row this run produced, a reversed one included — never
+   * recomputed, the same eleven-figure shape `FiguresDto` already carries. */
+  totalAsFinalized: FiguresDto;
+  /** Only the rows still live from this run — a reversed row is never
+   * counted here, so nothing is ever counted in both totals. */
+  totalStillLive: FiguresDto;
+}
+
+export interface PaymentSummaryRowDto {
+  finalizedPayrollId: string;
+  employmentId: string;
+  fullName: string;
+  netPayCents: number;
+  /** The finalized payroll this row replaces, when this row is itself a
+   * replacement (§D-10: shown at full net pay, never a difference). */
+  replaces: string | null;
+}
+
+export interface PaymentSummaryResponse {
+  payrollRunId: string;
+  kind: PayrollRunKindDto;
+  period: PayPeriodDto;
+  payDate: string;
+  /** Live records only — a reversed `FinalizedPayroll` never appears here. */
+  rows: PaymentSummaryRowDto[];
+  excludedReversedCount: number;
+  totalNetPayCents: number;
+}

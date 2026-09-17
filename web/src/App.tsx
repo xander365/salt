@@ -6,6 +6,8 @@ import { EmployerShell } from './routes/EmployerShell';
 import { FinalizedPayroll } from './routes/FinalizedPayroll';
 import { LoginPage } from './routes/LoginPage';
 import { NotFound } from './routes/NotFound';
+import { PaymentSummary } from './routes/PaymentSummary';
+import { PayrollRegister } from './routes/PayrollRegister';
 import { PayrollRun } from './routes/PayrollRun';
 import { PayrollRuns } from './routes/PayrollRuns';
 import { People } from './routes/People';
@@ -32,6 +34,8 @@ export function App() {
             <Route path="people/:employmentId" element={<Employment />} />
             <Route path="payroll" element={<PayrollRuns />} />
             <Route path="payroll/:runId" element={<PayrollRun />} />
+            <Route path="payroll/:runId/register" element={<PayrollRegister />} />
+            <Route path="payroll/:runId/payment-summary" element={<PaymentSummary />} />
             <Route path="finalized/:finalizedPayrollId" element={<FinalizedPayroll />} />
           </Route>
         </Route>

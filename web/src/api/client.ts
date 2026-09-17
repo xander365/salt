@@ -107,6 +107,21 @@ function filenameFromContentDisposition(header: string | null): string | null {
   return match !== null && match[1] !== '' ? match[1] : null;
 }
 
+/** Hands the browser a file to save, from an {@link apiDownload} result. The
+ * object URL is revoked on the next task rather than straight after
+ * `click()`: some browsers start reading the blob asynchronously, and
+ * revoking it synchronously can cancel the save. */
+export function saveAs(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 async function readApiError(response: Response): Promise<ApiError> {
   const body: unknown = await response.json().catch(() => null);
   const envelope = body as {

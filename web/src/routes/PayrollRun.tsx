@@ -54,6 +54,7 @@ import { FailedRequestState } from '../components/states/FailedRequestState';
 import { BlockedItem } from '../components/states/BlockedItem';
 import { StaleBanner } from '../components/states/StaleBanner';
 import { PayslipDownload } from '../finalizedPayroll/PayslipDownload';
+import { RunOutputs } from '../runOutputs/RunOutputs';
 
 function runWasNotFound(caught: unknown): boolean {
   return (
@@ -833,6 +834,14 @@ export function PayrollRun() {
             confirming={confirmingFinalize}
             setConfirming={setConfirmingFinalize}
           />
+
+          {/* Issue #83: every batch output this finalized run produced,
+              offered as soon as the run itself reads back `finalized` —
+              never gated on `members.length`, since the outputs each read
+              their own rows and say so themselves when there are none. */}
+          {run.data.status === 'finalized' && (
+            <RunOutputs employerId={employerId} payrollRunId={runId} />
+          )}
 
           <StandingItemsChangedBanner run={run.data} payrollRunId={runId} />
 

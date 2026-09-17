@@ -6,37 +6,12 @@
 // never inspected or held onto beyond handing it to the browser's own save.
 
 import { CircleAlert } from 'lucide-react';
-import { ApiError } from '../api/client';
+import { ApiError, saveAs } from '../api/client';
+import { missingParticularsPhrase } from '../api/payslipParticulars';
 import { sharedFactRefusalMessage } from '../api/refusal';
 import { usePayslipDownload } from './usePayslipDownload';
 import { Button } from '../components/ui/button';
 import { FailedRequestState } from '../components/states/FailedRequestState';
-
-/** The frozen records `payslip_particulars_not_frozen` names, in the
- * server's own words, read as the sentence an Operator needs. Unknown names
- * are passed through rather than dropped, so the reason is never shortened. */
-const MISSING_RECORD_NAMES: Record<string, string> = {
-  EmployerParticulars: 'the employer particulars',
-  PersonParticulars: 'the employee particulars',
-  PayslipTemplateVersion: 'the payslip template version',
-};
-
-function missingRecordsOf(details: unknown): string[] {
-  if (typeof details !== 'object' || details === null) {
-    return [];
-  }
-  const missing = (details as { missing?: unknown }).missing;
-  return Array.isArray(missing)
-    ? missing.filter((name): name is string => typeof name === 'string')
-    : [];
-}
-
-function joinNames(names: string[]): string {
-  if (names.length <= 1) {
-    return names.join('');
-  }
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-}
 
 function downloadFailureMessage(caught: unknown): string {
   if (caught instanceof ApiError) {
@@ -45,11 +20,7 @@ function downloadFailureMessage(caught: unknown): string {
       // must print is refused, naming what is missing. Salt never fills the
       // gap from today's records.
       case 'payslip_particulars_not_frozen': {
-        const missing = missingRecordsOf(caught.details).map(
-          (name) => MISSING_RECORD_NAMES[name] ?? name,
-        );
-        const what =
-          missing.length > 0 ? joinNames(missing) : 'the particulars a payslip must print';
+        const what = missingParticularsPhrase(caught.details);
         return `This payroll was finalized before Salt recorded ${what}, so it cannot produce a payslip. Salt does not fill them in from today's records.`;
       }
 
@@ -63,20 +34,6 @@ function downloadFailureMessage(caught: unknown): string {
 
 function isPermanentRefusal(caught: unknown): boolean {
   return caught instanceof ApiError && caught.code === 'payslip_particulars_not_frozen';
-}
-
-/** Hands the browser a file to save. The object URL is revoked on the next
- * task rather than straight after `click()`: some browsers start reading the
- * blob asynchronously, and revoking it synchronously can cancel the save. */
-function saveAs(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function PayslipDownload({

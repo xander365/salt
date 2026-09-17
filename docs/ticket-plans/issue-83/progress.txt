@@ -7,12 +7,47 @@ Write notes (decisions, surprises, blockers) under the step.
 [x] 2  Register and payment summary JSON routes (salt-server) 41ac436
 [x] 3  Batch payslips PDF (payroll-app + salt-server) 6585295
 [x] 4  Register and payment summary PDFs (salt-server) ec3ae95
-[ ] 5  Outputs on the finalized run screen (web)
+[x] 5  Outputs on the finalized run screen (web) 0e2cb8c
 [ ] 6  Browser test, docs, no-CSV guard
 [ ] 7a Code review of #83
 [ ] 7b Harden the run outputs of #83
 
 Notes:
+
+Step 5 (pending commit): `apiDownload` (issue #82) already took just a path
+and read the filename off `Content-Disposition`, so it needed no change to
+serve all three new run-level PDFs — the step file's own "make it take a URL
+and filename if it does not already" was already true. Pulled `saveAs` (the
+object-URL-then-click helper) out of `PayslipDownload.tsx` into
+`api/client.ts` since it is now shared by three download buttons, not one.
+Register and PaymentSummary need no frozen payslip particulars (README's own
+acceptance criterion 6), so their own "Download PDF" buttons
+(`RunOutputPdfButton.tsx`) have no permanent-refusal branch — only the batch
+Payslip download (`RunPayslipsDownload.tsx`) can hit
+`payslip_particulars_not_frozen`, and its message links back to the register
+and payment summary per the step file. The Payment Summary's three fixed
+sentences ("not a bank file", the replacement note, the correction note) are
+copied verbatim into `runOutputs/paymentSummaryText.ts` from
+`run_outputs_render.rs`'s own Rust string constants, so the screen and the
+PDF can never drift apart in wording.
+
+Verified end to end against a real, manually bootstrapped `salt-server` +
+`vite` dev server (two Employments, one Ordinary run, calculated and
+finalized via curl) rather than only `npm run build`/`lint`: both new
+screens render, both "Download PDF" buttons save a real PDF with the
+server's own filename, the Outputs section's batch-payslip refusal (this
+run never froze particulars) shows the right sentence with working links,
+and the register table scrolls horizontally rather than hiding a column at
+375px. Could not exercise a "Reversed" register row this way — no
+reversal-creation route exists yet in this milestone — so that render path
+(`StatusCell` in `PayrollRegister.tsx`) is verified by type/code review
+against `run_outputs.rs`'s `LivenessDto` only, not by an actual screenshot.
+One seeding gotcha worth remembering for step 6's own manual/e2e setup: a
+January pay period's `prior-employment` declaration needs `taxYear` set to
+the year the Namibian tax year *starts* (2025 for a January 2026 period,
+since the tax year runs 1 March to end February) — declaring `taxYear: 2026`
+for that period leaves `prior_employment_unknown` standing and calculate
+refuses.
 
 Step 2 (41ac436): serde's enum-level `rename_all` only renames variant
 tags, not the fields of a struct variant — `LivenessDto::Reversed`

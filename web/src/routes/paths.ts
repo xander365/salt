@@ -27,3 +27,18 @@ export function employmentPath(employerId: string, employmentId: string): string
 export function finalizedPayrollPath(employerId: string, finalizedPayrollId: string): string {
   return `${employerPath(employerId)}/finalized/${encodeURIComponent(finalizedPayrollId)}`;
 }
+
+/**
+ * `/app/employers/:employerId/payroll/:runId/register` (issue #83): built
+ * rather than rendered as a relative `Link` for the same reason {@link
+ * finalizedPayrollPath} is — `PayrollRun.tsx`'s own Outputs section links
+ * here from beside `payroll/:runId` in the route tree, not beneath it.
+ */
+export function payrollRegisterPath(employerId: string, payrollRunId: string): string {
+  return `${employerPath(employerId)}/payroll/${encodeURIComponent(payrollRunId)}/register`;
+}
+
+/** `/app/employers/:employerId/payroll/:runId/payment-summary` (issue #83). */
+export function paymentSummaryPath(employerId: string, payrollRunId: string): string {
+  return `${employerPath(employerId)}/payroll/${encodeURIComponent(payrollRunId)}/payment-summary`;
+}
