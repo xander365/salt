@@ -1,0 +1,15 @@
+Issue #83 — Batch payslips, payroll register and payment summary
+Plan: docs/ticket-plans/issue-83/README.md
+Mark a step [x] when its commit is made. Add the commit hash after it.
+Write notes (decisions, surprises, blockers) under the step.
+
+[ ] 1  Register and payment summary read models (payroll-app)
+[ ] 2  Register and payment summary JSON routes (salt-server)
+[ ] 3  Batch payslips PDF (payroll-app + salt-server)
+[ ] 4  Register and payment summary PDFs (salt-server)
+[ ] 5  Outputs on the finalized run screen (web)
+[ ] 6  Browser test, docs, no-CSV guard
+[ ] 7a Code review of #83
+[ ] 7b Harden the run outputs of #83
+
+Notes:
