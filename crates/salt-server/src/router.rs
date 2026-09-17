@@ -22,6 +22,7 @@ use crate::payroll_runs;
 use crate::payslip;
 use crate::person_particulars;
 use crate::request_id;
+use crate::run_outputs;
 use crate::session;
 use crate::standing_pay_items;
 use crate::state::AppState;
@@ -145,6 +146,14 @@ fn production_routes() -> Router<AppState> {
         .route(
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/finalize",
             axum::routing::post(payroll_runs::finalize_payroll_run),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/register",
+            get(run_outputs::get_register),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/payment-summary",
+            get(run_outputs::get_payment_summary),
         )
         .route(
             "/api/employers/{employer_id}/finalized-payroll/{finalized_payroll_id}",

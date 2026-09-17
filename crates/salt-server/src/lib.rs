@@ -38,6 +38,7 @@ mod payslip_render;
 mod person_particulars;
 mod request_id;
 mod router;
+mod run_outputs;
 mod session;
 mod standing_pay_items;
 mod state;
