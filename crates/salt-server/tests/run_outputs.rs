@@ -15,7 +15,7 @@ use payroll_app::{
     DatabaseConfig, EmployerParticularsFields, EmploymentPerson, MembershipRole, OperatorId,
     SaltDatabase,
 };
-use salt_server::{AppState, build_router};
+use salt_server::{AppState, build_router, rendered_text};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -394,6 +394,47 @@ fn payment_summary_request(employer_id: &str, run_id: &str, cookie: &str) -> Req
         .header(header::COOKIE, cookie)
         .body(Body::empty())
         .unwrap()
+}
+
+fn register_pdf_request(employer_id: &str, run_id: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/register.pdf"
+        ))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn payment_summary_pdf_request(employer_id: &str, run_id: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/employers/{employer_id}/payroll-runs/{run_id}/payment-summary.pdf"
+        ))
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// `N$ 12,345.67`, matching `pdf_layout::format_money` exactly — copied
+/// rather than shared, the same per-file fixture discipline this file's own
+/// header comment already follows for `tests/payslip.rs`'s fixtures.
+fn format_money(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let whole = cents.unsigned_abs() / 100;
+    let fraction = cents.unsigned_abs() % 100;
+    let digits = whole.to_string();
+    let mut grouped = String::new();
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    let grouped: String = grouped.chars().rev().collect();
+    format!("N$ {sign}{grouped}.{fraction:02}")
 }
 
 /// Test 1: an Operator gets a 200 register with two rows and both totals
@@ -971,4 +1012,273 @@ async fn no_session_is_401_and_a_payroll_operator_reads_200_on_both_routes() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
+    axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec()
+}
+
+/// Both PDFs download as uncacheable PDFs, the same contract `payslip.pdf`
+/// already carries (issue #82): `application/pdf`, `Cache-Control:
+/// no-store`, and real PDF bytes.
+#[tokio::test]
+async fn register_and_payment_summary_pdfs_download_as_uncacheable_pdfs() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(&employer_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (run_id, _finalized) = finalize_a_run_of_two(&employer_id, &cookie).await;
+
+    for request_fn in [
+        register_pdf_request as fn(&str, &str, &str) -> Request<Body>,
+        payment_summary_pdf_request,
+    ] {
+        let response = router()
+            .await
+            .oneshot(request_fn(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/pdf"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let bytes = body_bytes(response).await;
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+}
+
+/// The figures a PDF prints are exactly the figures its own JSON route
+/// answers — every row's net pay, and both routes' own totals — read back
+/// out of the rendered PDF text rather than assumed.
+#[tokio::test]
+async fn pdf_figures_match_the_json_routes_figures() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(&employer_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (run_id, _finalized) = finalize_a_run_of_two(&employer_id, &cookie).await;
+
+    let json_register = body_json(
+        router()
+            .await
+            .oneshot(register_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let register_bytes = body_bytes(
+        router()
+            .await
+            .oneshot(register_pdf_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let register_text = rendered_text(&register_bytes);
+    assert!(
+        register_text.contains(&format_money(
+            json_register["totalAsFinalized"]["netCents"]
+                .as_i64()
+                .unwrap()
+        )),
+        "{register_text}"
+    );
+    for row in json_register["rows"].as_array().unwrap() {
+        let net_cents = row["figures"]["netCents"].as_i64().unwrap();
+        assert!(
+            register_text.contains(&format_money(net_cents)),
+            "{register_text}"
+        );
+    }
+
+    let json_summary = body_json(
+        router()
+            .await
+            .oneshot(payment_summary_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let summary_bytes = body_bytes(
+        router()
+            .await
+            .oneshot(payment_summary_pdf_request(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let summary_text = rendered_text(&summary_bytes);
+    assert!(
+        summary_text.contains(&format_money(
+            json_summary["totalNetPayCents"].as_i64().unwrap()
+        )),
+        "{summary_text}"
+    );
+    for row in json_summary["rows"].as_array().unwrap() {
+        let net_cents = row["netPayCents"].as_i64().unwrap();
+        assert!(
+            summary_text.contains(&format_money(net_cents)),
+            "{summary_text}"
+        );
+    }
+}
+
+/// A pre-#73 style row (never froze `EmployerParticulars`, and finalized
+/// with no particulars declared at all — the same shape
+/// `both_routes_answer_200_without_frozen_particulars` proves for the JSON
+/// routes) still answers 200 on both PDF routes: unlike `payslip.pdf`, a
+/// Register or Payment Summary needs only figures, never a frozen
+/// particular (README.md acceptance criterion 6).
+#[tokio::test]
+async fn both_pdf_routes_answer_200_without_frozen_particulars() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let employment_id = create_employment(&employer_id, &cookie, "Ada Lovelace").await;
+    declare_every_fact(&employer_id, &employment_id, &cookie).await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    let response = router()
+        .await
+        .oneshot(calculate_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router()
+        .await
+        .oneshot(finalize_request(&employer_id, &run_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for request_fn in [
+        register_pdf_request as fn(&str, &str, &str) -> Request<Body>,
+        payment_summary_pdf_request,
+    ] {
+        let response = router()
+            .await
+            .oneshot(request_fn(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+/// A Draft (never calculated or finalized) run answers 409
+/// `payroll_run_not_finalized` on both PDF routes, the same refusal the JSON
+/// routes give.
+#[tokio::test]
+async fn a_not_finalized_run_is_refused_on_both_pdf_routes() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let run_id = create_run(&employer_id, &cookie).await;
+
+    for request_fn in [
+        register_pdf_request as fn(&str, &str, &str) -> Request<Body>,
+        payment_summary_pdf_request,
+    ] {
+        let response = router()
+            .await
+            .oneshot(request_fn(&employer_id, &run_id, &cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(response).await["error"]["code"],
+            "payroll_run_not_finalized"
+        );
+    }
+}
+
+/// A run id belonging to another Employer answers 404, identical to a
+/// random uuid, on both PDF routes (ADR-0017) — the same isolation the JSON
+/// routes already prove.
+#[tokio::test]
+async fn a_cross_employer_run_id_is_not_found_like_an_unknown_one_on_both_pdf_routes() {
+    let (_owning_email, owning_cookie, owning_employer) = an_authorized_operator().await;
+    let (_other_email, other_cookie, other_employer) = an_authorized_operator().await;
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(
+            &owning_employer,
+            &owning_cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (run_id, _finalized) = finalize_a_run_of_two(&owning_employer, &owning_cookie).await;
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+
+    for (route_request, label) in [
+        (
+            register_pdf_request as fn(&str, &str, &str) -> Request<Body>,
+            "register.pdf",
+        ),
+        (payment_summary_pdf_request, "payment-summary.pdf"),
+    ] {
+        let cross_employer_response = router()
+            .await
+            .oneshot(route_request(&other_employer, &run_id, &other_cookie))
+            .await
+            .unwrap();
+        let unknown_response = router()
+            .await
+            .oneshot(route_request(&owning_employer, &unknown_id, &owning_cookie))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cross_employer_response.status(),
+            StatusCode::NOT_FOUND,
+            "{label}"
+        );
+        assert_eq!(unknown_response.status(), StatusCode::NOT_FOUND, "{label}");
+        let cross_employer_body = body_json(cross_employer_response).await;
+        let unknown_body = body_json(unknown_response).await;
+        assert_eq!(
+            cross_employer_body["error"]["code"], unknown_body["error"]["code"],
+            "{label}"
+        );
+        assert_eq!(
+            cross_employer_body["error"]["code"],
+            "payroll_run_not_found"
+        );
+    }
+}
+
+/// No session is 401 on both PDF routes, the same guard every other payroll
+/// route carries.
+#[tokio::test]
+async fn no_session_is_401_on_both_pdf_routes() {
+    let (_email, cookie, employer_id) = an_authorized_operator().await;
+    let response = router()
+        .await
+        .oneshot(set_employer_particulars_request(&employer_id, &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (run_id, _finalized) = finalize_a_run_of_two(&employer_id, &cookie).await;
+
+    for request_fn in [
+        register_pdf_request as fn(&str, &str, &str) -> Request<Body>,
+        payment_summary_pdf_request,
+    ] {
+        let response = router()
+            .await
+            .oneshot(request_fn(&employer_id, &run_id, ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }

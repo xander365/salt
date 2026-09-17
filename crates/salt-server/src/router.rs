@@ -156,6 +156,14 @@ fn production_routes() -> Router<AppState> {
             get(run_outputs::get_payment_summary),
         )
         .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/register.pdf",
+            get(run_outputs::get_register_pdf),
+        )
+        .route(
+            "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/payment-summary.pdf",
+            get(run_outputs::get_payment_summary_pdf),
+        )
+        .route(
             "/api/employers/{employer_id}/payroll-runs/{payroll_run_id}/payslips.pdf",
             get(payslip::get_payroll_run_payslips),
         )

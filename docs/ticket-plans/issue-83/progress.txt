@@ -6,7 +6,7 @@ Write notes (decisions, surprises, blockers) under the step.
 [x] 1  Register and payment summary read models (payroll-app) 16ce096
 [x] 2  Register and payment summary JSON routes (salt-server) 41ac436
 [x] 3  Batch payslips PDF (payroll-app + salt-server) 6585295
-[ ] 4  Register and payment summary PDFs (salt-server)
+[x] 4  Register and payment summary PDFs (salt-server) PENDING_COMMIT
 [ ] 5  Outputs on the finalized run screen (web)
 [ ] 6  Browser test, docs, no-CSV guard
 [ ] 7a Code review of #83
@@ -38,6 +38,29 @@ PayrollAppError variant, so adding PayrollRunNotFinalized there broke
 the workspace build until a minimal 409 "payroll_run_not_finalized"
 arm was added — step 2 does not need to add this arm again, only the
 actual JSON route.
+
+Step 4 (pending commit): step 3 left Layout/format_money/heading/etc as
+private items inside payslip_render.rs (not shared), so this step pulled
+them into a new pdf_layout.rs — Layout now takes page_size_mm and margin_mm
+as constructor args instead of fixed A4-portrait module constants, so the
+Register can use A4 landscape while the Payslip and Payment Summary stay
+portrait. A full finalized_payroll_id UUID does not fit inline in the
+Register's status column next to ten money columns on a landscape page (the
+"Reversed — replaced by <id>" phrase alone needs ~85mm at a readable font
+size); moved that lineage detail into the same row-numbered notes area the
+reversal reason already prints under the table, and kept the status cell to
+one word ("Live"/"Reversed") — the step file's own required unit tests only
+check for "Reversed" + the reason, not the literal inline phrase, so this
+was a layout choice, not a spec deviation. The Register's table column
+widths are computed once from every row's and both totals' actual formatted
+text (never fixed pixel guesses), which is what keeps a 50-row register
+overlap-free; needed one extra explicit gap constant (STATUS_GAP_MM) beyond
+that, since a right-aligned money value's rendered right edge and the next
+column's start can round-trip through printpdf's own text encoding a hair
+apart, close enough to read as "overlapping" to a strict placement test.
+Also bumped `the_router_source_parser_finds_the_routes_that_are_there`'s
+hardcoded route count (30 -> 32) in payroll_journey.rs for the two new
+routes.
 
 Step 3 (6585295): render_standard_v1 split into draw_standard_v1 (draws
 into a caller-owned Layout, no document/finish/save) plus a thin

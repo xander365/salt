@@ -21,6 +21,7 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::response::Response;
 use chrono::{DateTime, NaiveDate, Utc};
 use payroll::EmployerId;
 use payroll_app::{FinalizedPayrollLiveness, PaymentSummary, PayrollRegister, RunKind};
@@ -30,6 +31,11 @@ use crate::authorized_employer::AuthorizedEmployerContext;
 use crate::employment_facts::PayPeriodDto;
 use crate::error::ApiError;
 use crate::payroll_runs::{FiguresDto, figures_to_dto};
+use crate::payslip::pdf_response;
+use crate::run_outputs_render::{
+    PaymentSummaryPdfInput, PaymentSummaryPdfRow, RegisterFiguresInput, RegisterPdfInput,
+    RegisterPdfLiveness, RegisterPdfRow, render_payment_summary, render_register,
+};
 use crate::state::AppState;
 
 fn run_kind_str(kind: RunKind) -> &'static str {
@@ -210,4 +216,144 @@ pub(crate) async fn get_payment_summary(
         payroll_app::get_payment_summary(state.db(), &employer_id, &payroll_run_id).await?;
 
     Ok(Json(payment_summary_to_response(summary)))
+}
+
+fn run_kind_label(kind: RunKind) -> &'static str {
+    match kind {
+        RunKind::Ordinary => "Ordinary",
+        RunKind::Correction => "Correction",
+    }
+}
+
+fn figures_to_register_input(figures: payroll_app::PayrollFigures) -> RegisterFiguresInput {
+    RegisterFiguresInput {
+        basic_pay_cents: figures.basic_pay.cents(),
+        taxable_allowances_cents: figures.taxable_allowances.cents(),
+        overtime_cents: figures.overtime.cents(),
+        gross_cents: figures.gross.cents(),
+        paye_cents: figures.paye.cents(),
+        employee_social_security_cents: figures.employee_social_security.cents(),
+        medical_aid_premium_cents: figures.medical_aid_premium.cents(),
+        total_deductions_cents: figures.total_deductions.cents(),
+        net_pay_cents: figures.net_pay.cents(),
+        employer_social_security_cents: figures.employer_social_security.cents(),
+    }
+}
+
+/// [`payroll_app::PayrollRegisterTotals`] carries the same eleven money
+/// fields [`payroll_app::PayrollFigures`] does (minus none — see
+/// `totals_to_dto` above, which already leans on this) — rebuilt into a
+/// `PayrollFigures` first so [`figures_to_register_input`] stays the one
+/// place that maps those field names into [`RegisterFiguresInput`].
+fn totals_to_register_input(totals: payroll_app::PayrollRegisterTotals) -> RegisterFiguresInput {
+    figures_to_register_input(payroll_app::PayrollFigures {
+        basic_pay: totals.basic_pay,
+        taxable_allowances: totals.taxable_allowances,
+        overtime: totals.overtime,
+        gross: totals.gross,
+        taxable_remuneration: totals.taxable_remuneration,
+        paye: totals.paye,
+        employee_social_security: totals.employee_social_security,
+        employer_social_security: totals.employer_social_security,
+        medical_aid_premium: totals.medical_aid_premium,
+        total_deductions: totals.total_deductions,
+        net_pay: totals.net_pay,
+    })
+}
+
+fn liveness_to_register_input(liveness: FinalizedPayrollLiveness) -> RegisterPdfLiveness {
+    match liveness {
+        FinalizedPayrollLiveness::Live => RegisterPdfLiveness::Live,
+        FinalizedPayrollLiveness::Reversed {
+            reason,
+            replaced_by,
+            ..
+        } => RegisterPdfLiveness::Reversed {
+            reason,
+            replaced_by: replaced_by.map(|id| id.to_string()),
+        },
+    }
+}
+
+fn register_to_render_input(register: PayrollRegister) -> RegisterPdfInput {
+    RegisterPdfInput {
+        payroll_run_id: register.payroll_run_id.to_string(),
+        run_kind_label: run_kind_label(register.kind).to_string(),
+        period_start: register.period.start(),
+        period_end: register.period.end(),
+        pay_date: register.pay_date,
+        rows: register
+            .rows
+            .into_iter()
+            .map(|row| RegisterPdfRow {
+                full_name: row.full_name,
+                figures: figures_to_register_input(row.figures),
+                liveness: liveness_to_register_input(row.liveness),
+                replaces: row.replaces.map(|id| id.to_string()),
+            })
+            .collect(),
+        total_as_finalized: totals_to_register_input(register.total_as_finalized),
+        total_still_live: totals_to_register_input(register.total_still_live),
+    }
+}
+
+fn payment_summary_to_render_input(summary: PaymentSummary) -> PaymentSummaryPdfInput {
+    PaymentSummaryPdfInput {
+        payroll_run_id: summary.payroll_run_id.to_string(),
+        is_correction: matches!(summary.kind, RunKind::Correction),
+        period_start: summary.period.start(),
+        period_end: summary.period.end(),
+        pay_date: summary.pay_date,
+        rows: summary
+            .rows
+            .into_iter()
+            .map(|row| PaymentSummaryPdfRow {
+                full_name: row.full_name,
+                net_pay_cents: row.net_pay.cents(),
+                replaces: row.replaces.map(|id| id.to_string()),
+            })
+            .collect(),
+        excluded_reversed_count: summary.excluded_reversed_count,
+        total_net_pay_cents: summary.total_net_pay.cents(),
+    }
+}
+
+/// `GET /api/employers/{e}/payroll-runs/{r}/register.pdf` (issue #83): the
+/// same rows and totals [`get_register`] answers as JSON, printed —
+/// landscape, one row per `FinalizedPayroll`, each row's liveness, and both
+/// totals. Same refusals as [`get_register`]: 409 `payroll_run_not_finalized`
+/// for a Draft or Calculated run, 404 for an unknown or cross-Employer id.
+pub(crate) async fn get_register_pdf(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+
+    let register =
+        payroll_app::get_payroll_register(state.db(), &employer_id, &payroll_run_id).await?;
+    let filename = format!("register-{}.pdf", register.payroll_run_id);
+    let bytes = render_register(&register_to_render_input(register));
+
+    Ok(pdf_response(bytes, &filename))
+}
+
+/// `GET /api/employers/{e}/payroll-runs/{r}/payment-summary.pdf` (issue
+/// #83): the same Live-only rows [`get_payment_summary`] answers as JSON,
+/// printed — portrait, names and net pay, the excluded-as-reversed count,
+/// and every acceptance-criterion sentence README.md's own Payment Summary
+/// spec names. Same refusals as [`get_payment_summary`].
+pub(crate) async fn get_payment_summary_pdf(
+    State(state): State<AppState>,
+    context: AuthorizedEmployerContext,
+    Path((_employer_id, payroll_run_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let employer_id = EmployerId::new(context.employer_id().as_str());
+
+    let summary =
+        payroll_app::get_payment_summary(state.db(), &employer_id, &payroll_run_id).await?;
+    let filename = format!("payment-summary-{}.pdf", summary.payroll_run_id);
+    let bytes = render_payment_summary(&payment_summary_to_render_input(summary));
+
+    Ok(pdf_response(bytes, &filename))
 }

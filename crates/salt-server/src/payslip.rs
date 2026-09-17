@@ -90,8 +90,11 @@ pub(crate) async fn get_payroll_run_payslips(
 /// Builds the PDF response: `Content-Type: application/pdf`, an attachment
 /// `Content-Disposition` naming the file, and `Cache-Control: no-store` —
 /// the acceptance criterion that the response itself is never cacheable, on
-/// top of `salt-server` simply never writing the bytes anywhere.
-fn pdf_response(bytes: Vec<u8>, filename: &str) -> Response {
+/// top of `salt-server` simply never writing the bytes anywhere. `pub(crate)`
+/// so `run_outputs.rs`'s own register/payment-summary PDF handlers (issue
+/// #83) can build the exact same response shape rather than keeping a
+/// second copy of it.
+pub(crate) fn pdf_response(bytes: Vec<u8>, filename: &str) -> Response {
     let mut response = Response::new(Body::from(bytes));
     let headers = response.headers_mut();
     headers.insert(

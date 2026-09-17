@@ -35,10 +35,12 @@ mod payroll_error;
 mod payroll_runs;
 mod payslip;
 mod payslip_render;
+mod pdf_layout;
 mod person_particulars;
 mod request_id;
 mod router;
 mod run_outputs;
+mod run_outputs_render;
 mod session;
 mod standing_pay_items;
 mod state;
@@ -49,15 +51,16 @@ pub use error::ApiError;
 pub use router::build_router;
 pub use state::AppState;
 
-/// Shared PDF-inspection helpers (issue #82 review): `payslip_render`'s own
-/// unit tests use these directly, via `cfg(test)`; this re-export, gated on
-/// the same `test-support` feature `router.rs`'s own test-only route
-/// already uses, is what lets `tests/payslip.rs` — a separate crate,
+/// Shared PDF-inspection helpers (issue #82 review, moved to `pdf_layout`
+/// issue #83): every PDF renderer's own unit tests use these directly, via
+/// `cfg(test)`; this re-export, gated on the same `test-support` feature
+/// `router.rs`'s own test-only route already uses, is what lets
+/// `tests/payslip.rs` and `tests/run_outputs.rs` — separate crates,
 /// compiling `salt-server` as an ordinary dependency, never with
 /// `cfg(test)` true — reach the very same parser rather than keeping a
 /// second copy of it.
 #[cfg(feature = "test-support")]
-pub use payslip_render::{TextPlacement, rendered_text, text_placements};
+pub use pdf_layout::{TextPlacement, rendered_text, text_placements};
 
 /// ADR-0018's invariant, and the shortest thing a reviewer of issue #45
 /// checks: `salt-server`'s manifest carries no `sqlx`. Asserted here rather
