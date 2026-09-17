@@ -4,7 +4,7 @@ Mark a step [x] when its commit is made. Add the commit hash after it.
 Write notes (decisions, surprises, blockers) under the step.
 
 [x] 1  Register and payment summary read models (payroll-app) 16ce096
-[ ] 2  Register and payment summary JSON routes (salt-server)
+[x] 2  Register and payment summary JSON routes (salt-server) 41ac436
 [ ] 3  Batch payslips PDF (payroll-app + salt-server)
 [ ] 4  Register and payment summary PDFs (salt-server)
 [ ] 5  Outputs on the finalized run screen (web)
@@ -13,6 +13,22 @@ Write notes (decisions, surprises, blockers) under the step.
 [ ] 7b Harden the run outputs of #83
 
 Notes:
+
+Step 2 (41ac436): serde's enum-level `rename_all` only renames variant
+tags, not the fields of a struct variant — `LivenessDto::Reversed`
+needed its own `#[serde(rename_all = "camelCase")]` on the variant to
+get `reversedAt`/`replacedBy` instead of the snake_case field names;
+caught by asserting on the raw JSON in a test, not just status codes.
+Money totals reused payroll_runs::FiguresDto/figures_to_dto rather than
+inventing a second shape, same as the step file asked, by rebuilding a
+PayrollFigures from PayrollRegisterTotals's identical field set first.
+tests/payroll_journey.rs hand-maintains a full route table plus three
+"every route" loops (401, PayrollOperator reachability, CSRF header for
+mutating routes); adding the two GET routes required updating the table
+and the first two loops (the CSRF loop is mutating-routes-only, so left
+alone) — that file's own doc comment says as much, but it's easy to
+miss since `cargo test` only fails on it once the whole workspace suite
+runs, not from building this crate alone.
 
 Step 1 (16ce096): RunKind was pub(crate) — made it pub, plus made
 RunKind::from_column, RunStatus::from_column and parse_payroll_run_id
